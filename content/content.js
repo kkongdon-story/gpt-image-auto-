@@ -221,31 +221,53 @@
 
   // 타임아웃 후 사용자에게 "계속 or 중지" 묻는 결정 UI
   // 반환값: 'continue' | 'stop'
+  //
+  // [버그 수정] 이전 구현의 두 가지 문제:
+  // 1) ✕ 버튼 클릭 시 panel만 숨기고 Promise는 영원히 resolve되지 않아 processNext 영구 중단
+  // 2) 실행 재시작 시 이전 리스너가 잔류 → 클릭 시 두 개의 cleanup이 동시 실행
+  //    → `resolved` 가드로 중복 resolve 차단, cleanup에서 리스너 반드시 제거
   function waitForUserDecision(promptIdx, totalCount) {
     return new Promise((resolve) => {
       const panel = getOrCreatePanel();
       panel.style.display = 'block';
 
       const decisionDiv = document.getElementById('gpt-auto-decision');
-      const msgEl = document.getElementById('gpt-auto-decision-msg');
+      const msgEl     = document.getElementById('gpt-auto-decision-msg');
       const btnContinue = document.getElementById('gpt-auto-btn-continue');
-      const btnStop = document.getElementById('gpt-auto-btn-stop');
+      const btnStop     = document.getElementById('gpt-auto-btn-stop');
+      const closeBtn    = document.getElementById('gpt-auto-close');
 
       msgEl.textContent = `⏱ #${promptIdx + 1} 이미지 감지 안 됨. 다음 프롬프트로 이동할까요?`;
       decisionDiv.style.display = 'block';
 
-      // cleanup을 먼저 선언 → onContinue/onStop이 안전하게 참조
+      let resolved = false; // 중복 resolve 방지 가드
+
       const cleanup = (resolveWith) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(autoTimer);
         decisionDiv.style.display = 'none';
         btnContinue.removeEventListener('click', onContinue);
         btnStop.removeEventListener('click', onStop);
+        closeBtn.removeEventListener('click', onClose);
+        console.log(`[GPT-Auto] 결정: ${resolveWith} (#${promptIdx + 1})`);
         resolve(resolveWith);
       };
+
       const onContinue = () => cleanup('continue');
-      const onStop = () => cleanup('stop');
+      const onStop     = () => cleanup('stop');
+      // ✕ 닫기 = "다음으로 계속" 으로 해석 (hang 방지)
+      const onClose    = () => { console.log('[GPT-Auto] ✕ 닫힘 → 자동 계속'); cleanup('continue'); };
+
+      // 30초 무응답 시 자동으로 계속 진행 (사용자가 자리를 비웠을 때 안전망)
+      const autoTimer = setTimeout(() => {
+        console.log('[GPT-Auto] 결정 30초 초과 → 자동 계속');
+        cleanup('continue');
+      }, 30_000);
 
       btnContinue.addEventListener('click', onContinue);
       btnStop.addEventListener('click', onStop);
+      closeBtn.addEventListener('click', onClose);
     });
   }
 
@@ -313,8 +335,8 @@
   window.__gptAutoStop = () => {
     aborted = true;
     running = false;
-    // v2.1: ChatGPT 정지 버튼 자동 클릭 (생성 중이면 즉시 중단)
-    const stopBtn = findStopButton();
+    // 실제 버튼만 클릭 (.result-streaming div는 클릭 무효이므로 제외)
+    const stopBtn = findClickableStopButton();
     if (stopBtn) stopBtn.click();
     updatePanel(currentIndex, queue.length, '중지됨');
   };
@@ -349,14 +371,17 @@
   }
 
   async function processNext() {
-    // v2.1: SW 재시작 후 stopRequested 플래그 확인 (안전망)
+    // SW 재시작 후 stopRequested 플래그 확인 (안전망)
     try {
       const s = await chrome.storage.session.get('stopRequested');
       if (s.stopRequested) { aborted = true; }
     } catch (e) {}
 
+    console.log(`[GPT-Auto] ▶ processNext: index=${currentIndex}/${queue.length} retry=${retryCount} aborted=${aborted}`);
+
     if (aborted || currentIndex >= queue.length) {
       running = false;
+      console.log(`[GPT-Auto] ✅ 전체 완료 — success=${successCount} error=${errorCount}`);
       updatePanel(queue.length, queue.length, '완료');
       chrome.runtime.sendMessage({
         type: 'ALL_COMPLETE',
@@ -389,7 +414,7 @@
         await attachImageToChat(attachImages);
       }
 
-      // v2.2: 첨부 완료 후 / 타이핑 직전 aborted 체크 (첨부 대기 중 stop 버튼 대비)
+      // 첨부 완료 후 / 타이핑 직전 aborted 체크 (첨부 대기 중 stop 버튼 대비)
       if (aborted) return processNext();
       await typePrompt(prompt);
       await sleep(500);
@@ -398,6 +423,7 @@
       const prevUrlSet = new Set(getDownloadableUrls()); // 전송 직전 URL 스냅샷 (실행분 수집 기준선)
       imgCountSnapshot = getAssistantImageCount(); // 전송 직전 DOM 카운트 스냅샷 (완료 감지용)
       imgCountMax = imgCountSnapshot;
+      console.log(`[GPT-Auto] 전송 직전 imgCountSnapshot=${imgCountSnapshot}`);
       await clickSend();
 
       const waitLabel = noImgWaitMs >= 60000
@@ -406,18 +432,22 @@
       sendProgress(`이미지 생성 중... (${waitLabel})`);
       lastResult = await waitForCompletion();
 
+      console.log(`[GPT-Auto] waitForCompletion 결과: "${lastResult}" (index=${currentIndex} retry=${retryCount})`);
+
       if (lastResult === 'image') {
         successCount++;
         captureNewRunImages(prevUrlSet); // 완료 직후 즉시 수집 — 아직 DOM에 있을 때
         sendProgress('완료');
       } else if ((lastResult === 'text' || lastResult === 'timeout') && retryCount < 1) {
-        // v2.1: 이미지 실패 시 1회 자동 재시도 (같은 카드, currentIndex 유지)
+        // 이미지 실패 시 1회 자동 재시도 (같은 카드, currentIndex 유지)
         retryCount++;
+        console.log(`[GPT-Auto] 자동 재시도 (${retryCount}/1): index=${currentIndex}`);
         sendProgress(`재시도 중... (${retryCount}/1)`);
         await sleep(RETRY_DELAY_MS);
         return processNext(); // 재귀 재진입 — retryCount는 전역이므로 보존됨
-      } else if (lastResult === 'text') {
+      } else if (lastResult === 'text' || lastResult === 'timeout') {
         // 재시도 후에도 이미지 미감지 → 사용자에게 계속 여부 확인
+        console.log(`[GPT-Auto] 재시도 후에도 실패 → 사용자 결정 대기`);
         sendProgress('이미지 미감지 — 대기 중...');
         const decision = await waitForUserDecision(currentIndex, queue.length);
         if (decision === 'stop') {
@@ -433,10 +463,12 @@
           return; // processNext 루프 종료
         }
         // 'continue': successCount 증가 없이 다음으로 이동
+        console.log(`[GPT-Auto] 건너뜀 → 다음 index=${currentIndex + 1}`);
         sendProgress('건너뜀');
       } else if (lastResult === 'aborted') {
-        // v2.2: 정지 요청으로 인한 종료 — 에러 카운트 증가 없음
+        // 정지 요청으로 인한 종료 — 에러 카운트 증가 없음
         // processNext() 최상단의 aborted 체크가 루프를 즉시 종료시킴
+        console.log('[GPT-Auto] aborted 감지 → 루프 종료 대기');
       } else if (lastResult === 'error') {
         errorCount++;
         sendProgress('오류');
@@ -445,24 +477,28 @@
           error: `프롬프트 #${currentIndex + 1}: ChatGPT 오류 (rate limit 또는 생성 실패)`
         });
       } else {
+        // 알 수 없는 결과 (timeout 폴백)
         errorCount++;
         sendProgress('타임아웃');
+        console.warn(`[GPT-Auto] 알 수 없는 lastResult: "${lastResult}"`);
       }
     } catch (err) {
       lastResult = 'error';
       errorCount++;
       sendProgress('오류');
+      console.error(`[GPT-Auto] processNext 예외:`, err);
       chrome.runtime.sendMessage({
         type: 'GENERATION_ERROR',
         error: `프롬프트 #${currentIndex + 1}: ${err.message}`
       });
     }
 
-    retryCount = 0; // v2.1: 다음 카드 이동 전 반드시 리셋
+    retryCount = 0; // 다음 카드 이동 전 반드시 리셋
     currentIndex++;
+    console.log(`[GPT-Auto] 다음으로 이동: index=${currentIndex} (lastResult="${lastResult}")`);
     if (!aborted) {
       if (lastResult === 'error') {
-        // rate limit 대비: 60초 카운트다운 (net-hook 감지 여부와 무관하게 항상 대기)
+        // rate limit 대비: 60초 카운트다운
         for (let i = 60; i > 0 && !aborted; i--) {
           updatePanel(currentIndex, queue.length, `rate limit 대기 ${i}초...`);
           await sleep(1000);
@@ -720,7 +756,8 @@
     return 'text';
   }
 
-  // stop 버튼 멀티셀렉터 — ChatGPT DOM 변경 대비 폴백 체인
+  // 생성 중 상태 감지 전용 — .result-streaming 포함 (클릭 금지)
+  // checkCompletion의 "아직 생성 중" 판단에만 사용
   function findStopButton() {
     const candidates = [
       '[data-testid="stop-button"]',
@@ -730,6 +767,23 @@
       'button[aria-label*="중지"]',
       'button[aria-label*="멈추"]',
       '.result-streaming',
+    ];
+    for (const sel of candidates) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  // 실제 클릭 가능한 중지 버튼만 반환 — .result-streaming(div)은 제외
+  function findClickableStopButton() {
+    const candidates = [
+      '[data-testid="stop-button"]',
+      '[data-testid="stop-streaming-button"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="stop"]',
+      'button[aria-label*="중지"]',
+      'button[aria-label*="멈추"]',
     ];
     for (const sel of candidates) {
       const el = document.querySelector(sel);
@@ -799,7 +853,7 @@
   }
 
   function sendProgress(status) {
-    const isDone = status === '완료' || status === '타임아웃' || status === '오류';
+    const isDone = status === '완료' || status === '타임아웃' || status === '오류' || status === '건너뜀';
     const current = currentIndex + (isDone ? 1 : 0);
     const total = queue.length;
 

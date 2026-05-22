@@ -37,6 +37,7 @@ const rows = [];
 const attachedImages = Array.from({ length: PROMPT_COUNT }, () => []); // string[] (0~3개), 세션 메모리만
 let dragSrcIndex = null;
 let failedIndices = new Set();
+let currentSelectedIndices = []; // 실행 중인 선택 인덱스 매핑 (큐 인덱스 → inputs[] 인덱스)
 
 // ── 전역 참고 양식 이미지 ──────────────────────────
 // localStorage에 base64로 저장. 실행 시 모든 카드 images 배열 앞에 자동 prepend
@@ -417,6 +418,7 @@ btnRun.addEventListener('click', () => {
     .map((_, i) => i)
     .filter(i => checkboxes[i].checked && inputs[i].value.trim().length > 0);
 
+  currentSelectedIndices = selectedIndices; // PROGRESS_UPDATE 인덱스 역매핑용
   const prompts = selectedIndices.map(i => inputs[i].value.trim());
   // 전역 참고 이미지가 있으면 각 카드의 첨부 배열 맨 앞에 자동 삽입
   const images = selectedIndices.map(i => {
@@ -497,10 +499,11 @@ chrome.runtime.onMessage.addListener((msg) => {
       setRunningUI(true);
     }
     updateProgress(msg.current, msg.total, msg.status);
-    highlightPrompt(msg.currentIndex, msg.status);
+    const inputIdx = currentSelectedIndices[msg.currentIndex] ?? msg.currentIndex;
+    highlightPrompt(inputIdx, msg.status);
 
     if (msg.status === '오류') {
-      failedIndices.add(msg.currentIndex);
+      failedIndices.add(inputIdx);
     }
   }
 
@@ -657,19 +660,39 @@ function retryPrompt(index) {
 
   const retryBtn = rows[index].querySelector('.btn-retry');
   if (retryBtn) retryBtn.remove();
-
   failedIndices.delete(index);
 
-  chrome.runtime.sendMessage({
-    type: 'START_GENERATION',
-    prompts: [promptText],
-    waitMode: selectedMode
-  }, (response) => {
-    if (chrome.runtime.lastError) {
+  const globalPrompt = globalPromptInput.value.trim();
+  const cardImgs = attachedImages[index];
+  const images = [globalRefImage ? [globalRefImage, ...cardImgs] : cardImgs];
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tabId = tabs[0]?.id;
+    if (!tabId) {
       showError('ChatGPT 탭을 찾을 수 없습니다.');
       inputs[index].classList.remove('active');
       inputs[index].classList.add('error');
+      return;
     }
+
+    currentSelectedIndices = [index]; // 재시도 단일 카드 매핑
+    chrome.runtime.sendMessage({
+      type: 'START_GENERATION',
+      prompts: [promptText],
+      globalPrompt,
+      images,
+      waitMode: selectedMode,
+      sizeRatio:   selectedRatio,
+      stylePreset: styleSelect.value || null,
+      fontPreset:  fontSelect.value  || null,
+      tabId
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        showError('ChatGPT 탭을 찾을 수 없습니다.');
+        inputs[index].classList.remove('active');
+        inputs[index].classList.add('error');
+      }
+    });
   });
 }
 
@@ -773,7 +796,7 @@ function parseBySections(text) {
     // 번호 없는 헤딩("Official Documentation Context" 등) → 무시
   }
 
-  result.prompts = slots.filter(s => s.length > 0);
+  result.prompts = slots; // 위치 정보 보존 (길이 항상 PROMPT_COUNT)
   return result;
 }
 
@@ -834,7 +857,6 @@ function parseByInlinePatterns(text) {
 
 /** 파싱 결과를 팝업 입력 필드에 적용 */
 function applyMdImport(parsed) {
-  // 전역 지침 적용
   if (parsed.global) {
     globalPromptInput.value = parsed.global;
     localStorage.setItem(GLOBAL_PROMPT_KEY, parsed.global);
@@ -842,24 +864,34 @@ function applyMdImport(parsed) {
     globalPromptInput.style.height = globalPromptInput.scrollHeight + 'px';
   }
 
-  // 개별 프롬프트 적용 — 인식된 순서대로 슬롯 채우기
+  // parseBySections → 길이 10 희소 배열 (위치 보존)
+  // parseByInlinePatterns → 길이 < 10 컴팩트 배열 (순차 배치)
+  const isSparse = parsed.prompts.length === PROMPT_COUNT;
+
   parsed.prompts.forEach((text, i) => {
-    if (!text || i >= PROMPT_COUNT) return;
-    inputs[i].value = text;
-    inputs[i].style.height = 'auto';
-    inputs[i].style.height = inputs[i].scrollHeight + 'px';
-    checkboxes[i].checked = true;
+    if (i >= PROMPT_COUNT) return;
+    if (text) {
+      inputs[i].value = text;
+      inputs[i].style.height = 'auto';
+      inputs[i].style.height = inputs[i].scrollHeight + 'px';
+      checkboxes[i].checked = true;
+    } else if (isSparse) {
+      // 희소 배열: 빈 슬롯은 체크 해제 (해당 카드 번호가 MD에 없음)
+      checkboxes[i].checked = false;
+    }
   });
 
-  // 인식된 프롬프트 이후 남은 슬롯은 체크 해제
-  for (let i = parsed.prompts.length; i < PROMPT_COUNT; i++) {
-    checkboxes[i].checked = false;
+  // 컴팩트 배열: 뒤쪽 남은 슬롯 체크 해제
+  if (!isSparse) {
+    for (let i = parsed.prompts.length; i < PROMPT_COUNT; i++) {
+      checkboxes[i].checked = false;
+    }
   }
 
   savePrompts();
   updateSelectCount();
 
-  const count = parsed.prompts.length;
+  const count = parsed.prompts.filter(Boolean).length;
   const globalLabel = parsed.global ? '전역 지침 + ' : '';
   showToast(`📄 ${globalLabel}프롬프트 ${count}개 불러오기 완료`);
 }

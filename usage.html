@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cardnews Studio 사용방법</title>
+    <style>
+      :root {
+        background: #f6f7f9;
+        color: #18191b;
+        font-family: "Pretendard", "Segoe UI", "Malgun Gothic", sans-serif;
+        line-height: 1.7;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      main { margin: 0 auto; max-width: 1040px; padding: 44px 24px 72px; }
+      header { border-bottom: 1px solid rgba(0, 0, 0, 0.1); margin-bottom: 28px; padding-bottom: 24px; }
+      h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.08; margin: 0 0 12px; }
+      h2 { font-size: 24px; margin: 34px 0 12px; }
+      h3 { font-size: 18px; margin: 18px 0 8px; }
+      p { margin: 0 0 12px; }
+      code, pre { background: #eef0f4; border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 6px; color: #233; font-family: "Cascadia Mono", Consolas, monospace; }
+      code { padding: 2px 5px; }
+      pre { overflow: auto; padding: 14px; white-space: pre-wrap; }
+      table { background: #fff; border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid rgba(0, 0, 0, 0.1); padding: 10px 12px; text-align: left; vertical-align: top; }
+      th { background: #f0f2f5; }
+      .eyebrow { color: #6c5cff; font-size: 13px; font-weight: 800; margin-bottom: 8px; text-transform: uppercase; }
+      .summary { color: #535862; font-size: 18px; max-width: 780px; }
+      .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+      .card { background: #fff; border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08); padding: 18px; }
+      .step { background: #6c5cff; border-radius: 999px; color: #fff; display: inline-flex; font-size: 13px; font-weight: 800; margin-bottom: 10px; padding: 3px 10px; }
+      .notice { background: #fff8df; border: 1px solid #e0c46c; border-radius: 8px; padding: 16px; }
+      footer { border-top: 1px solid rgba(0, 0, 0, 0.1); color: #535862; font-size: 13px; margin-top: 40px; padding-top: 16px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Cardnews Studio v4 Guide</p>
+        <h1>정보형 카드뉴스 제작기 사용방법</h1>
+        <p class="summary">
+          카드 문법 텍스트를 입력하고, 스타일·비율·배경·카드별 디자인값을 조절하면
+          로컬 PC에서 카드뉴스 PNG를 생성합니다.
+        </p>
+      </header>
+
+      <section>
+        <h2>1. 실행</h2>
+        <div class="grid">
+          <div class="card">
+            <span class="step">설치형</span>
+            <p><code>release/Cardnews-Studio-Setup-1.0.0.exe</code>를 실행해 설치합니다.</p>
+          </div>
+          <div class="card">
+            <span class="step">무설치</span>
+            <p><code>release/win-unpacked/Cardnews Studio.exe</code>를 바로 실행합니다.</p>
+          </div>
+          <div class="card">
+            <span class="step">개발</span>
+            <pre><code>npm run dev</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>2. 기본 제작 순서</h2>
+        <div class="grid">
+          <div class="card"><span class="step">1</span><h3>스타일과 비율 선택</h3><p>상단에서 스타일과 1:1, 4:5, 16:9, 4:3 비율을 고릅니다.</p></div>
+          <div class="card"><span class="step">2</span><h3>헤더와 멘션 입력</h3><p>상단 헤더 라벨과 하단 계정명을 입력합니다.</p></div>
+          <div class="card"><span class="step">3</span><h3>카드 내용 작성</h3><p>좌측 썸네일에서 카드를 고르고 우측 콘텐츠 탭에 라벨 문법으로 작성합니다.</p></div>
+          <div class="card"><span class="step">4</span><h3>PNG 생성</h3><p><strong>PNG 생성</strong>을 누른 뒤 경고/실패를 확인하고 PNG 또는 ZIP으로 내보냅니다.</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>3. 카드 텍스트 문법</h2>
+        <table>
+          <thead><tr><th>라벨</th><th>설명</th><th>예시</th></tr></thead>
+          <tbody>
+            <tr><td><code>유형:</code></td><td>표지, 본문, 마무리 중 하나입니다.</td><td><code>유형: 표지</code></td></tr>
+            <tr><td><code>제목:</code></td><td>필수 제목입니다.</td><td><code>제목: 돈 이야기를 다시 배워야 하는 이유</code></td></tr>
+            <tr><td><code>소제목:</code></td><td>제목 아래 보조 문장입니다.</td><td><code>소제목: 숫자보다 먼저 보는 관점</code></td></tr>
+            <tr><td><code>배지:</code></td><td>작은 라벨 pill입니다.</td><td><code>배지: MONEY NOTE</code></td></tr>
+            <tr><td><code>본문:</code></td><td>문단과 불릿입니다. <code>-</code>로 시작하면 불릿이 됩니다.</td><td><code>본문: 첫 문장<br />- 첫 번째 불릿</code></td></tr>
+            <tr><td><code>출처:</code></td><td>작은 보조 출처입니다.</td><td><code>출처: 내부 메모</code></td></tr>
+            <tr><td><code>강조:</code></td><td>강조 박스로 표시됩니다.</td><td><code>강조: 저장하고 다시 보기</code></td></tr>
+          </tbody>
+        </table>
+        <pre><code>유형: 본문
+배지: MONEY NOTE
+제목: 카드뉴스의 *핵심* 문장
+소제목: 숫자보다 먼저 보는 관점
+본문: 첫 번째 문단을 씁니다.
+- 자동 불릿 예시
+- 두 번째 불릿 예시
+출처: 내부 메모
+강조: 저장하고 다시 보기</code></pre>
+      </section>
+
+      <section>
+        <h2>4. 디자인 조절</h2>
+        <div class="grid">
+          <div class="card"><h3>전역 배경</h3><p>배경 이미지 패널에서 파일을 추가하거나 Pixabay 검색을 사용합니다. 추가된 이미지는 라이브러리 id로 저장됩니다.</p></div>
+          <div class="card"><h3>폰트</h3><p>디자인 탭의 폰트 패널에서 <code>ttf</code>, <code>otf</code>, <code>woff2</code> 파일을 추가하고 선택합니다. 선택한 폰트는 미리보기와 PNG 렌더에 함께 적용됩니다.</p></div>
+          <div class="card"><h3>카드별 디자인</h3><p>카드 패널의 <strong>디자인</strong> 탭에서 카드별 배경, 밝기, 대비, 채도, 텍스트 크기, 굵기, 기울기, 정렬, 간격, 어둡기를 조절합니다.</p></div>
+          <div class="card"><h3>레이어</h3><p>카드별 디자인 탭에서 텍스트 박스, 모형, 선, 이미지를 추가합니다. X/Y/W/H 값은 카드 크기 대비 퍼센트로 입력합니다.</p></div>
+          <div class="card"><h3>레일 크기</h3><p>좌측 썸네일 레일과 스테이지 사이의 핸들을 드래그하면 썸네일 폭이 바뀌고 작업 상태에 저장됩니다.</p></div>
+          <div class="card"><h3>품질 게이트</h3><p>대비·오버플로·폰트 하한은 실패로 막고, 폰트 종류·경계 대비 같은 항목은 경고로 표시합니다.</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>5. 외부 AI 스타일 추가</h2>
+        <ol>
+          <li><strong>design.md 내보내기</strong>를 눌러 스타일 계약 문서를 저장합니다.</li>
+          <li>JSON 구조가 궁금하면 <strong>샘플 JSON</strong>을 눌러 기본값을 먼저 확인합니다.</li>
+          <li>웹 챗봇이나 바이브코더에 design.md와 레퍼런스 이미지를 첨부합니다.</li>
+          <li>응답으로 받은 JSON 코드블록을 <strong>스타일 관리</strong> textarea에 붙여넣습니다.</li>
+          <li><strong>JSON 스타일 등록</strong>을 누르면 상단 스타일 드롭다운의 내 스타일로 추가됩니다.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>6. Pixabay 무료 이미지</h2>
+        <p>Pixabay API 키를 저장하면 앱 안에서 검색하고 이미지를 바로 배경 라이브러리에 등록할 수 있습니다.</p>
+        <p>키가 없으면 같은 검색어로 Pixabay 웹페이지를 브라우저에서 열어줍니다. 내려받은 파일은 <strong>파일 추가</strong>로 등록합니다.</p>
+        <div class="notice">API 키는 렌더러 화면에 직접 노출하지 않고 main 프로세스 설정 파일에 저장됩니다.</div>
+      </section>
+
+      <section>
+        <h2>7. CSV 대량 생성</h2>
+        <ol>
+          <li>내보내기 탭에서 <strong>CSV 템플릿</strong>을 저장합니다.</li>
+          <li><code>output_name</code>, <code>header_label</code>, <code>footer_account</code>, <code>style_id</code>, <code>aspect_ratio</code>, <code>card_01</code>, <code>card_02</code>는 필수입니다.</li>
+          <li>선택 컬럼으로 <code>accent</code>, <code>background</code>, <code>dim</code>, <code>font_id</code>, <code>card_03</code>부터 <code>card_10</code>까지 사용할 수 있습니다.</li>
+          <li>작성한 CSV를 불러오거나 textarea에 붙여넣고 <strong>BULK PNG</strong>를 누릅니다.</li>
+          <li>행 단위 오류는 <code>bulk-report.json</code>, <code>bulk-report.csv</code>에 남고, 유효한 행은 계속 렌더됩니다.</li>
+        </ol>
+      </section>
+
+      <footer>
+        Cardnews Studio는 생성물과 설정을 로컬 사용자 데이터 폴더에 저장합니다. Pretendard 번들 폰트 고지는 THIRD_PARTY_NOTICES.md와 fonts/NOTICE.md를 확인하세요.
+      </footer>
+    </main>
+  </body>
+</html>

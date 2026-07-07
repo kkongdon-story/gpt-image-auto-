@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "outDir": "dist-electron",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": [
+    "electron/main.ts",
+    "electron/preload.cts",
+    "src/domain/**/*.ts",
+    "src/render-engine/**/*.ts",
+    "src/storage/**/*.ts"
+  ],
+  "exclude": ["src/**/*.test.ts"]
+}

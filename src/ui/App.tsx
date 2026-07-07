@@ -1,0 +1,1885 @@
+// noqa: SIZE_OK - v4 release keeps the integrated app shell stable; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from "react";
+import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
+import { parseCardText } from "../domain/cardParser";
+import { buildBulkCsvTemplate } from "../domain/csvBulk";
+import { buildTemplateDocument, parseDeckDocument } from "../domain/deckImporter";
+import type {
+  AppSettings,
+  BackgroundLibraryItem,
+  BulkRenderResult,
+  Card,
+  CardLayer,
+  CardOverride,
+  CardOverrideMap,
+  CardnewsError,
+  CardnewsResult,
+  DeckDraft,
+  Deck,
+  DeckPreset,
+  FontData,
+  FontLibraryItem,
+  RenderJobResult,
+  StockImage,
+  StockImageDownloadInput,
+  StylePresetRecord,
+  WorkspaceState
+} from "../domain/types";
+import { buildCardHtml, buildFontFaceCss } from "../render-engine/cardTemplate";
+import { buildDesignContract, buildSampleStyleJson, parseStyleJson } from "../render-engine/customStyles";
+import {
+  accentSwatches,
+  defaultStyleId,
+  resolveStylePreset,
+  stylePresets
+} from "../render-engine/stylePresets";
+
+const maxCards = 12;
+const defaultHeaderLabel = "MONEY NOTE";
+const defaultFooterAccount = "@kkongdon_story";
+
+type InspectorTab = "design" | "content" | "export";
+type CardEditorTab = "content" | "design";
+
+type ParsedCardEntry = {
+  readonly card: Card;
+  readonly error: CardnewsError | undefined;
+};
+
+function isCardnewsError<T>(result: CardnewsResult<T>): result is CardnewsError {
+  return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
+}
+
+const initialCards = Array.from({ length: 10 }, (_, index) => {
+  const number = index + 1;
+  if (number === 1) {
+    return "유형: 표지\n배지: MONEY NOTE\n제목: 돈 이야기를 *다시* 배워야 하는 이유\n소제목: 숫자보다 먼저 보는 관점";
+  }
+
+  if (number === 10) {
+    return "유형: 마무리\n제목: 오늘의 질문\n본문: - 지금 내 소비에서 반복되는 감정은?\n- 다음 카드뉴스 주제로 남길 것은?\n강조: 저장하고 다시 보기";
+  }
+
+  return `유형: 본문\n제목: 카드 ${number}의 *핵심* 문장\n본문: 첫 번째 문단을 여기에 씁니다.\n- 자동 불릿 예시\n- 두 번째 불릿 예시\n출처: 내부 메모`;
+});
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+
+  return debounced;
+}
+
+function StageCanvas({
+  html,
+  cardWidth,
+  cardHeight
+}: {
+  readonly html: string;
+  readonly cardWidth: number;
+  readonly cardHeight: number;
+}): ReactElement {
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(0.4);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width > 0) {
+        setScale(width / cardWidth);
+      }
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [cardWidth]);
+
+  return (
+    <div
+      className="stage-canvas"
+      ref={canvasRef}
+      style={{
+        aspectRatio: `${cardWidth} / ${cardHeight}`,
+        height: `min(calc(100vh - 170px), calc((100vw - 560px) * ${(cardHeight / cardWidth).toFixed(4)}))`
+      }}
+    >
+      <iframe
+        title="selected-card"
+        srcDoc={html}
+        scrolling="no"
+        style={{ width: cardWidth, height: cardHeight, transform: `scale(${scale})` }}
+      />
+    </div>
+  );
+}
+
+function fallbackCard(index: number, error: CardnewsError): Card {
+  return {
+    index,
+    type: "body",
+    title: `카드 ${index} 입력 확인`,
+    paragraphs: [error.message],
+    bullets: []
+  };
+}
+
+export function App(): ReactElement {
+  const [headerLabel, setHeaderLabel] = useState(defaultHeaderLabel);
+  const [footerAccount, setFooterAccount] = useState(defaultFooterAccount);
+  const [cards, setCards] = useState<readonly string[]>(initialCards);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [styleId, setStyleId] = useState<string>(defaultStyleId);
+  const [aspectRatioId, setAspectRatioId] = useState<string>(defaultAspectRatioId);
+  const [fontCss, setFontCss] = useState<string | null>(null);
+  const [customAccent, setCustomAccent] = useState<string | null>(null);
+  const [customDim, setCustomDim] = useState<number | null>(null);
+  const [backgroundId, setBackgroundId] = useState<string | null>(null);
+  const [overrides, setOverrides] = useState<CardOverrideMap>({});
+  const [backgroundPreviews, setBackgroundPreviews] = useState<Readonly<Record<string, string>>>({});
+  const [backgroundLibrary, setBackgroundLibrary] = useState<readonly BackgroundLibraryItem[]>([]);
+  const [backgroundPreview, setBackgroundPreview] = useState<string | null>(null);
+  const [fontLibrary, setFontLibrary] = useState<readonly FontLibraryItem[]>([]);
+  const [selectedFontId, setSelectedFontId] = useState<string | null>(null);
+  const [customStyles, setCustomStyles] = useState<readonly StylePresetRecord[]>([]);
+  const [styleJsonInput, setStyleJsonInput] = useState("");
+  const [styleWarnings, setStyleWarnings] = useState<readonly string[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({});
+  const [pixabayApiKeyDraft, setPixabayApiKeyDraft] = useState("");
+  const [stockSearchOpen, setStockSearchOpen] = useState(false);
+  const [stockQuery, setStockQuery] = useState("money background");
+  const [stockImages, setStockImages] = useState<readonly StockImage[]>([]);
+  const [stockFallbackUrl, setStockFallbackUrl] = useState<string | null>(null);
+  const [stockLoading, setStockLoading] = useState(false);
+  const [railWidth, setRailWidth] = useState(150);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("design");
+  const [cardEditorTab, setCardEditorTab] = useState<CardEditorTab>("content");
+  const [presets, setPresets] = useState<readonly DeckPreset[]>([]);
+  const [selectedPresetName, setSelectedPresetName] = useState("");
+  const [presetName, setPresetName] = useState("");
+  const [status, setStatus] = useState("카드를 입력하면 미리보기가 실시간으로 갱신됩니다.");
+  const [renderResult, setRenderResult] = useState<RenderJobResult | null>(null);
+  const [bulkCsvText, setBulkCsvText] = useState("");
+  const [bulkResult, setBulkResult] = useState<BulkRenderResult | null>(null);
+  const [approvedJobId, setApprovedJobId] = useState<string | null>(null);
+  const [isRendering, setIsRendering] = useState(false);
+  const workspaceReady = useRef(false);
+
+  const preset = resolveStylePreset(styleId, customStyles);
+  const accentColor = customAccent ?? preset.accentDefault;
+  const backgroundDim = customDim ?? preset.defaultDim;
+  const cardRatio = findAspectRatio(aspectRatioId);
+  const allStyleEntries = useMemo(
+    () => [
+      ...stylePresets.map((style) => ({ id: style.id, name: style.name, group: "기본" })),
+      ...customStyles.map((style) => ({ id: style.id, name: style.name, group: "내 스타일" }))
+    ],
+    [customStyles]
+  );
+  const styleNameEntries = useMemo(
+    () => allStyleEntries.map((style) => ({ id: style.id, name: style.name })),
+    [allStyleEntries]
+  );
+
+  const debouncedCards = useDebouncedValue(cards, 250);
+  const debouncedHeader = useDebouncedValue(headerLabel, 250);
+  const debouncedFooter = useDebouncedValue(footerAccount, 250);
+
+  const parsedEntries = useMemo<readonly ParsedCardEntry[]>(
+    () =>
+      debouncedCards.map((rawText, index) => {
+        const parsed = parseCardText(rawText, index + 1);
+        if (isCardnewsError(parsed)) {
+          return { card: fallbackCard(index + 1, parsed), error: parsed };
+        }
+
+        return { card: parsed, error: undefined };
+      }),
+    [debouncedCards]
+  );
+
+  const previewDeck = useMemo<Deck>(
+    () => ({
+      id: "preview",
+      headerLabel: debouncedHeader.trim() || "CARD NEWS",
+      footerAccount: debouncedFooter.trim() || "@account",
+      cards: parsedEntries.map((entry) => entry.card),
+      styleId,
+      accentColor,
+      backgroundDim,
+      aspectRatio: aspectRatioId,
+      ...(backgroundId ? { backgroundId } : {}),
+      ...(selectedFontId ? { fontId: selectedFontId } : {}),
+      ...(Object.keys(overrides).length > 0 ? { overrides } : {})
+    }),
+    [
+      parsedEntries,
+      debouncedHeader,
+      debouncedFooter,
+      styleId,
+      accentColor,
+      backgroundDim,
+      aspectRatioId,
+      backgroundId,
+      selectedFontId,
+      overrides
+    ]
+  );
+
+  const previewHtmls = useMemo(
+    () =>
+      previewDeck.cards.map((card) => {
+        const override = overrides[String(card.index)];
+        const cardBackgroundId = override?.backgroundId === null ? null : override?.backgroundId ?? backgroundId;
+        return buildCardHtml({
+          assetCssUrls: backgroundPreviews,
+          backgroundCssUrl: cardBackgroundId ? backgroundPreviews[cardBackgroundId] : undefined,
+          card,
+          customStyles,
+          deck: previewDeck,
+          ...(fontCss ? { fontCss } : {}),
+          ...(override ? { override } : {})
+        });
+      }),
+    [previewDeck, backgroundId, backgroundPreviews, customStyles, overrides, fontCss]
+  );
+
+  const parseErrorCount = parsedEntries.filter((entry) => entry.error).length;
+  const selectedEntry = parsedEntries[selectedIndex];
+  const selectedCardNumber = selectedIndex + 1;
+  const selectedOverride = overrides[String(selectedCardNumber)];
+
+  // ── 시작 시 라이브러리/프리셋/워크스페이스 복원 ──
+  useEffect(() => {
+    void (async () => {
+      const [
+        libraryResult,
+        presetsResult,
+        workspaceResult,
+        customStylesResult,
+        settingsResult,
+        fontLibraryResult
+      ] = await Promise.all([
+        window.cardnews.listBackgroundLibrary(),
+        window.cardnews.listDeckPresets(),
+        window.cardnews.loadWorkspace(),
+        window.cardnews.listCustomStyles(),
+        window.cardnews.loadSettings(),
+        window.cardnews.listFontLibrary()
+      ]);
+
+      if (!isCardnewsError(libraryResult)) {
+        setBackgroundLibrary(libraryResult);
+      }
+      if (!isCardnewsError(presetsResult)) {
+        setPresets(presetsResult);
+      }
+      if (!isCardnewsError(customStylesResult)) {
+        setCustomStyles(customStylesResult);
+      }
+      if (!isCardnewsError(fontLibraryResult)) {
+        setFontLibrary(fontLibraryResult);
+      }
+      if (!isCardnewsError(settingsResult)) {
+        setSettings(settingsResult);
+        setPixabayApiKeyDraft(settingsResult.pixabayApiKey ?? "");
+      }
+
+      if (!isCardnewsError(workspaceResult) && workspaceResult) {
+        applySnapshot(workspaceResult);
+        setStatus("이전 작업을 복원했습니다.");
+      }
+
+      workspaceReady.current = true;
+
+      const restoredFontId = !isCardnewsError(workspaceResult) && workspaceResult ? workspaceResult.fontId ?? null : null;
+      await loadFontCss(restoredFontId);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 워크스페이스 자동 저장 (디바운스) ──
+  useEffect(() => {
+    if (!workspaceReady.current) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const state: WorkspaceState = {
+        headerLabel,
+        footerAccount,
+        styleId,
+        aspectRatio: aspectRatioId,
+        ...(customAccent ? { accentColor: customAccent } : {}),
+        ...(customDim !== null ? { backgroundDim: customDim } : {}),
+        ...(backgroundId ? { backgroundId } : {}),
+        ...(selectedFontId ? { fontId: selectedFontId } : {}),
+        ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+        railWidth,
+        cards,
+        selectedIndex
+      };
+      void window.cardnews.saveWorkspace(state);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [
+    cards,
+    headerLabel,
+    footerAccount,
+    styleId,
+    aspectRatioId,
+    customAccent,
+    customDim,
+    backgroundId,
+    selectedFontId,
+    overrides,
+    railWidth,
+    selectedIndex
+  ]);
+
+  useEffect(() => {
+    const ids = new Set<string>();
+    if (backgroundId) {
+      ids.add(backgroundId);
+    }
+    for (const override of Object.values(overrides)) {
+      if (override.backgroundId) {
+        ids.add(override.backgroundId);
+      }
+      for (const layer of override.layers ?? []) {
+        if (layer.kind === "image") {
+          ids.add(layer.backgroundId);
+        }
+      }
+    }
+
+    for (const id of ids) {
+      if (!backgroundPreviews[id]) {
+        void loadBackgroundPreview(id);
+      }
+    }
+  }, [backgroundId, backgroundPreviews, overrides]);
+
+  function applySnapshot(snapshot: {
+    readonly headerLabel: string;
+    readonly footerAccount: string;
+    readonly styleId: string;
+    readonly accentColor?: string;
+    readonly backgroundDim?: number;
+    readonly backgroundId?: string;
+    readonly aspectRatio?: string;
+    readonly fontId?: string;
+    readonly overrides?: CardOverrideMap;
+    readonly railWidth?: number;
+    readonly cards: readonly string[];
+    readonly selectedIndex?: number;
+  }): void {
+    setHeaderLabel(snapshot.headerLabel);
+    setFooterAccount(snapshot.footerAccount);
+    if (snapshot.styleId.trim().length > 0) {
+      setStyleId(snapshot.styleId);
+    }
+    setCustomAccent(snapshot.accentColor ?? null);
+    setCustomDim(snapshot.backgroundDim ?? null);
+    if (snapshot.aspectRatio && aspectRatios.some((ratio) => ratio.id === snapshot.aspectRatio)) {
+      setAspectRatioId(snapshot.aspectRatio);
+    }
+    setSelectedFontId(snapshot.fontId ?? null);
+
+    const nextCards = snapshot.cards.slice(0, maxCards);
+    if (nextCards.length > 0) {
+      setCards(nextCards);
+      setSelectedIndex(Math.min(snapshot.selectedIndex ?? 0, nextCards.length - 1));
+    }
+    setOverrides(snapshot.overrides ?? {});
+    if (typeof snapshot.railWidth === "number") {
+      setRailWidth(Math.min(280, Math.max(90, snapshot.railWidth)));
+    }
+
+    void applyBackgroundSelection(snapshot.backgroundId ?? null);
+  }
+
+  async function loadBackgroundPreview(nextBackgroundId: string): Promise<void> {
+    const preview = await window.cardnews.getBackgroundPreview(nextBackgroundId);
+    if (isCardnewsError(preview)) {
+      setStatus(preview.message);
+      return;
+    }
+
+    setBackgroundPreviews((current) => ({ ...current, [nextBackgroundId]: preview }));
+  }
+
+  async function applyBackgroundSelection(nextBackgroundId: string | null): Promise<void> {
+    setBackgroundId(nextBackgroundId);
+    if (nextBackgroundId === null) {
+      setBackgroundPreview(null);
+      return;
+    }
+
+    const preview = await window.cardnews.getBackgroundPreview(nextBackgroundId);
+    if (isCardnewsError(preview)) {
+      setStatus(preview.message);
+      setBackgroundPreview(null);
+      return;
+    }
+
+    setBackgroundPreview(preview);
+    setBackgroundPreviews((current) => ({ ...current, [nextBackgroundId]: preview }));
+  }
+
+  async function loadFontCss(nextFontId: string | null): Promise<void> {
+    const fontResult = await window.cardnews.getFontData(nextFontId);
+    if (isCardnewsError(fontResult)) {
+      setStatus(fontResult.message);
+      setFontCss(null);
+      return;
+    }
+
+    setFontCss(buildPreviewFontFaceCss(fontResult));
+  }
+
+  async function selectFont(nextFontId: string | null): Promise<void> {
+    setSelectedFontId(nextFontId);
+    await loadFontCss(nextFontId);
+    setStatus(nextFontId ? "사용자 폰트를 적용했습니다." : "번들 Pretendard 폰트를 적용했습니다.");
+  }
+
+  async function importFont(): Promise<void> {
+    const imported = await window.cardnews.importFontToLibrary();
+    if (isCardnewsError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+
+    const library = await window.cardnews.listFontLibrary();
+    if (!isCardnewsError(library)) {
+      setFontLibrary(library);
+    }
+    await selectFont(imported.id);
+    setStatus(`폰트 추가: ${imported.displayName}`);
+  }
+
+  function buildPreviewFontFaceCss(fontData: FontData): string {
+    const bytes = Uint8Array.from(atob(fontData.base64), (char) => char.charCodeAt(0));
+    const blobUrl = URL.createObjectURL(new Blob([bytes], { type: fontData.mimeType }));
+    return buildFontFaceCss(blobUrl, {
+      family: fontData.cssFamily,
+      format: fontData.cssFormat
+    });
+  }
+
+  async function addBackground(): Promise<void> {
+    const added = await window.cardnews.addBackgroundToLibrary();
+    if (isCardnewsError(added)) {
+      setStatus(added.message);
+      return;
+    }
+
+    const library = await window.cardnews.listBackgroundLibrary();
+    if (!isCardnewsError(library)) {
+      setBackgroundLibrary(library);
+    }
+
+    await applyBackgroundSelection(added.id);
+    setStatus(`배경 추가: ${added.displayName}`);
+  }
+
+  function updateSelectedOverride(next: CardOverride): void {
+    const key = String(selectedCardNumber);
+    setOverrides((current) => {
+      const merged = { ...(current[key] ?? {}), ...next };
+      const updated = { ...current, [key]: merged };
+      return removeEmptyOverrides(updated);
+    });
+  }
+
+  function updateSelectedAdjust(field: "brightness" | "contrast" | "saturation", value: number): void {
+    updateSelectedOverride({
+      adjust: {
+        brightness: selectedOverride?.adjust?.brightness ?? 1,
+        contrast: selectedOverride?.adjust?.contrast ?? 1,
+        saturation: selectedOverride?.adjust?.saturation ?? 1,
+        [field]: value
+      }
+    });
+  }
+
+  function updateSelectedLayout(
+    field: "align" | "offsetY" | "gapBadge" | "gapSubtitle",
+    value: string | number
+  ): void {
+    updateSelectedOverride({
+      layout: {
+        align: selectedOverride?.layout?.align ?? "left",
+        offsetY: selectedOverride?.layout?.offsetY ?? 0,
+        gapBadge: selectedOverride?.layout?.gapBadge ?? 1,
+        gapSubtitle: selectedOverride?.layout?.gapSubtitle ?? 1,
+        [field]: value
+      }
+    });
+  }
+
+  function updateSelectedTypography(
+    field: "sizeScale" | "weight" | "italic",
+    value: number | boolean | undefined
+  ): void {
+    updateSelectedOverride({
+      typography: {
+        ...(selectedOverride?.typography ?? {}),
+        ...(value === undefined ? {} : { [field]: value })
+      }
+    });
+  }
+
+  function updateSelectedLayers(layers: readonly CardLayer[]): void {
+    updateSelectedOverride({ layers });
+  }
+
+  function addLayer(kind: CardLayer["kind"]): void {
+    updateSelectedLayers([...(selectedOverride?.layers ?? []), createLayer(kind)]);
+  }
+
+  function updateLayer(layerId: string, updater: (layer: CardLayer) => CardLayer): void {
+    updateSelectedLayers((selectedOverride?.layers ?? []).map((layer) => (layer.id === layerId ? updater(layer) : layer)));
+  }
+
+  function removeLayer(layerId: string): void {
+    updateSelectedLayers((selectedOverride?.layers ?? []).filter((layer) => layer.id !== layerId));
+  }
+
+  function createLayer(kind: CardLayer["kind"]): CardLayer {
+    const id = `layer-${kind}-${Date.now().toString(36)}`;
+    switch (kind) {
+      case "text":
+        return {
+          id,
+          kind,
+          x: 12,
+          y: 68,
+          width: 76,
+          height: 10,
+          zIndex: 5,
+          text: "추가 텍스트",
+          color: "#111111",
+          backgroundColor: "#ffffff",
+          fontSize: 34,
+          fontWeight: 800,
+          align: "center"
+        };
+      case "shape":
+        return {
+          id,
+          kind,
+          x: 12,
+          y: 18,
+          width: 22,
+          height: 10,
+          zIndex: 1,
+          shape: "rect",
+          fill: "#f3a3c2",
+          radius: 20
+        };
+      case "line":
+        return {
+          id,
+          kind,
+          x: 12,
+          y: 82,
+          width: 46,
+          height: 1,
+          zIndex: 4,
+          color: accentColor,
+          strokeWidth: 6
+        };
+      case "image":
+        return {
+          id,
+          kind,
+          x: 55,
+          y: 18,
+          width: 32,
+          height: 24,
+          zIndex: 1,
+          backgroundId: backgroundLibrary[0]?.id ?? backgroundId ?? "",
+          objectFit: "cover"
+        };
+    }
+  }
+
+  function resetSelectedOverride(): void {
+    const key = String(selectedCardNumber);
+    setOverrides((current) => {
+      const { [key]: _removed, ...rest } = current;
+      return rest;
+    });
+  }
+
+  function setSelectedBackgroundOverride(backgroundOverride: string | null | undefined): void {
+    if (backgroundOverride !== undefined) {
+      updateSelectedOverride({ backgroundId: backgroundOverride });
+      return;
+    }
+
+    const key = String(selectedCardNumber);
+    setOverrides((current) => {
+      const currentOverride = current[key];
+      if (!currentOverride) {
+        return current;
+      }
+      const { backgroundId: _removed, ...restOverride } = currentOverride;
+      return removeEmptyOverrides({ ...current, [key]: restOverride });
+    });
+  }
+
+  function removeEmptyOverrides(input: CardOverrideMap): CardOverrideMap {
+    return Object.fromEntries(
+      Object.entries(input).filter(([, override]) =>
+        Boolean(
+          override.backgroundId !== undefined ||
+            override.adjust !== undefined ||
+            override.layout !== undefined ||
+            override.dim !== undefined ||
+            override.typography !== undefined ||
+            (override.layers !== undefined && override.layers.length > 0)
+        )
+      )
+    );
+  }
+
+  async function exportDesignContract(): Promise<void> {
+    const saved = await window.cardnews.exportTemplateFile(buildDesignContract());
+    setStatus(isCardnewsError(saved) ? saved.message : `design.md 저장: ${saved}`);
+  }
+
+  function insertSampleStyleJson(): void {
+    setStyleJsonInput(buildSampleStyleJson());
+    setStyleWarnings([]);
+    setStatus("스타일 JSON 샘플을 입력창에 넣었습니다.");
+  }
+
+  async function importCustomStyle(rawText: string, sourceLabel: string): Promise<void> {
+    const existingIds = [...stylePresets.map((style) => style.id), ...customStyles.map((style) => style.id)];
+    const parsed = parseStyleJson(rawText, existingIds);
+    if (isCardnewsError(parsed)) {
+      setStatus(parsed.message);
+      return;
+    }
+
+    const updated = await window.cardnews.saveCustomStyle(parsed.preset);
+    if (isCardnewsError(updated)) {
+      setStatus(updated.message);
+      return;
+    }
+
+    setCustomStyles(updated);
+    setStyleId(parsed.preset.id);
+    setStyleWarnings(parsed.warnings);
+    setStyleJsonInput("");
+    setStatus(`내 스타일 추가: ${parsed.preset.name} (${sourceLabel})`);
+  }
+
+  async function importCustomStyleFromText(): Promise<void> {
+    await importCustomStyle(styleJsonInput, "붙여넣기");
+  }
+
+  async function importCustomStyleFromFile(): Promise<void> {
+    const imported = await window.cardnews.importCustomStyleFile();
+    if (isCardnewsError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+
+    setStyleJsonInput(imported.text);
+    await importCustomStyle(imported.text, imported.fileName);
+  }
+
+  async function deleteCurrentCustomStyle(): Promise<void> {
+    if (!styleId.startsWith("custom-")) {
+      setStatus("내 스타일을 선택한 뒤 삭제하세요.");
+      return;
+    }
+
+    const updated = await window.cardnews.deleteCustomStyle(styleId);
+    if (isCardnewsError(updated)) {
+      setStatus(updated.message);
+      return;
+    }
+
+    setCustomStyles(updated);
+    setStyleId(defaultStyleId);
+    setStatus("내 스타일을 삭제했습니다.");
+  }
+
+  async function savePixabayKey(): Promise<void> {
+    const nextSettings: AppSettings = {
+      ...(pixabayApiKeyDraft.trim() ? { pixabayApiKey: pixabayApiKeyDraft.trim() } : {})
+    };
+    const saved = await window.cardnews.saveSettings(nextSettings);
+    if (isCardnewsError(saved)) {
+      setStatus(saved.message);
+      return;
+    }
+
+    setSettings(nextSettings);
+    setStatus(nextSettings.pixabayApiKey ? "Pixabay API 키를 저장했습니다." : "Pixabay API 키를 비웠습니다.");
+  }
+
+  async function searchStockImages(): Promise<void> {
+    setStockLoading(true);
+    setStockFallbackUrl(null);
+    try {
+      const result = await window.cardnews.searchStockImages(stockQuery, 1);
+      if (isCardnewsError(result)) {
+        setStatus(result.message);
+        return;
+      }
+
+      setStockImages(result.images);
+      setStockFallbackUrl(result.fallbackUrl ?? null);
+      setStatus(
+        result.mode === "browser-fallback"
+          ? "Pixabay 브라우저 검색을 열었습니다. 다운로드한 파일은 파일 추가로 등록하세요."
+          : `Pixabay 이미지 ${result.images.length}개를 불러왔습니다.`
+      );
+    } finally {
+      setStockLoading(false);
+    }
+  }
+
+  async function addStockImageToLibrary(image: StockImage): Promise<void> {
+    const input: StockImageDownloadInput = {
+      provider: image.provider,
+      id: image.id,
+      imageUrl: image.imageUrl,
+      pageUrl: image.pageUrl,
+      author: image.author
+    };
+    const added = await window.cardnews.downloadStockImage(input);
+    if (isCardnewsError(added)) {
+      setStatus(added.message);
+      return;
+    }
+
+    const library = await window.cardnews.listBackgroundLibrary();
+    if (!isCardnewsError(library)) {
+      setBackgroundLibrary(library);
+    }
+    await applyBackgroundSelection(added.id);
+    setStockSearchOpen(false);
+    setStatus(`Pixabay 이미지 추가: ${added.displayName}`);
+  }
+
+  function startRailResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = railWidth;
+    const handlePointerMove = (moveEvent: PointerEvent): void => {
+      setRailWidth(Math.min(280, Math.max(90, startWidth + moveEvent.clientX - startX)));
+    };
+    const handlePointerUp = (): void => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
+
+  // ── 양식.md 파일 ──
+  async function exportTemplate(): Promise<void> {
+    const saved = await window.cardnews.exportTemplateFile(buildTemplateDocument(styleNameEntries));
+    setStatus(isCardnewsError(saved) ? saved.message : `양식 파일 저장: ${saved}`);
+  }
+
+  async function importFromFile(): Promise<void> {
+    const document = await window.cardnews.importDeckDocument();
+    if (isCardnewsError(document)) {
+      setStatus(document.message);
+      return;
+    }
+
+    const parsed = parseDeckDocument(document.text, styleNameEntries);
+    if (isCardnewsError(parsed)) {
+      setStatus(`${document.fileName}: ${parsed.message}`);
+      return;
+    }
+
+    if (parsed.headerLabel) {
+      setHeaderLabel(parsed.headerLabel);
+    }
+    if (parsed.footerAccount) {
+      setFooterAccount(parsed.footerAccount);
+    }
+    if (parsed.styleId) {
+      setStyleId(parsed.styleId);
+    }
+    if (parsed.accentColor) {
+      setCustomAccent(parsed.accentColor);
+    }
+    if (parsed.backgroundDim !== undefined) {
+      setCustomDim(parsed.backgroundDim);
+    }
+    if (parsed.aspectRatio) {
+      setAspectRatioId(parsed.aspectRatio);
+    }
+    setCards(parsed.cards);
+    setSelectedIndex(0);
+    setRenderResult(null);
+    setApprovedJobId(null);
+    setStatus(
+      parsed.warnings.length > 0
+        ? `${document.fileName} → 카드 ${parsed.cards.length}장 · 경고: ${parsed.warnings[0]}`
+        : `${document.fileName} → 카드 ${parsed.cards.length}장을 불러왔습니다.`
+    );
+  }
+
+  // ── 양식 프리셋 ──
+  async function savePreset(): Promise<void> {
+    const name = presetName.trim();
+    if (!name) {
+      setStatus("저장할 양식 이름을 입력하세요.");
+      return;
+    }
+
+    const deckPreset: DeckPreset = {
+      name,
+      headerLabel,
+      footerAccount,
+      styleId,
+      aspectRatio: aspectRatioId,
+      ...(customAccent ? { accentColor: customAccent } : {}),
+      ...(customDim !== null ? { backgroundDim: customDim } : {}),
+      ...(backgroundId ? { backgroundId } : {}),
+      ...(selectedFontId ? { fontId: selectedFontId } : {}),
+      ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+      cards
+    };
+
+    const updated = await window.cardnews.saveDeckPreset(deckPreset);
+    if (isCardnewsError(updated)) {
+      setStatus(updated.message);
+      return;
+    }
+
+    setPresets(updated);
+    setSelectedPresetName(name);
+    setStatus(`양식 "${name}"을(를) 저장했습니다.`);
+  }
+
+  function applyPresetByName(name: string): void {
+    setSelectedPresetName(name);
+    if (!name) {
+      return;
+    }
+
+    const deckPreset = presets.find((entry) => entry.name === name);
+    if (!deckPreset) {
+      return;
+    }
+
+    setPresetName(deckPreset.name);
+    applySnapshot(deckPreset);
+    void loadFontCss(deckPreset.fontId ?? null);
+    setRenderResult(null);
+    setApprovedJobId(null);
+    setStatus(`양식 "${name}"을(를) 적용했습니다.`);
+  }
+
+  async function deletePreset(): Promise<void> {
+    if (!selectedPresetName) {
+      setStatus("삭제할 양식을 먼저 선택하세요.");
+      return;
+    }
+
+    const updated = await window.cardnews.deleteDeckPreset(selectedPresetName);
+    if (isCardnewsError(updated)) {
+      setStatus(updated.message);
+      return;
+    }
+
+    setPresets(updated);
+    setStatus(`양식 "${selectedPresetName}"을(를) 삭제했습니다.`);
+    setSelectedPresetName("");
+  }
+
+  // ── 카드 편집 ──
+  function updateCard(index: number, value: string): void {
+    setCards((current) => current.map((card, cardIndex) => (cardIndex === index ? value : card)));
+  }
+
+  function addCard(): void {
+    if (cards.length >= maxCards) {
+      setStatus(`카드는 최대 ${maxCards}장까지 만들 수 있습니다.`);
+      return;
+    }
+
+    const nextIndex = cards.length;
+    setCards((current) => [
+      ...current,
+      `유형: 본문\n제목: 카드 ${current.length + 1} 제목\n본문: 내용을 입력하세요.`
+    ]);
+    setSelectedIndex(nextIndex);
+  }
+
+  function removeCard(): void {
+    if (cards.length <= 1) {
+      setStatus("카드는 최소 1장이 필요합니다.");
+      return;
+    }
+
+    setCards((current) => current.filter((_, index) => index !== selectedIndex));
+    setSelectedIndex((current) => Math.max(0, Math.min(current, cards.length - 2)));
+  }
+
+  function resetWorkspace(): void {
+    if (!window.confirm("모든 카드와 설정을 처음 샘플로 되돌릴까요?")) {
+      return;
+    }
+
+    setCards(initialCards);
+    setHeaderLabel(defaultHeaderLabel);
+    setFooterAccount(defaultFooterAccount);
+    setStyleId(defaultStyleId);
+    setAspectRatioId(defaultAspectRatioId);
+    setCustomAccent(null);
+    setCustomDim(null);
+    setSelectedFontId(null);
+    void loadFontCss(null);
+    setOverrides({});
+    setSelectedIndex(0);
+    setRenderResult(null);
+    setBulkResult(null);
+    setApprovedJobId(null);
+    setSelectedPresetName("");
+    void applyBackgroundSelection(null);
+    setStatus("초기 샘플로 되돌렸습니다.");
+  }
+
+  // ── 렌더/내보내기 ──
+  async function runGenerate(): Promise<void> {
+    if (isRendering) {
+      return;
+    }
+
+    try {
+      setIsRendering(true);
+      setRenderResult(null);
+      setApprovedJobId(null);
+
+      const liveErrors = cards
+        .map((rawText, index) => parseCardText(rawText, index + 1))
+        .filter(isCardnewsError);
+      if (liveErrors.length > 0) {
+        setStatus(`파싱 오류 ${liveErrors.length}개 — 카드 내용을 확인하세요.`);
+        return;
+      }
+
+      setStatus("파싱 완료 · Deck 저장 중...");
+      const savedDeck = await window.cardnews.saveDeck(buildDeckDraft());
+      if (isCardnewsError(savedDeck)) {
+        setStatus(`저장 실패: ${savedDeck.message}`);
+        return;
+      }
+
+      setStatus(`렌더링 중... 1/${cards.length}`);
+      const rendered = await window.cardnews.renderDeck(savedDeck.id);
+      if (isCardnewsError(rendered)) {
+        setStatus(`렌더 실패: ${rendered.message}`);
+        return;
+      }
+
+      setRenderResult(rendered);
+      setStatus(
+        rendered.gateReport.status === "fail"
+          ? `게이트 실패: ${rendered.gateReport.issues.length}개`
+          : rendered.gateReport.status === "warn"
+            ? `렌더 완료: ${rendered.cardCount}장 (경고 ${rendered.gateReport.issues.length}개)`
+            : `렌더 완료: ${rendered.cardCount}장 (승인 대기)`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "알 수 없는 오류";
+
+      setStatus(`렌더 실패: ${message}`);
+    } finally {
+      setIsRendering(false);
+    }
+  }
+
+  async function openOutputFolder(): Promise<void> {
+    if (!renderResult) {
+      return;
+    }
+
+    const result = await window.cardnews.openOutputFolder(renderResult.jobId);
+    if (isCardnewsError(result)) {
+      setStatus(result.message);
+    }
+  }
+
+  async function exportCurrentCardPng(): Promise<void> {
+    if (!renderResult) {
+      return;
+    }
+
+    const target =
+      renderResult.cards.find((card) => card.index === selectedIndex + 1) ?? renderResult.cards[0];
+    if (!target) {
+      return;
+    }
+
+    const saved = await window.cardnews.exportCardPng(renderResult.jobId, target.fileName);
+    setStatus(isCardnewsError(saved) ? saved.message : `PNG 저장: ${saved}`);
+  }
+
+  async function exportZip(): Promise<void> {
+    if (!renderResult) {
+      return;
+    }
+
+    const saved = await window.cardnews.exportDeckZip(renderResult.jobId);
+    setStatus(isCardnewsError(saved) ? saved.message : `ZIP 저장: ${saved}`);
+  }
+
+  async function exportBulkTemplate(): Promise<void> {
+    const saved = await window.cardnews.exportBulkCsvTemplate(buildBulkCsvTemplate(styleId, aspectRatioId));
+    setStatus(isCardnewsError(saved) ? saved.message : `CSV 템플릿 저장: ${saved}`);
+  }
+
+  async function importBulkCsv(): Promise<void> {
+    const imported = await window.cardnews.importBulkCsvFile();
+    if (isCardnewsError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+
+    setBulkCsvText(imported.text);
+    setBulkResult(null);
+    setStatus(`CSV 불러오기: ${imported.fileName}`);
+  }
+
+  async function runBulkGenerate(): Promise<void> {
+    if (isRendering) {
+      return;
+    }
+
+    try {
+      setIsRendering(true);
+      setStatus("CSV 대량 생성 중...");
+      const result = await window.cardnews.renderBulkCsv(bulkCsvText);
+      if (isCardnewsError(result)) {
+        setStatus(`CSV 대량 생성 실패: ${result.message}`);
+        return;
+      }
+
+      setBulkResult(result);
+      setStatus(`CSV 대량 생성 완료: 성공 ${result.renderedCount}건 · 실패 ${result.failedCount}건`);
+    } finally {
+      setIsRendering(false);
+    }
+  }
+
+  function approveRenderResult(): void {
+    if (!renderResult) {
+      return;
+    }
+
+    setApprovedJobId(renderResult.jobId);
+    setStatus(`승인 완료: ${renderResult.cardCount}장`);
+  }
+
+  function buildDeckDraft(): DeckDraft {
+    return {
+      headerLabel,
+      footerAccount,
+      styleId,
+      accentColor,
+      backgroundDim,
+      aspectRatio: aspectRatioId,
+      ...(backgroundId ? { backgroundId } : {}),
+      ...(selectedFontId ? { fontId: selectedFontId } : {}),
+      ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+      cards: cards.map((rawText, index) => ({
+        index: index + 1,
+        rawText
+      }))
+    };
+  }
+
+  return (
+    <main className="studio">
+      <header className="topbar">
+        <div className="brand">
+          <strong>Cardnews Studio</strong>
+          <span>정보형 카드뉴스 제작기</span>
+        </div>
+        <label className="topbar-field">
+          <span>스타일</span>
+          <select value={styleId} onChange={(event) => setStyleId(event.target.value)}>
+            {allStyleEntries.map((style) => (
+              <option key={style.id} value={style.id}>
+                {style.group} · {style.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="topbar-field">
+          <span>비율</span>
+          <select value={aspectRatioId} onChange={(event) => setAspectRatioId(event.target.value)}>
+            {aspectRatios.map((ratio) => (
+              <option key={ratio.id} value={ratio.id}>
+                {ratio.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="topbar-field">
+          <span>헤더</span>
+          <input value={headerLabel} onChange={(event) => setHeaderLabel(event.target.value)} />
+        </label>
+        <label className="topbar-field">
+          <span>멘션</span>
+          <input value={footerAccount} onChange={(event) => setFooterAccount(event.target.value)} />
+        </label>
+        <div className="topbar-actions">
+          <button type="button" className="ghost" onClick={resetWorkspace}>
+            초기화
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={runGenerate}
+            disabled={isRendering}
+            data-smoke-action="generate"
+          >
+            {isRendering ? "생성 중..." : "PNG 생성"}
+          </button>
+        </div>
+      </header>
+
+      <div className="panes" style={{ gridTemplateColumns: `${railWidth}px 6px 1fr 360px` }}>
+        <aside className="slide-rail" aria-label="slide thumbnails">
+          {previewHtmls.map((html, index) => (
+            <button
+              type="button"
+              key={index}
+              className={`slide-thumb${index === selectedIndex ? " active" : ""}${
+                parsedEntries[index]?.error ? " has-error" : ""
+              }`}
+              onClick={() => setSelectedIndex(index)}
+            >
+              <span className="slide-no">{index + 1}</span>
+              <span
+                className="thumb-canvas"
+                style={{
+                  width: Math.max(58, railWidth - 56),
+                  height: Math.round((Math.max(58, railWidth - 56) * cardRatio.height) / cardRatio.width)
+                }}
+              >
+                <iframe
+                  title={`card-${index + 1}`}
+                  srcDoc={html}
+                  scrolling="no"
+                  tabIndex={-1}
+                  style={{
+                    width: cardRatio.width,
+                    height: cardRatio.height,
+                    transform: `scale(${(Math.max(58, railWidth - 56) / cardRatio.width).toFixed(5)})`
+                  }}
+                />
+              </span>
+            </button>
+          ))}
+          <button type="button" className="rail-add" onClick={addCard}>
+            + 카드 추가
+          </button>
+        </aside>
+        <div
+          className="rail-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="thumbnail rail resize"
+          onPointerDown={startRailResize}
+        />
+
+        <section className="stage" aria-label="live preview">
+          <StageCanvas
+            html={previewHtmls[selectedIndex] ?? ""}
+            cardWidth={cardRatio.width}
+            cardHeight={cardRatio.height}
+          />
+          <p className="stage-status">{status}</p>
+        </section>
+
+        <aside className="inspector" aria-label="editor controls">
+          <div className="inspector-tabs">
+            {(["design", "content", "export"] as const).map((tab) => (
+              <button
+                type="button"
+                key={tab}
+                className={inspectorTab === tab ? "active" : ""}
+                onClick={() => setInspectorTab(tab)}
+              >
+                {tab === "design" ? "디자인" : tab === "content" ? "콘텐츠" : "내보내기"}
+              </button>
+            ))}
+          </div>
+          <section className="panel" hidden={inspectorTab !== "design"}>
+            <p className="panel-title">양식</p>
+            <select
+              value={selectedPresetName}
+              onChange={(event) => applyPresetByName(event.target.value)}
+            >
+              <option value="">— 저장된 양식 선택 —</option>
+              {presets.map((entry) => (
+                <option key={entry.name} value={entry.name}>
+                  {entry.name} ({entry.cards.length}장)
+                </option>
+              ))}
+            </select>
+            <div className="row">
+              <input
+                placeholder="양식 이름"
+                value={presetName}
+                onChange={(event) => setPresetName(event.target.value)}
+              />
+              <button type="button" onClick={savePreset}>
+                저장
+              </button>
+              <button type="button" className="ghost" onClick={deletePreset}>
+                삭제
+              </button>
+            </div>
+            <div className="row">
+              <button type="button" onClick={exportTemplate}>
+                양식.md 내보내기
+              </button>
+              <button type="button" onClick={importFromFile}>
+                작성한 파일 불러오기
+              </button>
+            </div>
+          </section>
+
+          <section className="panel" hidden={inspectorTab !== "design"}>
+            <p className="panel-title">포인트 색상</p>
+            <div className="swatches">
+              {accentSwatches.map((swatch) => (
+                <button
+                  type="button"
+                  key={swatch}
+                  className={`swatch${accentColor === swatch ? " active" : ""}`}
+                  style={{ background: swatch }}
+                  onClick={() => setCustomAccent(swatch)}
+                  aria-label={`포인트 색상 ${swatch}`}
+                />
+              ))}
+            </div>
+            <button type="button" className="ghost" onClick={() => setCustomAccent(null)}>
+              스타일 기본값
+            </button>
+          </section>
+
+          <section className="panel" hidden={inspectorTab !== "design"}>
+            <p className="panel-title">스타일 관리</p>
+            <div className="row">
+              <button type="button" onClick={exportDesignContract}>
+                design.md 내보내기
+              </button>
+              <button type="button" className="ghost" onClick={insertSampleStyleJson}>
+                샘플 JSON
+              </button>
+              <button type="button" className="ghost" onClick={deleteCurrentCustomStyle}>
+                내 스타일 삭제
+              </button>
+            </div>
+            <textarea
+              className="style-json-input"
+              placeholder="외부 AI가 만든 스타일 JSON을 붙여넣으세요."
+              value={styleJsonInput}
+              onChange={(event) => setStyleJsonInput(event.target.value)}
+              spellCheck={false}
+            />
+            <button type="button" onClick={importCustomStyleFromText}>
+              JSON 스타일 등록
+            </button>
+            <button type="button" className="ghost" onClick={importCustomStyleFromFile}>
+              .json 파일 열기
+            </button>
+            {styleWarnings.length > 0 ? (
+              <ul className="warning-list">
+                {styleWarnings.slice(0, 3).map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+
+          <section className="panel" hidden={inspectorTab !== "design"}>
+            <p className="panel-title">폰트</p>
+            <div className="row">
+              <select
+                value={selectedFontId ?? ""}
+                onChange={(event) => void selectFont(event.target.value === "" ? null : event.target.value)}
+              >
+                <option value="">번들 Pretendard</option>
+                {fontLibrary.map((font) => (
+                  <option key={font.id} value={font.id}>
+                    {font.displayName}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={importFont}>
+                ttf/otf 추가
+              </button>
+            </div>
+            <small className="hint">추가한 폰트는 미리보기와 PNG 렌더에 함께 임베드됩니다.</small>
+          </section>
+
+          <section className="panel" hidden={inspectorTab !== "design"}>
+            <p className="panel-title">배경 이미지</p>
+            <div className="row">
+              <select
+                value={backgroundId ?? ""}
+                onChange={(event) =>
+                  void applyBackgroundSelection(event.target.value === "" ? null : event.target.value)
+                }
+              >
+                <option value="">없음</option>
+                {backgroundLibrary.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.displayName}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={addBackground}>
+                파일 추가
+              </button>
+              <button type="button" onClick={() => setStockSearchOpen(true)}>
+                무료 이미지 검색
+              </button>
+            </div>
+            {backgroundPreview ? (
+              <img className="background-preview" src={backgroundPreview} alt="" />
+            ) : null}
+            <label className="dim-row">
+              <span>하단 어둡기</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(backgroundDim * 100)}
+                onChange={(event) => setCustomDim(Number(event.target.value) / 100)}
+              />
+              <small>{Math.round(backgroundDim * 100)}%</small>
+            </label>
+            <small className="hint">선택한 배경은 모든 스타일의 미리보기와 PNG 렌더에 반영됩니다.</small>
+            <div className="stack-field">
+              <span>Pixabay API 키</span>
+              <div className="row">
+                <input
+                  type="password"
+                  placeholder="키 없이도 브라우저 검색 가능"
+                  value={pixabayApiKeyDraft}
+                  onChange={(event) => setPixabayApiKeyDraft(event.target.value)}
+                />
+                <button type="button" onClick={savePixabayKey}>
+                  저장
+                </button>
+              </div>
+              <small className="hint">
+                {settings.pixabayApiKey ? "API 검색 사용 중" : "키 미입력: 브라우저 폴백 사용"}
+              </small>
+            </div>
+          </section>
+
+          <section className="panel grow" hidden={inspectorTab !== "content"}>
+            <p className="panel-title">
+              카드 {selectedIndex + 1} / {cards.length}
+              {selectedEntry?.error ? <em className="error-tag">파싱 오류</em> : null}
+            </p>
+            <div className="segmented">
+              <button
+                type="button"
+                className={cardEditorTab === "content" ? "active" : ""}
+                onClick={() => setCardEditorTab("content")}
+              >
+                내용
+              </button>
+              <button
+                type="button"
+                className={cardEditorTab === "design" ? "active" : ""}
+                onClick={() => setCardEditorTab("design")}
+              >
+                디자인
+              </button>
+            </div>
+            {cardEditorTab === "content" ? (
+              <>
+                <textarea
+                  className="card-input"
+                  value={cards[selectedIndex] ?? ""}
+                  onChange={(event) => updateCard(selectedIndex, event.target.value)}
+                  spellCheck={false}
+                />
+                {selectedEntry?.error ? (
+                  <p className="parse-error-text">{selectedEntry.error.message}</p>
+                ) : null}
+                <div className="grammar-hint">
+                  <span>유형: 표지|본문|마무리</span>
+                  <span>제목: / 소제목: / 배지:</span>
+                  <span>본문: 문단, "- "는 불릿</span>
+                  <span>출처: / 강조:</span>
+                  <span>*단어* → 포인트색 강조</span>
+                </div>
+              </>
+            ) : (
+              <div className="card-design-controls">
+                <label className="stack-field">
+                  <span>카드 배경</span>
+                  <select
+                    value={
+                      selectedOverride?.backgroundId === null
+                        ? "__none__"
+                        : selectedOverride?.backgroundId ?? "__inherit__"
+                    }
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setSelectedBackgroundOverride(
+                        value === "__inherit__" ? undefined : value === "__none__" ? null : value
+                      );
+                    }}
+                  >
+                    <option value="__inherit__">전역 배경 따름</option>
+                    <option value="__none__">배경 없음</option>
+                    {backgroundLibrary.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="dim-row">
+                  <span>텍스트 크기</span>
+                  <input
+                    type="range"
+                    min={65}
+                    max={135}
+                    value={Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}
+                    onChange={(event) => updateSelectedTypography("sizeScale", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}%</small>
+                </label>
+                <label className="dim-row">
+                  <span>굵기</span>
+                  <input
+                    type="range"
+                    min={100}
+                    max={950}
+                    step={50}
+                    value={selectedOverride?.typography?.weight ?? 700}
+                    onChange={(event) => updateSelectedTypography("weight", Number(event.target.value))}
+                  />
+                  <small>{selectedOverride?.typography?.weight ?? 700}</small>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={selectedOverride?.typography?.italic === true}
+                    onChange={(event) => updateSelectedTypography("italic", event.target.checked)}
+                  />
+                  <span>기울임</span>
+                </label>
+                <label className="dim-row">
+                  <span>밝기</span>
+                  <input
+                    type="range"
+                    min={50}
+                    max={150}
+                    value={Math.round((selectedOverride?.adjust?.brightness ?? 1) * 100)}
+                    onChange={(event) => updateSelectedAdjust("brightness", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.adjust?.brightness ?? 1) * 100)}%</small>
+                </label>
+                <label className="dim-row">
+                  <span>대비</span>
+                  <input
+                    type="range"
+                    min={50}
+                    max={150}
+                    value={Math.round((selectedOverride?.adjust?.contrast ?? 1) * 100)}
+                    onChange={(event) => updateSelectedAdjust("contrast", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.adjust?.contrast ?? 1) * 100)}%</small>
+                </label>
+                <label className="dim-row">
+                  <span>채도</span>
+                  <input
+                    type="range"
+                    min={50}
+                    max={150}
+                    value={Math.round((selectedOverride?.adjust?.saturation ?? 1) * 100)}
+                    onChange={(event) => updateSelectedAdjust("saturation", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.adjust?.saturation ?? 1) * 100)}%</small>
+                </label>
+                <div className="segmented">
+                  <button
+                    type="button"
+                    className={(selectedOverride?.layout?.align ?? "left") === "left" ? "active" : ""}
+                    onClick={() => updateSelectedLayout("align", "left")}
+                  >
+                    왼쪽
+                  </button>
+                  <button
+                    type="button"
+                    className={selectedOverride?.layout?.align === "center" ? "active" : ""}
+                    onClick={() => updateSelectedLayout("align", "center")}
+                  >
+                    중앙
+                  </button>
+                </div>
+                <label className="dim-row">
+                  <span>세로 위치</span>
+                  <input
+                    type="range"
+                    min={-20}
+                    max={20}
+                    value={selectedOverride?.layout?.offsetY ?? 0}
+                    onChange={(event) => updateSelectedLayout("offsetY", Number(event.target.value))}
+                  />
+                  <small>{selectedOverride?.layout?.offsetY ?? 0}</small>
+                </label>
+                <label className="dim-row">
+                  <span>배지 간격</span>
+                  <input
+                    type="range"
+                    min={50}
+                    max={200}
+                    value={Math.round((selectedOverride?.layout?.gapBadge ?? 1) * 100)}
+                    onChange={(event) => updateSelectedLayout("gapBadge", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.layout?.gapBadge ?? 1) * 100)}%</small>
+                </label>
+                <label className="dim-row">
+                  <span>본문 간격</span>
+                  <input
+                    type="range"
+                    min={50}
+                    max={200}
+                    value={Math.round((selectedOverride?.layout?.gapSubtitle ?? 1) * 100)}
+                    onChange={(event) => updateSelectedLayout("gapSubtitle", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.layout?.gapSubtitle ?? 1) * 100)}%</small>
+                </label>
+                <label className="dim-row">
+                  <span>어둡기</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round((selectedOverride?.dim ?? backgroundDim) * 100)}
+                    onChange={(event) => updateSelectedOverride({ dim: Number(event.target.value) / 100 })}
+                  />
+                  <small>{Math.round((selectedOverride?.dim ?? backgroundDim) * 100)}%</small>
+                </label>
+                <div className="layer-controls">
+                  <p className="panel-title">레이어</p>
+                  <div className="row">
+                    <button type="button" onClick={() => addLayer("text")}>
+                      텍스트 박스
+                    </button>
+                    <button type="button" onClick={() => addLayer("shape")}>
+                      모형
+                    </button>
+                    <button type="button" onClick={() => addLayer("line")}>
+                      선
+                    </button>
+                    <button type="button" onClick={() => addLayer("image")}>
+                      이미지
+                    </button>
+                  </div>
+                  {(selectedOverride?.layers ?? []).map((layer) => (
+                    <div className="layer-editor" key={layer.id}>
+                      <div className="layer-editor-header">
+                        <strong>{layer.kind}</strong>
+                        <button type="button" className="ghost" onClick={() => removeLayer(layer.id)}>
+                          삭제
+                        </button>
+                      </div>
+                      <div className="quad-grid">
+                        <label>
+                          <span>X</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={layer.x}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) => ({ ...current, x: Number(event.target.value) }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>Y</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={layer.y}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) => ({ ...current, y: Number(event.target.value) }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>W</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={layer.width}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) => ({ ...current, width: Number(event.target.value) }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>H</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={layer.height}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) => ({ ...current, height: Number(event.target.value) }))
+                            }
+                          />
+                        </label>
+                      </div>
+                      {layer.kind === "text" ? (
+                        <textarea
+                          className="layer-text-input"
+                          value={layer.text}
+                          onChange={(event) =>
+                            updateLayer(layer.id, (current) =>
+                              current.kind === "text" ? { ...current, text: event.target.value } : current
+                            )
+                          }
+                        />
+                      ) : null}
+                      {layer.kind === "shape" ? (
+                        <div className="row">
+                          <input
+                            type="color"
+                            value={layer.fill}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) =>
+                                current.kind === "shape" ? { ...current, fill: event.target.value } : current
+                              )
+                            }
+                          />
+                          <select
+                            value={layer.shape}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) =>
+                                current.kind === "shape"
+                                  ? { ...current, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
+                                  : current
+                              )
+                            }
+                          >
+                            <option value="rect">사각형</option>
+                            <option value="ellipse">타원</option>
+                          </select>
+                        </div>
+                      ) : null}
+                      {layer.kind === "line" ? (
+                        <div className="row">
+                          <input
+                            type="color"
+                            value={layer.color}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) =>
+                                current.kind === "line" ? { ...current, color: event.target.value } : current
+                              )
+                            }
+                          />
+                          <input
+                            type="number"
+                            min={1}
+                            max={40}
+                            value={layer.strokeWidth ?? 4}
+                            onChange={(event) =>
+                              updateLayer(layer.id, (current) =>
+                                current.kind === "line"
+                                  ? { ...current, strokeWidth: Number(event.target.value) }
+                                  : current
+                              )
+                            }
+                          />
+                        </div>
+                      ) : null}
+                      {layer.kind === "image" ? (
+                        <select
+                          value={layer.backgroundId}
+                          onChange={(event) =>
+                            updateLayer(layer.id, (current) =>
+                              current.kind === "image" ? { ...current, backgroundId: event.target.value } : current
+                            )
+                          }
+                        >
+                          <option value="">이미지 선택</option>
+                          {backgroundLibrary.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                <button type="button" className="ghost" onClick={resetSelectedOverride}>
+                  전역 설정으로 초기화
+                </button>
+              </div>
+            )}
+            <div className="row">
+              <button type="button" onClick={addCard}>
+                카드 추가
+              </button>
+              <button type="button" className="ghost" onClick={removeCard}>
+                이 카드 삭제
+              </button>
+            </div>
+          </section>
+
+          <section className="panel" hidden={inspectorTab !== "export"}>
+            <p className="panel-title">
+              생성 결과
+              {parseErrorCount > 0 ? <em className="error-tag">오류 {parseErrorCount}</em> : null}
+            </p>
+            {renderResult ? (
+              <div className="render-output">
+                <strong>
+                  {approvedJobId === renderResult.jobId ? "승인 완료" : "승인 대기"} ·{" "}
+                  {renderResult.cardCount}장
+                </strong>
+                {renderResult.gateReport.issues.length > 0 ? (
+                  <ol className="gate-list">
+                    {renderResult.gateReport.issues.slice(0, 4).map((issue) => (
+                      <li key={`${issue.cardIndex}-${issue.slot}-${issue.gate}`}>
+                        카드 {issue.cardIndex} · {issue.severity} · {issue.slot} · {issue.message}
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <span>모든 게이트를 통과했습니다.</span>
+                )}
+                <div className="render-actions">
+                  <button
+                    type="button"
+                    data-smoke-action="export-current-png"
+                    onClick={exportCurrentCardPng}
+                  >
+                    현재 카드 PNG
+                  </button>
+                  <button type="button" data-smoke-action="export-zip" onClick={exportZip}>
+                    전체 ZIP
+                  </button>
+                  <button type="button" onClick={openOutputFolder}>
+                    폴더 열기
+                  </button>
+                  <button type="button" onClick={approveRenderResult}>
+                    승인
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <span className="hint">PNG 생성 버튼을 누르면 전체 카드를 렌더링합니다.</span>
+            )}
+            <div className="bulk-panel">
+              <p className="panel-title">CSV 대량 생성</p>
+              <div className="row">
+                <button type="button" onClick={exportBulkTemplate}>
+                  CSV 템플릿
+                </button>
+                <button type="button" onClick={importBulkCsv}>
+                  CSV 불러오기
+                </button>
+                <button type="button" onClick={runBulkGenerate} disabled={isRendering}>
+                  BULK PNG
+                </button>
+              </div>
+              <textarea
+                className="bulk-csv-input"
+                placeholder="CSV 템플릿을 내려받아 작성한 뒤 붙여넣거나 불러오세요."
+                value={bulkCsvText}
+                onChange={(event) => setBulkCsvText(event.target.value)}
+                spellCheck={false}
+              />
+              {bulkResult ? (
+                <div className="bulk-result">
+                  <strong>
+                    성공 {bulkResult.renderedCount}건 · 실패 {bulkResult.failedCount}건
+                  </strong>
+                  <span>{bulkResult.outputDir}</span>
+                  <ol className="gate-list">
+                    {bulkResult.rows.slice(0, 5).map((row) => (
+                      <li key={`${row.rowNumber}-${row.outputName}`}>
+                        {row.rowNumber}행 · {row.status} · {row.message ?? row.outputName}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        </aside>
+      </div>
+      {stockSearchOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="free image search">
+          <div className="stock-modal">
+            <div className="modal-header">
+              <strong>Pixabay 무료 이미지 검색</strong>
+              <button type="button" className="ghost" onClick={() => setStockSearchOpen(false)}>
+                닫기
+              </button>
+            </div>
+            <div className="row">
+              <input
+                value={stockQuery}
+                onChange={(event) => setStockQuery(event.target.value)}
+                placeholder="예: money, office, finance"
+              />
+              <button type="button" onClick={searchStockImages} disabled={stockLoading}>
+                {stockLoading ? "검색 중" : "검색"}
+              </button>
+            </div>
+            {stockFallbackUrl ? (
+              <p className="hint">브라우저에서 열린 Pixabay 결과를 내려받은 뒤 파일 추가로 등록하세요.</p>
+            ) : null}
+            <div className="stock-grid">
+              {stockImages.map((image) => (
+                <button
+                  type="button"
+                  key={image.id}
+                  className="stock-card"
+                  onClick={() => void addStockImageToLibrary(image)}
+                >
+                  <img src={image.previewUrl} alt="" />
+                  <span>{image.author}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </main>
+  );
+}

@@ -1,0 +1,271 @@
+# 인수인계서 — 정보형 카드뉴스 제작기 재설계
+
+> 이 문서는 작업 세션이 끊기거나(토큰 소진) 다른 에이전트(Codex 등)가 이어받을 때 필요한 전체 맥락을 담는다.
+> 결정이 바뀌거나 새 라운드가 진행될 때마다 이 파일을 갱신한다.
+
+## 0. 프로젝트 상태 (한 줄 요약)
+
+기존 "GPT 이미지 자동 생성기" Chrome 익스텐션(ChatGPT DOM 자동화)은 **폐기 결정**.
+[cardprinter](https://github.com/kimsh-1/cardprinter) 아키텍처(로컬 결정론 HTML/CSS 텍스트 레이어 + headless Chrome 렌더링)를 참고해 **새로 설계** 중.
+딥인터뷰와 omc-plan 컨센서스는 완료. 2026-07-07 Codex/ULW 세션에서 최종 계획 구현을 진행해 Electron + React 앱의 parser, 저장소, 오프스크린 PNG 렌더러, 품질 게이트, 기본 style fallback, Windows unpacked 패키징까지 동작 검증했다. 현재 앱은 기본 newsprint 스타일로 10장 PNG를 생성하고, `slots.json`/`gate-report.json`을 저장하며, 렌더 후 승인 대기 상태를 표시한다.
+
+## 1. 왜 폐기했나
+
+기존 익스텐션은 ChatGPT에 프롬프트를 자동입력해 "AI가 이미지를 생성"하는 방식이라, 텍스트 위치가 매번 미세하게 달라지고 픽셀 단위 일관성을 보장할 수 없었음. 사용자가 cardprinter 데모(신문지형 마스트헤드 + 제목/부제 + 배경사진, 8장 카드 캐러셀)를 보고 방향 전환을 요청 — 로컬에서 HTML/CSS로 텍스트를 결정론적으로 렌더링하는 방식이 훨씬 낫다고 판단.
+
+## 2. cardprinter 검증 결과 (완료)
+
+`https://github.com/kimsh-1/cardprinter` 클론 후 Windows에서 실제 설치·렌더링 성공 (`bash scripts/pipeline.sh examples/sample draft` → 0 FAIL, 2 WARN, PNG 8장 정상 생성).
+
+**Windows 로컬 패치 3개** (원본 리포는 안 건드림, 클론본에만 적용):
+1. `export PYTHONUTF8=1` — 한글 로케일(cp949)이 UTF-8 JSON을 못 읽는 문제
+2. `pip install brotli fonttools` — WOFF2 폰트 파싱 누락 의존성
+3. `scripts/render/export_card.mjs`의 `findChrome()`에 `CARDPRINTER_CHROME` 환경변수 폴백 추가 — 원코드는 Linux 전용 `chrome-headless-shell` 캐시 경로만 찾음. 시스템 Chrome(`C:\Program Files\Google\Chrome\Application\chrome.exe`)으로 대체 가능.
+
+**아키텍처 핵심 (재사용할 부분)**:
+- 데이터 계약: `brief.json`(사실/소스) → `copy.json`(카드별 **타입드+가변 필드**: type=cover/image/body/cta, blocks=para/bullets/callout) → `tokens.json`(팔레트/폰트/그리드 디자인시스템)
+- 렌더: `scripts/render/build_carousel.mjs`(copy+tokens → HTML 카드) → `scripts/render/export_card.mjs`(headless Chrome로 HTML→PNG, `[data-slot]` 요소의 bbox/색상/폰트크기를 `slots.json`으로 같이 추출)
+- **텍스트는 항상 HTML/CSS 레이어** — AI가 이미지 위에 글자를 그리게 하지 않음(철칙). 그래서 위치가 100% 결정론적.
+- 품질 게이트(G1~G19, 전부 exit-code): 대비(WCAG), 오버플로(bbox⊂세이프존), 폰트크기 하한, 렌더다양성 등을 **렌더링된 PNG에서 픽셀 실측**해서 강제.
+- 톤 티어 시스템: `references/tiers/{luxury,character,brand,newsprint...}.json` — 팔레트/폰트/그리드/모션을 프리셋으로 묶음. 커스텀 티어는 브랜드 BI 이미지에서 `scripts/tiers/palette_extract.py`로 색 추출해 생성 가능(`references/custom-tier-guide.md`).
+
+## 3. 우리 프로젝트에서 달라지는 점 (단순화 요인)
+
+- **배경 이미지**: cardprinter는 AI(gpt-image-2)가 생성 + rembg로 누끼를 따지만, 우리는 **사용자가 직접 업로드**하는 이미지를 그대로 씀 → AI 이미지생성 API, rembg 누끼 파이프라인 전부 불필요.
+- **쇼츠/릴스(S7)**: 요청 범위 밖. 카드 캐러셀(PNG)만 필요.
+- 따라서 우리가 실제로 필요한 건 cardprinter의 **S2(카피 계약)+S3(tokens)+S5~S6(HTML 카드 빌드 → headless Chrome PNG export)** 부분 뿐. S1(brief 리서치), S4(이미지생성+누끼), S7(쇼츠)는 불필요.
+
+## 4. 지금까지 확정된 요구사항
+
+| 항목 | 결정 |
+|---|---|
+| 카드 수 | 10장 독립 카드 (배치 생성, 기존 익스텐션의 "10슬롯"과 동일 개념) |
+| 카드별 텍스트 구성 | **가변적** — 카드마다 제목만/제목+리스트/제목+본문 등 다름. cardprinter의 `copy.json` type/archetype/blocks 구조와 동일 문제의식 |
+| 텍스트 입력 UI | 카드당 자유 textarea 1개 + **라벨 문법**(`제목:`/`소제목:`/`본문:` 등 사용자가 직접 타이핑) — 새 UI 안 만들고 기존 UI 형태 재활용. 이걸 `copy.json` 같은 구조화 데이터로 바꾸는 **파서**가 필요 |
+| 배경 이미지 | 사용자 직접 업로드, **전체 카드 공통 1장** |
+| 헤더 | 카드 상단 라벨/카테고리 (이미지 안에 실제 렌더링되는 텍스트) |
+| 푸터 | SNS 계정명(예: `@kkongdon_story`) (이미지 안에 실제 렌더링되는 텍스트) |
+| 출력/렌더링 방식 | **결정론적** — cardprinter와 동일하게 HTML/CSS 텍스트 레이어 + headless Chrome 스크린샷 → PNG (ChatGPT가 그리게 하지 않음) |
+| 실행 형태 | **확정**: Claude Code 없는 사람도 쓸 수 있는 **독립 앱** (cardprinter처럼 개인 전용 스킬 아님). 사용자의 다른 프로젝트 "KOS POV Lab"(Electron+React, 별도 리포)과 유사한 형태 예상. cardprinter의 Node/Python 렌더 엔진(headless Chrome PNG export)을 이 앱 내부 로직으로 포장해야 함. Electron은 Chromium을 내장하므로 별도 `chrome-headless-shell` 탐색 로직 없이 BrowserWindow로 직접 렌더링/캡처하는 방식도 검토 가치 있음(설계 단계에서 결정) |
+| 카드 비주얼 스타일 | cardprinter 데모(신문지형 `newsprint` 티어: 마스트헤드+제목/부제+배경사진+페이지번호)를 그대로 기본 템플릿으로 채택하고 싶어함 |
+| **스타일 학습 기능 (신규, 미결)** | 사용자가 자신의 기존 캐러셀 이미지를 보여주면 그 스타일(폰트/색/레이아웃)을 자동으로 추출해서 맞추는 기능을 원함 — cardprinter의 커스텀 티어 인제스트(`palette_extract.py`, `custom-tier-guide.md` 경로A)와 개념적으로 동일. **디테일 미결: 이미지에서 뭘 추출할지(팔레트만? 폰트도? 레이아웃 구조도?), 몇 장을 줘야 하는지, 결과를 어떻게 확인/승인받는지** |
+| 작업 프로세스 요구사항 (신규) | **모든 작업은 이 인수인계서(HANDOFF.md)에 계속 기록**하고, 토큰이 다 차면 Codex 등 다른 에이전트가 이 문서만 보고 이어서 작업할 수 있어야 함 |
+
+## 5. 인터뷰 완료 — 최종 확정 사항
+
+- **내 캐러셀 스타일 학습**: 사용자가 본인 캐러셀 예시 이미지를 올리면 (1) 색상 팔레트, (2) 레이아웃 구조(헤더/본문 배치·여백·정렬), (3) 폰트 분위기(굵기/세리프 여부)를 AI 비전 분석으로 추출 — cardprinter의 `palette_extract.py`(팔레트만 자동)보다 범위가 넓음. 정확한 폰트 파일 매칭은 안 되고 "느낌이 제일 비슷한 번들 폰트"를 고르는 수준.
+- **카드 유형 태그**: 카드마다 `유형: 표지` / `유형: 본문` / `유형: 마무리` 태그를 붙이고, 유형별로 완전히 다른 레이아웃 템플릿 적용(cardprinter의 archetype과 동일 사상). 표지=대형 헤드라인 중심, 본문=제목+본문블록, 마무리=CTA 버튼 포함.
+- **라벨 목록 (최종)**: `제목:` / `소제목:` / `본문:` (본문 안에서 `-`로 시작하는 줄은 자동으로 불릿 리스트 렌더링) / `출처:` (하단에 작은 글자) / `강조:` (템플릿이 색/박스로 강조 처리, cardprinter의 callout과 동일).
+- **품질 게이트**: cardprinter 수준(G1~G19: 대비 WCAG, 오버플로 bbox⊂세이프존, 폰트크기 하한, 렌더다양성 등 픽셀 실측 기반 exit-code 게이트)을 **처음부터 전부 도입**하기로 확정. 개발량은 늘지만 품질 안정성 우선.
+
+## 6. 다음 단계
+
+인터뷰 종료. `.omc/specs/deep-interview-cardnews-rebuild.md` 스펙과 omc-plan 컨센서스는 완료되었고, Phase 1~6 기본 구현 루프까지 진행됐다. 다음 세션이 먼저 할 일은 아래 6-2의 잔여 리스크를 확인한 뒤, 실제 배경 이미지 선택 수동 QA와 실사용 스타일 추출 provider 연결 여부를 결정하는 것이다.
+
+## 6-1. omc-plan 컨센서스 진행 상황 (Codex 인수인계 시점)
+
+- Planner 초안 작성 완료: `.omc/drafts/cardnews-rebuild-plan-draft.md`
+  - 핵심 결정: Electron 앱 + **오프스크린 렌더링**(`webPreferences: { offscreen: true }`)으로 카드 HTML → PNG 캡처. `show:false` 일반 창 + `capturePage()`는 채택 안 함(GPU 컴포지팅 스로틀링으로 블랭크 프레임 위험, Architect 검토에서 발견).
+  - Phase 1~6 구성, IPC 설계(`window.cardnews.*`), 데이터 영속성(JSON 파일, `app.getPath('userData')`) 포함.
+- **Architect 검토**: 완료, 위 오프스크린 렌더링 수정 반영됨. Option B(puppeteer-core+headless Chrome 번들)로의 폴백 경로도 리스크 완화책으로 명시해둠.
+- **Critic 재검토(2026-07-06 Codex/ULW)**: 완료, 판정 **REVISE**였고 아래 보완을 반영함.
+  1. Acceptance Criteria에 렌더 완료 후 10장 썸네일/게이트 상태/저장 위치/승인·수정·재생성 UX 추가
+  2. 렌더 실패, 품질 게이트 실패, 스타일 추출 API 실패의 오류 UX/재시도 경로 명시
+  3. 로컬 업로드 이미지의 MIME/확장자/크기 검증, userData 저장, 배경 이미지 외부 전송 금지, 참고 이미지 Vision API 전송 전 사용자 실행 조건 명시
+  4. 번들 한글 폰트 라이선스 고지(`fonts/NOTICE.md`, `THIRD_PARTY_NOTICES.md`, 앱 About/설정 화면) 명시
+  5. 10장 렌더 큐/동시성 기본 1, 진행률, 카드별 timeout, 성능 목표 명시
+  6. stale `show:false` + `capturePage()` 기본 경로를 제거하고, `webPreferences: { offscreen: true }` + `paint` 이벤트 캡처를 기본 경로로 확정
+- **최종 계획 확정**: `.omc/plans/cardnews-rebuild-plan.md` 생성 완료. `.omc/drafts/cardnews-rebuild-plan-draft.md`는 superseded draft로 남김.
+- **Phase 1 진행(2026-07-06 Codex/ULW)**: Electron + React + Vite + TypeScript 스캐폴드 생성 완료.
+  - 추가 파일: `package.json`, `tsconfig*.json`, `vite.config.ts`, `index.html`, `electron/main.ts`, `electron/preload.ts`, `src/domain/*`, `src/ui/*`
+  - 구현 내용: secure preload의 `window.cardnews.*` stub, 헤더/푸터 입력, 배경/스타일 선택 버튼 skeleton, 10장 카드 textarea, 진행/상태 inspector
+  - 검증: `npm run typecheck` 0, `npm run build` 0, `npm audit --audit-level=high` 0, `npm run dev` 기반 Electron smoke screenshot/text dump 생성
+  - 2차 Gate Reviewer REJECT 대응 완료: domain/API 계약 readonly type alias/readonly array로 정리, `tsconfig.node.json`/`tsconfig.web.json` strict flags 보강(`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `noFallthroughCasesInSwitch`, `noPropertyAccessFromIndexSignature`), env index-signature 접근 수정, smoke capture rejection 처리 보강
+  - 증거: `.omc/evidence/phase1-scaffold-dev-rerun.png`, `.omc/evidence/phase1-scaffold-dev-rerun.txt`
+  - 최종 rerun 증거: `.omc/evidence/phase1-scaffold-dev-rerun.png`, `.omc/evidence/phase1-scaffold-dev-rerun.txt`
+  - ULW 최종 게이트 증거: `.omo/evidence/final-ulw-phase1-scaffold-code-review.md`, `.omo/evidence/final-ulw-phase1-scaffold-final-reviewer.md`, `.omo/evidence/final-ulw-phase1-scaffold-manual-qa.md`, `.omo/evidence/final-ulw-phase1-scaffold-qa-matrix.md`, `.omo/evidence/final-ulw-phase1-scaffold-slop-review.md`, `.omo/evidence/logs/*`
+  - 다음 작업: Phase 2 라벨 파서와 domain contract 테스트부터 진행. `parseCardText(raw)`를 먼저 RED 테스트로 고정한 뒤 구현할 것.
+
+## 6-2. 최종 계획 구현 진행 상황 (2026-07-07 Codex/ULW)
+
+- **Phase 2 parser 완료**
+  - 추가/변경: `src/domain/cardParser.ts`, `src/domain/cardParser.test.ts`, `src/domain/cardnews-api.ts`, `electron/main.ts`, `electron/preload.cts`, `src/ui/App.tsx`
+  - 구현: `유형/제목/소제목/본문/출처/강조` 라벨 파서, `표지|본문|마무리` 타입 매핑, `본문:` 내 `-` 불릿 구조화, 빈 카드/잘못된 유형/제목 누락 오류
+  - 증거: `.omo/evidence/logs/wave1-parser-red-no-test-script.log`, `.omo/evidence/logs/wave1-parser-red-missing-implementation.log`, `.omo/evidence/logs/wave1-parser-green-after-preload-cjs.log`, `.omc/evidence/wave1-parser-surface.txt`, `.omc/evidence/wave1-parser-surface.png`
+  - 표면 QA에서 발견/수정: sandboxed preload가 ESM `.js`로는 `window.cardnews`를 노출하지 못해 `electron/preload.cts` → `dist-electron/electron/preload.cjs`로 전환.
+- **Phase 3 renderer / storage 완료**
+  - 추가/변경: `src/storage/deckStore.ts`, `src/render-engine/cardTemplate.ts`, `src/render-engine/offscreenRenderer.ts`
+  - 구현: `app.getPath("userData")/gpt-cardnews-auto` 하위 deck/renders 저장, 로컬 이미지 확장자/MIME/25MB 검증 및 앱 데이터 복사, cover/body/cta 템플릿, `BrowserWindow({ webPreferences: { offscreen: true } })` `paint` 이벤트 기반 PNG 저장, `slots.json` 저장
+  - `show:false` 일반 창 `capturePage()`는 제품 렌더 경로에 사용하지 않음. 기존 smoke screenshot에서만 UI 증거용으로 남아 있음.
+  - 증거: `.omo/evidence/logs/wave2-render-surface-smoke-2.log`, `.omc/evidence/wave2-render-surface.txt`, `.omc/evidence/wave2-render-surface.png`
+  - 산출물 예시: `C:\Users\js480\AppData\Roaming\gpt-cardnews-auto\gpt-cardnews-auto\renders\render-2026-07-06T22-32-00-547Z`
+- **Phase 4 quality gates 완료**
+  - 추가/변경: `src/render-engine/gates/qualityGates.ts`, `src/render-engine/gates/qualityGates.test.ts`, `src/domain/types.ts`
+  - 구현: contrast 4.5:1, safezone overflow, font floor 18px 검사. `gate-report.json`에 구조화 결과 저장.
+  - 증거: `.omo/evidence/logs/wave2-gates-red-missing-implementation.log`, `.omo/evidence/logs/wave2-gates-green.log`
+- **Phase 5 style fallback 구현**
+  - 구현: 참고 이미지 picker IPC, style extraction 실패 시 recoverable `style_extraction_failed` 메시지, `CARDNEWS_MOCK_STYLE_EXTRACTION=1`일 때 mock style draft 생성, 사용자 승인 후 style profile 저장.
+  - 잔여: 실제 Vision/API provider 호출은 아직 연결하지 않았음. 기본 newsprint 렌더는 API 키 없이 계속 가능.
+- **Phase 6 packaging / notices 구현**
+  - 추가/변경: `package.json` `package:dir`/`dist:win` 및 electron-builder 설정, `THIRD_PARTY_NOTICES.md`, `fonts/NOTICE.md`
+  - 검증: `npm run package:dir` 성공, `release/win-unpacked/Cardnews Studio.exe` 생성 및 packaged app smoke 성공.
+  - 증거: `.omo/evidence/logs/final-package-dir-rerun.log`, `.omo/evidence/logs/final-packaged-render-smoke-rerun.log`, `.omc/evidence/final-packaged-render-surface-rerun.txt`, `.omc/evidence/final-packaged-render-surface-rerun.png`
+- **결정론성 증거**
+  - 같은 입력으로 2회 렌더한 `card-01.png`~`card-10.png` SHA-256이 모두 동일.
+  - 증거: `.omo/evidence/logs/wave2-render-determinism-hashes.log`, `.omo/evidence/logs/wave2-render-determinism-diff.log` (`diffExit=0`)
+- **최종 명령 검증**
+  - `npm test`: 2 files / 10 tests pass (`.omo/evidence/logs/final-tests-rerun.log`)
+  - `npm run typecheck`: pass (`.omo/evidence/logs/final-typecheck-rerun.log`)
+  - `npm run build`: pass via `npm run package:dir` (`.omo/evidence/logs/final-package-dir-rerun.log`)
+  - packaged exe smoke: pass (`.omo/evidence/logs/final-packaged-render-smoke-rerun.log`)
+- **잔여 리스크 / 다음 세션 첫 확인**
+  1. 자동 smoke는 기본 배경으로 검증했다. 실제 파일 다이얼로그로 배경 이미지 1장을 선택한 뒤 10장 전체에 적용되는 수동 QA가 필요하다.
+  2. 폰트 바이너리는 아직 번들하지 않고 시스템 fallback을 사용한다. 배포 품질을 고정하려면 OFL 한글 폰트 번들 및 라이선스 전문 추가가 필요하다.
+  3. style extraction은 provider boundary와 mock/fallback까지만 있다. 실제 Vision API 연결 여부와 사용자 승인 문구를 다음 제품 결정으로 남긴다.
+  4. 진행률 이벤트(`render:progress`)는 아직 세분화하지 않았다. 현재 UI는 `렌더링 중... 1/10` 후 완료 상태로 전환한다.
+
+## 6-3. v2 에디터 개선 (2026-07-07, 레퍼런스 영상 기반)
+
+**요청**: 사용자가 Threads 게시물(@makefamily_/post/DaH0sFFiF0H — "세상 참 좋아졌다" 카드뉴스 에디터 데모 영상)을 참조해 "다양한 스타일 + 미리보기 + 디테일"을 요구. 영상 5개를 다운로드·프레임 추출해 레퍼런스 UI(3-패널 에디터: 좌 썸네일 레일 / 중앙 라이브 미리보기 / 우 컨트롤, 스타일 드롭다운 6종, 포인트 색상 스와치, 하단 어둡기 슬라이더, `*단어*` 강조, 배지/페이지번호/멘션/>>>> 디테일)를 분석 후 이식.
+
+**구현 내역**:
+- `src/render-engine/stylePresets.ts` (신규): 6종 스타일 토큰 — newsprint(신문 오버레이)/cinematic(시네마틱 사진)/magazine(매거진 형광 사진)/whiteblue(화이트&블루)/minimal(미니멀 화이트)/darkinfo(다크 인포). 각 토큰에 대비 게이트용 `textBackdrop`/`chromeBackdrop` 근사 배경색 포함. `accentSwatches` 10색.
+- `src/render-engine/cardTemplate.ts` (리워크): 스타일 토큰 기반 렌더. 배지 pill, 페이지 번호(N/총), 푸터 멘션+`>>>>`, `*단어*`→포인트색 하이라이트, 본문 카드 큰 번호(01/02...), 사진형 하단 어둡기 그라디언트(dim), 강조 pill 잉크는 WCAG 대비 계산으로 흰/검 자동 선택(`pickReadableInk`). data-slot 메트릭/게이트 호환 유지.
+- `src/domain/cardParser.ts`: `배지:` 라벨 추가(Card.badge). `*` 불릿은 뒤에 공백 있을 때만 인정(`*강조*` 문법 충돌 방지).
+- Deck/DeckDraft에 `styleId`/`accentColor`/`backgroundDim` 추가, deckStore 영속화, main.ts 검증 확장.
+- IPC `cardnews:getBackgroundPreview` 추가: 선택된 배경을 1080px JPEG data URL로 반환(라이브 미리보기용).
+- `src/ui/App.tsx`+`styles.css` (리워크): 다크 3-패널 에디터. **미리보기는 렌더러가 main과 동일한 `buildCardHtml()`을 직접 import해 iframe srcDoc으로 표시 → 미리보기=최종 PNG 동일 HTML 보장**. 250ms 디바운스, 좌측 10장 썸네일(스케일 iframe), 중앙 스테이지(ResizeObserver 스케일), 우측 스타일/색상/어둡기/카드편집/게이트 결과 패널.
+- `scripts/style-matrix-smoke.mjs` (신규): 6스타일×10카드 렌더+게이트 매트릭스 검증 스크립트. 주의: 오프스크린 렌더 창이 닫힐 때 앱이 종료되지 않도록 `window-all-closed` 핸들러 필수.
+
+**검증**: `npm test` 19/19 (배지·강조충돌·템플릿 스타일 테스트 6개 추가), `npm run typecheck` 0, `npm run build` 0, 스타일 매트릭스 6/6 게이트 전부 pass, E2E 스모크 "렌더 완료: 10장". 증거: `.omc/evidence/v2-editor-*.png|txt`, `.omc/evidence/style-matrix.log`, `%APPDATA%/gpt-cardnews-auto/gpt-cardnews-auto/renders/style-smoke-*`.
+
+**작업 중 발견한 함정 (다음 세션 참고)**:
+1. 미리보기 iframe에 `sandbox=""`를 주면 OOPIF가 되어 `capturePage()` 스모크에서 블랭크로 찍힘 → sandbox 제거(로컬 생성 HTML만 표시하므로 안전).
+2. `transform: scale()`은 숫자만 받으므로 `calc(100cqw/1080)` 같은 길이 단위 불가 → ResizeObserver로 스케일 계산.
+3. 헤더/푸터는 72px 세이프존 게이트 안쪽(top/bottom 80px)에 배치해야 함.
+4. magazine 계열 밝은 accent 위 흰 글자는 대비 4.5:1 미달 가능 → WCAG 잉크 픽커로 해결(게이트가 실제로 잡아냄).
+
+**잔여 (다음 개선 후보)**:
+1. 카드별 개별 배경 이미지(현재 전역 1장) + 무료 이미지 검색(레퍼런스의 Unsplash류 기능).
+2. "현재 카드 PNG"/"전체 ZIP 내보내기" 단축 버튼(현재는 폴더 열기).
+3. 한글 폰트(OFL) 번들 — 현재 시스템 폰트 fallback이라 PC마다 렌더가 달라질 수 있음(cinematic 세리프 스택이 의도와 다른 폰트로 fallback되는 것 확인됨).
+4. 저장/불러오기 UI(loadDeck IPC는 있으나 UI 미연결), 스타일 참고 이미지 학습(Vision API) 연결.
+
+## 6-4. v3 (1.0.0) — 양식/배경 라이브러리 + 배포 빌드 (2026-07-07)
+
+**요청 4건**: ① 양식.md 작성 파일 업로드 → 자동 채우기, ② 배경/양식 저장 + 드롭다운 선택, ③ 빠진 기능 보강, ④ 빌드 + 실행/배포파일 제작.
+
+**구현 내역**:
+- `src/domain/deckImporter.ts` (신규, 순수 파서 + 테스트 7개): 양식.md 파싱. 메타 블록(헤더/멘션/스타일/포인트색상/하단어둡기) + `---` 또는 `## 카드 N` 구분 카드 블록. 스타일은 id·한글명 모두 인식, 잘못된 값은 경고 수집(실패 아님), 카드 최대 12장. `buildTemplateDocument()` 템플릿 생성(라운드트립 테스트 보장).
+- **배경 라이브러리**: `userData/gpt-cardnews-auto/library/backgrounds/` + `backgrounds.json` 인덱스. 드롭다운("없음" 포함) 선택, "파일 추가" = 등록+즉시 적용. 배경 교체 시 확장자 다른 이전 deck asset 삭제(`removeAssetVariants`) — findDeckAssetPath가 옛 파일을 먼저 찾는 버그 예방.
+- **양식 프리셋**: `library/presets.json`. 설정 + 카드 스켈레톤 전체 스냅샷을 이름 붙여 저장/선택/삭제.
+- **워크스페이스 자동 저장/복원**: `workspace.json`, 800ms 디바운스. 재시작 시 카드·설정·배경 복원.
+- **에디터 보강**: 카드 추가/삭제(1~12장), 초기화(confirm), 렌더 후 [현재 카드 PNG]/[전체 ZIP(adm-zip)] 내보내기.
+- **IPC 12개 추가**: importDeckDocument, exportTemplateFile, listBackgroundLibrary, addBackgroundToLibrary, selectBackground(null=없음), listDeckPresets, saveDeckPreset, deleteDeckPreset, saveWorkspace, loadWorkspace, exportCardPng, exportDeckZip.
+- **배포**: `build/icon.ico`(PIL 생성, 카드 스택 모티브), version 1.0.0, NSIS `Cardnews-Studio-Setup-1.0.0.exe`, 바탕화면 바로가기. `npm run dist:win` → `release/`.
+
+**검증**: 테스트 26/26, typecheck 0, E2E 스모크 "렌더 완료: 10장" (`.omc/evidence/v3-editor-ui.png`).
+
+**주의 (다음 세션)**:
+- adm-zip은 production dependency여야 electron-builder가 번들함.
+- WorkspaceState/DeckPreset의 optional 필드는 exactOptionalPropertyTypes 때문에 조건부 스프레드로만 삽입.
+- 워크스페이스 복원 완료 전 자동 저장이 돌지 않도록 `workspaceReady` ref 가드 필수.
+- **빌드 함정**: 이전 빌드의 `Cardnews Studio.exe`가 실행 중이면 `release/win-unpacked` EBUSY로 electron-builder 실패 → `taskkill //F //IM "Cardnews Studio.exe"` 후 `rm -rf release` 재시도. OneDrive 경로라 동기화 잠금 가능성도 있음.
+
+## 6-5. v4 업그레이드 완료 감사/구현/패키징 (2026-07-07 Codex/ULW)
+
+**사용자 요청**: `.omc/plans/v4-upgrade-plan.md` 기준으로 A2 완료 여부를 실제 코드/테스트/릴리즈 산출물로 감사한 뒤, A3부터 F까지 순차 구현하고 `release/Cardnews-Studio-Setup-1.0.0.exe`, `release/win-unpacked/Cardnews Studio.exe`를 다시 생성·검증. Claude Code에 넘길 상세 인수인계서도 남길 것.
+
+**A2 감사 결과**: A2는 부분 완료였다. 전역 `backgroundId`와 기본 검증은 있었지만, legacy `backgroundImage`/asset lookup 제거, 카드별 override, style v2/custom style 저장, 외부 이미지 fallback, expanded gates/migration, 최종 패키징 검증은 미완이었다. 감사 기록: `.omo/evidence/v4-upgrade/audit/a2-audit-summary.md`.
+
+**구현 완료 요약**:
+- A3: Pretendard 번들 폰트 CSS 임베드 및 오프스크린 렌더 폰트 로딩.
+- B: style preset v2 토큰, `design.md` 계약 export, JSON custom style parse/save/delete, `.json 파일 열기`.
+- C: 카드별 배경/밝기/대비/채도/정렬/간격/어둡기 override와 저장/렌더 연결.
+- D: Pixabay API 검색/다운로드 및 API 키 없을 때 브라우저 fallback. attribution 저장.
+- E: 밝은 Canva-light 편집 UI, rail resizer, style/배경/디자인 컨트롤, `usage.html` 사용법 갱신.
+- F: 경고/실패 분리 품질 게이트, legacy migration 테스트, 28-combo matrix smoke, 라이선스 고지, Windows packaging.
+
+**중요 수정**: 최종 matrix smoke 첫 실행에서 간헐적 blank frame이 발생했다. 원인은 첫 non-empty paint가 단색 배경 프레임일 때 바로 캡처하는 타이밍 문제. `src/render-engine/offscreenRenderer.ts`에서 blank frame을 무시하고, timeout을 10초로 늘리고, `document.fonts.ready` 후 repaint를 유도하도록 수정했다. 재실행 matrix는 통과.
+
+**최종 검증 증거**:
+- `npm run typecheck`: `.omo/evidence/v4-upgrade/logs/final-after-review-typecheck.log` exit 0
+- `npm test`: `.omo/evidence/v4-upgrade/logs/final-after-review-tests.log` - 7 files / 48 tests pass
+- `npm run build`: `.omo/evidence/v4-upgrade/logs/final-after-review-build.log` exit 0
+- 28-combo style matrix: `.omo/evidence/v4-upgrade/logs/final-after-review-style-matrix-smoke.log` exit 0. hard gate fail/RENDER FAIL 없음. `font_variety`, `filter_contrast`는 advisory warn으로 남음.
+- package:dir/dist:win: `.omo/evidence/v4-upgrade/logs/final-after-review-package-dir.log`, `.omo/evidence/v4-upgrade/logs/final-after-review-dist-win.log` exit 0
+- packaged exe smoke: `.omo/evidence/v4-upgrade/screenshots/final-after-review-packaged-render-smoke.png`, `.omo/evidence/v4-upgrade/logs/final-after-review-packaged-render-smoke-text.txt`, `.omo/evidence/v4-upgrade/logs/final-after-review-packaged-render-smoke.log` exit 0
+
+**릴리즈 산출물**:
+- `release/Cardnews-Studio-Setup-1.0.0.exe`
+  - size 106,364,851 bytes
+  - SHA-256 `adb65bf2a81bc63776a7c568ef28fb90e880469ff6f9016a51c8c46da38c001f`
+- `release/win-unpacked/Cardnews Studio.exe`
+  - size 235,706,368 bytes
+  - SHA-256 `be1e60b6bbdb71041ab5121e94a3abd03d9f25156121c68f9f7d59ba93aadd1b`
+- 해시/버전 증거: `.omo/evidence/v4-upgrade/logs/release-sha256.txt`, `.omo/evidence/v4-upgrade/logs/release-version-info.txt`
+
+**상세 Claude Code 인수인계서**: `.omc/handoffs/v4-upgrade-handoff-20260707.md`
+
+**최종 evidence 묶음**:
+- `.omo/evidence/v4-upgrade/final/verification-summary.md`
+- `.omo/evidence/v4-upgrade/final/manual-qa-matrix.md`
+- `.omo/evidence/v4-upgrade/final/final-verification-manifest.json`
+- `.omo/evidence/v4-upgrade/final/code-review.md`
+- `.omo/evidence/v4-upgrade/final/programming-size-exceptions.md`
+
+**잔여 리스크 / 다음 개선 후보**:
+1. 설치형 exe는 실제 설치를 실행하지 않았다. 시스템 설치 부작용을 피하기 위해 NSIS 빌드 로그, exact filename, 크기/해시/버전, unpacked exe 실제 실행 smoke로 검증했다.
+2. Matrix hard gate는 통과하지만 advisory warn이 남아 있다. body card font size tier를 줄이고 white/minimal source contrast를 더 올리면 경고를 줄일 수 있다.
+3. production 파일 6개가 250 pure LOC를 넘는다. 첫 5줄 안의 `SIZE_OK`는 릴리즈 예외이며, 다음 기능 전 `.omo/evidence/v4-upgrade/final/programming-size-exceptions.md`의 split plan을 실행해야 한다.
+4. 계획 문서에는 v2.0.0 표현이 있으나 사용자가 명시한 산출물명이 `1.0.0`이어서 버전은 1.0.0 유지.
+
+## 6-6. v4 테스트 피드백 반영 완료 (2026-07-07 Codex/ULW)
+
+**사용자 테스트 피드백**: PNG가 HTML과 달리 비어 보임, 배경 이미지가 미리보기/PNG에 적용되지 않음, 글자 겹침/잘림, 콘텐츠/내보내기 탭 무반응, JSON 스타일 샘플 부재, 폰트/텍스트/도형/선/이미지 레이어 필요, CSV 대량생산 필요. 사용자가 추천안 승인 후 `slides-grab` 저장소도 이미지 렌더링 참고 자료로 제시함.
+
+**구현 완료**:
+- 렌더러 신뢰성: `src/render-engine/offscreenRenderer.ts`가 폰트/이미지/CSS background/렌더 준비/안정 프레임 이후 캡처하고 blank frame을 거부한다.
+- 시각 게이트: `src/render-engine/gates/visualContentGate.ts`와 `scripts/verify-render-png.mjs`로 대부분 흰 PNG/낮은 커버리지 산출을 hard fail로 잡는다. 단, 합법적인 미니멀 흰 배경은 coverage와 luminance까지 함께 판단해 오탐을 줄였다.
+- 배경 계약: `backgroundCssUrl`이 있으면 모든 프리셋에서 `.photo`를 렌더한다. 미리보기와 PNG가 같은 `buildCardHtml()` 경로를 사용한다.
+- 커스텀 스타일 대비: `newsprint` id 특수처리를 제거하고 프리셋의 `textBackdrop`/`chromeBackdrop`을 사용하게 고쳐 `custom-smoke`와 AI JSON 스타일도 내장 스타일처럼 검증된다.
+- UI 탭: `디자인`, `콘텐츠`, `내보내기`가 실제 별도 패널로 동작한다.
+- JSON 스타일: 샘플 JSON, AI용 디자인 계약, fenced JSON 파싱/검증을 제공한다.
+- 폰트: `.ttf`, `.otf`, `.woff2`를 앱 관리 폴더로 가져와 선택 가능.
+- 콘텐츠 레이어: 텍스트 박스, 도형, 선, 이미지 레이어를 구조화 모델로 저장하고 preview/PNG에 렌더한다.
+- CSV bulk: 한 CSV 행이 한 deck/render job이 되며, 실패 행은 `bulk-report.json`/`bulk-report.csv`에 남기고 정상 행은 계속 렌더한다.
+- 내보내기 smoke: `CARDNEWS_SMOKE_ACTION=render-export`가 렌더 후 현재 카드 PNG와 전체 ZIP을 실제 export 경로로 검증한다. smoke 중에는 OS 저장 대화상자 대신 render output의 `smoke-exports/`에 자동 저장한다.
+
+**최종 검증 증거**:
+- `npm run typecheck`: `.omo/evidence/v4-test-feedback-repair/final-typecheck-after-visual-threshold-fix.log` exit 0
+- `npm run test`: `.omo/evidence/v4-test-feedback-repair/final-test-after-visual-threshold-fix.log` - 9 files / 56 tests pass
+- `npm run build`: `.omo/evidence/v4-test-feedback-repair/final-build-after-visual-threshold-fix.log` exit 0
+- 스타일 매트릭스: `.omo/evidence/v4-test-feedback-repair/final-style-matrix.log` exit 0. 내장 스타일 + `custom-smoke` hardGate 모두 pass. 남은 항목은 advisory warn(`font_variety`, `filter_contrast`).
+- dev smoke: `.omo/evidence/v4-test-feedback-repair/final-smoke-render-export.log`, `final-smoke-bg.log`, `final-smoke-bulk.log` 모두 exit 0
+- packaged exe smoke: `.omo/evidence/v4-test-feedback-repair/final-dist-packaged-smoke-render-export.log` exit 0
+- PNG 픽셀 검증: `.omo/evidence/v4-test-feedback-repair/final-visual-verifier-render.json`, `final-visual-verifier-bulk.json` 모두 `ok: true`
+- 최종 요약: `.omo/evidence/v4-test-feedback-repair/final-smoke-summary.json`, `final-release-hashes.json`, `final-release-artifacts.log`
+
+**최종 릴리즈 산출물**:
+- `release/Cardnews-Studio-Setup-1.0.0.exe`
+  - size 106,376,772 bytes
+  - SHA-256 `0dc113554a72e8e7b491c4616b802dd61cd011cd7056a7c28426cd53d3f10b92`
+  - modified local `2026-07-07T23:15:05`
+- `release/win-unpacked/Cardnews Studio.exe`
+  - size 235,706,368 bytes
+  - SHA-256 `97a262689252b4fec3bd3d0dec01958b4d7337097bd8faf61353ae44fd88df37`
+  - modified local `2026-07-07T23:14:43`
+
+**Claude Code 상세 인수인계서**: `.omc/handoffs/v4-test-feedback-repair-handoff-20260707.md`
+
+**남은 리스크**:
+1. 설치 프로그램은 시스템 설치 부작용 때문에 직접 실행하지 않았다. 대신 `dist:win` 로그, 파일 해시, 최종 `win-unpacked` EXE 실제 실행 smoke로 검증했다.
+2. `Get-AuthenticodeSignature` 기준 두 EXE는 미서명이다. 증거: `.omo/evidence/v4-test-feedback-repair/final-authenticode-signature.json`
+3. 스타일 매트릭스 hard gate는 통과하지만 advisory warning은 남아 있다. 다음 개선 시 body 카드 폰트 단계와 source 대비를 다듬으면 줄일 수 있다.
+4. 대부분 파일이 아직 Git 추적 전 상태로 보인다. 후속 커밋 시 전체 diff를 다시 검토하고 `AGENTS.md`의 Lore Commit Protocol을 따라야 한다.
+
+## 7. 참고 리소스
+
+- cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`
+- 렌더 결과 샘플: `cardprinter/examples/sample/out/card-01.png` ~ `card-08.png` (신문지형 데모, 검증 완료)
+- 딥인터뷰 상태 파일: `.omc/state/deep-interview-state.json` (진행 중, interview_id: di-cardnews-20260706)

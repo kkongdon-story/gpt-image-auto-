@@ -13,3 +13,17 @@ Thumbs.db
 # 임시 파일
 *.zip
 *.log
+
+# Node/Electron generated files
+node_modules/
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# 에이전트 작업 상태/증거 (문서는 plans/handoffs/specs만 커밋)
+.omo/
+.omc/*
+!.omc/plans/
+!.omc/handoffs/
+!.omc/specs/

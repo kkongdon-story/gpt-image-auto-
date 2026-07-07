@@ -315,21 +315,7 @@ export function App(): ReactElement {
     }
 
     const timer = setTimeout(() => {
-      const state: WorkspaceState = {
-        headerLabel,
-        footerAccount,
-        styleId,
-        aspectRatio: aspectRatioId,
-        ...(customAccent ? { accentColor: customAccent } : {}),
-        ...(customDim !== null ? { backgroundDim: customDim } : {}),
-        ...(backgroundId ? { backgroundId } : {}),
-        ...(selectedFontId ? { fontId: selectedFontId } : {}),
-        ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
-        railWidth,
-        cards,
-        selectedIndex
-      };
-      void window.cardnews.saveWorkspace(state);
+      void window.cardnews.saveWorkspace(buildWorkspaceState());
     }, 800);
     return () => clearTimeout(timer);
   }, [
@@ -1066,6 +1052,51 @@ export function App(): ReactElement {
     setStatus(isCardnewsError(saved) ? saved.message : `ZIP 저장: ${saved}`);
   }
 
+  async function exportProjectFile(): Promise<void> {
+    const savedWorkspace = await window.cardnews.saveWorkspace(buildWorkspaceState());
+    if (isCardnewsError(savedWorkspace)) {
+      setStatus(savedWorkspace.message);
+      return;
+    }
+
+    const saved = await window.cardnews.exportProject();
+    setStatus(isCardnewsError(saved) ? saved.message : `프로젝트 저장: ${saved.filePath}`);
+  }
+
+  async function importProjectFile(): Promise<void> {
+    const imported = await window.cardnews.importProject();
+    if (isCardnewsError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+
+    const [backgrounds, fonts, styles, nextPresets] = await Promise.all([
+      window.cardnews.listBackgroundLibrary(),
+      window.cardnews.listFontLibrary(),
+      window.cardnews.listCustomStyles(),
+      window.cardnews.listDeckPresets()
+    ]);
+    if (!isCardnewsError(backgrounds)) {
+      setBackgroundLibrary(backgrounds);
+    }
+    if (!isCardnewsError(fonts)) {
+      setFontLibrary(fonts);
+    }
+    if (!isCardnewsError(styles)) {
+      setCustomStyles(styles);
+    }
+    if (!isCardnewsError(nextPresets)) {
+      setPresets(nextPresets);
+    }
+
+    applySnapshot(imported.workspace);
+    await loadFontCss(imported.workspace.fontId ?? null);
+    setRenderResult(null);
+    setBulkResult(null);
+    setApprovedJobId(null);
+    setStatus(`프로젝트 열기: ${imported.filePath}`);
+  }
+
   async function exportBulkTemplate(): Promise<void> {
     const saved = await window.cardnews.exportBulkCsvTemplate(buildBulkCsvTemplate(styleId, aspectRatioId));
     setStatus(isCardnewsError(saved) ? saved.message : `CSV 템플릿 저장: ${saved}`);
@@ -1128,6 +1159,23 @@ export function App(): ReactElement {
         index: index + 1,
         rawText
       }))
+    };
+  }
+
+  function buildWorkspaceState(): WorkspaceState {
+    return {
+      headerLabel,
+      footerAccount,
+      styleId,
+      aspectRatio: aspectRatioId,
+      ...(customAccent ? { accentColor: customAccent } : {}),
+      ...(customDim !== null ? { backgroundDim: customDim } : {}),
+      ...(backgroundId ? { backgroundId } : {}),
+      ...(selectedFontId ? { fontId: selectedFontId } : {}),
+      ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+      railWidth,
+      cards,
+      selectedIndex
     };
   }
 
@@ -1842,6 +1890,17 @@ export function App(): ReactElement {
             ) : (
               <span className="hint">PNG 생성 버튼을 누르면 전체 카드를 렌더링합니다.</span>
             )}
+            <div className="project-panel">
+              <p className="panel-title">프로젝트</p>
+              <div className="row">
+                <button type="button" onClick={exportProjectFile}>
+                  프로젝트 저장(.cardnews)
+                </button>
+                <button type="button" onClick={importProjectFile}>
+                  프로젝트 열기
+                </button>
+              </div>
+            </div>
             <div className="bulk-panel">
               <p className="panel-title">CSV 대량 생성</p>
               <div className="row">

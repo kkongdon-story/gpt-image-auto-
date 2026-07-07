@@ -11,6 +11,8 @@ import type {
   FontLibraryItem,
   ImportedDocument,
   LocalImageRef,
+  ProjectArchiveResult,
+  ProjectImportResult,
   RenderJobResult,
   StockImageDownloadInput,
   StockImageSearchResult,
@@ -55,5 +57,7 @@ export type CardnewsApi = {
   readonly loadWorkspace: () => Promise<CardnewsResult<WorkspaceState | null>>;
   readonly exportCardPng: (jobId: string, fileName: string) => Promise<CardnewsResult<string>>;
   readonly exportDeckZip: (jobId: string) => Promise<CardnewsResult<string>>;
+  readonly exportProject: () => Promise<CardnewsResult<ProjectArchiveResult>>;
+  readonly importProject: () => Promise<CardnewsResult<ProjectImportResult>>;
   readonly openExternalLink: (url: string) => Promise<CardnewsResult<void>>;
 };

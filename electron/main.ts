@@ -26,7 +26,8 @@ import type {
   StockImageDownloadInput,
   StockImageSearchResult,
   StylePresetRecord,
-  StyleProfile
+  StyleProfile,
+  WorkspaceState
 } from "../src/domain/types.js";
 import { buildFontFaceCss } from "../src/render-engine/cardTemplate.js";
 import { renderDeckOffscreen } from "../src/render-engine/offscreenRenderer.js";
@@ -61,6 +62,10 @@ import {
   saveWorkspaceState,
   type StoredLocalImage
 } from "../src/storage/deckStore.js";
+import {
+  exportProjectArchive,
+  importProjectArchive
+} from "../src/storage/projectArchive.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const devServerUrl = process.env["VITE_DEV_SERVER_URL"];
@@ -325,9 +330,94 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       }
       return { ok: true };
     }
+    case "project-roundtrip":
+      return await runProjectRoundtripSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
+}
+
+async function runProjectRoundtripSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  let originalWorkspace = await loadWorkspaceState(storageRoot());
+  if (!originalWorkspace) {
+    originalWorkspace = await seedProjectSmokeWorkspace();
+  }
+
+  const smokeDir = path.join(storageRoot(), "smoke-project");
+  const projectPath = path.join(smokeDir, "roundtrip.cardnews");
+  const importRoot = path.join(smokeDir, "import-root");
+  await fs.rm(smokeDir, { recursive: true, force: true });
+  await fs.mkdir(importRoot, { recursive: true });
+
+  const exported = await exportProjectArchive(storageRoot(), projectPath, app.getVersion());
+  if (isCardnewsError(exported)) {
+    return { ok: false, message: exported.message };
+  }
+
+  const imported = await importProjectArchive(importRoot, projectPath);
+  if (isCardnewsError(imported)) {
+    return { ok: false, message: imported.message };
+  }
+
+  const importedWorkspace = imported.workspace;
+  if (
+    importedWorkspace.cards.length !== originalWorkspace.cards.length ||
+    importedWorkspace.styleId !== originalWorkspace.styleId ||
+    importedWorkspace.headerLabel !== originalWorkspace.headerLabel ||
+    importedWorkspace.footerAccount !== originalWorkspace.footerAccount
+  ) {
+    return { ok: false, message: "Project smoke workspace fields did not roundtrip." };
+  }
+
+  if (originalWorkspace.backgroundId) {
+    if (!importedWorkspace.backgroundId || !(await findLibraryBackground(importRoot, importedWorkspace.backgroundId))) {
+      return { ok: false, message: "Project smoke background asset did not import." };
+    }
+  }
+
+  if (originalWorkspace.fontId) {
+    if (!importedWorkspace.fontId || !(await findLibraryFont(importRoot, importedWorkspace.fontId))) {
+      return { ok: false, message: "Project smoke font asset did not import." };
+    }
+  }
+
+  const evidence = {
+    projectPath,
+    importedWorkspace,
+    backgroundCount: imported.backgroundCount,
+    fontCount: imported.fontCount,
+    presetCount: imported.presetCount,
+    styleCount: imported.styleCount
+  };
+  await mainWindow.webContents.executeJavaScript(`
+    (() => {
+      const pre = document.createElement("pre");
+      pre.id = "project-roundtrip-result";
+      pre.textContent = "PROJECT_ROUNDTRIP_RESULT " + ${JSON.stringify(JSON.stringify(evidence))};
+      document.body.append(pre);
+    })()
+  `);
+
+  return { ok: true };
+}
+
+async function seedProjectSmokeWorkspace(): Promise<WorkspaceState> {
+  const [backgrounds, fonts] = await Promise.all([listBackgroundLibrary(storageRoot()), listFontLibrary(storageRoot())]);
+  const workspace: WorkspaceState = {
+    headerLabel: "MONEY NOTE",
+    footerAccount: "@kkongdon_story",
+    styleId: "minimal",
+    aspectRatio: "4:5",
+    ...(backgrounds[0] ? { backgroundId: backgrounds[0].id } : {}),
+    ...(fonts[0] ? { fontId: fonts[0].id } : {}),
+    cards: [
+      "유형: 표지\n배지: PROJECT\n제목: 프로젝트 저장 테스트\n소제목: cardnews 라운드트립",
+      "유형: 본문\n제목: 불러오기 검증\n본문: 저장한 카드와 설정을 다시 불러옵니다."
+    ],
+    selectedIndex: 0
+  };
+  await saveWorkspaceState(storageRoot(), workspace);
+  return workspace;
 }
 
 async function clickSmokeButton(mainWindow: BrowserWindow, action: string): Promise<void> {
@@ -1535,6 +1625,32 @@ app.whenReady().then(() => {
       const message = error instanceof Error ? error.message : "알 수 없는 압축 오류";
       return invalidInput(`ZIP을 만들지 못했습니다: ${message}`);
     }
+  });
+  ipcMain.handle("cardnews:exportProject", async () => {
+    const stamp = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog({
+      defaultPath: `cardnews-project-${stamp}.cardnews`,
+      filters: [{ extensions: ["cardnews"], name: "Cardnews Project" }]
+    });
+    if (result.canceled || !result.filePath) {
+      return invalidInput("프로젝트 저장이 취소되었습니다.");
+    }
+
+    const targetPath = result.filePath.toLowerCase().endsWith(".cardnews")
+      ? result.filePath
+      : `${result.filePath}.cardnews`;
+    return exportProjectArchive(storageRoot(), targetPath, app.getVersion());
+  });
+  ipcMain.handle("cardnews:importProject", async () => {
+    const result = await dialog.showOpenDialog({
+      filters: [{ extensions: ["cardnews"], name: "Cardnews Project" }],
+      properties: ["openFile"]
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return invalidInput("프로젝트 열기가 취소되었습니다.");
+    }
+
+    return importProjectArchive(storageRoot(), result.filePaths[0] ?? "");
   });
   ipcMain.handle("cardnews:getFontData", async (_event, fontId: unknown) => {
     if (fontId !== undefined && fontId !== null && typeof fontId !== "string") {

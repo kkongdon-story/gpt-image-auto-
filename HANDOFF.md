@@ -288,6 +288,26 @@
 
 **다음 단계**: V5-2 문제6(세팅/프로젝트 명시적 저장·불러오기)부터 진행한다. Phase 완료 시 표준 검증 명령과 smoke를 다시 통과시킨 뒤 Lore Commit Protocol로 커밋한다.
 
+## 6-8. V5-2 프로젝트 저장·불러오기 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v5-completion-prd.md`
+
+**구현 완료**:
+- `.cardnews` ZIP 프로젝트 파일을 추가했다. 포함 항목은 `manifest.json`, `workspace.json`, `presets.json`, `styles.json`, 참조된 `backgrounds/`, 참조된 `fonts/`이다.
+- `src/storage/projectArchive.ts`에서 export/import를 분리했다. import 시 배경/폰트 id 충돌을 새 id로 remap하고, workspace/preset의 참조도 함께 갱신한다.
+- Electron IPC `exportProject()` / `importProject()`를 추가했다. 저장/열기 OS dialog를 사용하고, 취소는 `invalid_input` 결과로 UI에 표시된다.
+- 내보내기 탭에 `프로젝트 저장(.cardnews)`, `프로젝트 열기` 버튼을 추가했다.
+- 순수 모듈 테스트 `src/storage/projectArchive.test.ts`를 추가해 workspace/preset/override/image layer 참조 수집과 manifest 누락 hard fail을 검증한다.
+- `CARDNEWS_SMOKE_ACTION=project-roundtrip` smoke를 추가했다. 저장된 workspace가 없으면 smoke용 기본 workspace를 만든 뒤 `.cardnews` export/import를 수행하고, 빈 import-root에서 workspace와 참조 asset 복원을 검증한다.
+
+**증거**:
+- 표준 gate: `.omc/evidence/v5/task-v5-2-standard-gate.txt` — `10` files / `63` tests pass, build exit 0.
+- style matrix: `.omc/evidence/v5/task-v5-2-style-matrix.txt` — exit 0, hardGate fail 없음. 기존 advisory `font_variety` 경고는 잔존.
+- dev smoke: `.omc/evidence/v5/task-v5-2-dev-smoke.log`, `.omc/evidence/v5/smoke.png`, `.omc/evidence/v5/smoke.txt` — `CARDNEWS_SMOKE_ACTION=render-deck` exit 0.
+- project roundtrip smoke: `.omc/evidence/v5/task-v5-2-project-smoke.log`, `.omc/evidence/v5/task-v5-2-project-smoke.txt`, `.omc/evidence/v5/task-v5-2-project-smoke.png` — `backgroundCount: 1`, `fontCount: 1`, imported workspace에 remapped 배경/폰트 참조 확인.
+
+**다음 단계**: V5-3 문제4(레이어 캔버스 직접 편집) S1부터 진행한다. 레이어 기본값 수정 → 오버레이 선택/이동 → 리사이즈 → 인라인 텍스트 → 인스펙터 연동 순서로 구현하고, Phase 완료 시 표준 검증 명령과 smoke를 다시 통과시킨 뒤 커밋한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

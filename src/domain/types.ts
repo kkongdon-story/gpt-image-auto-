@@ -347,6 +347,18 @@ export type AppSettings = {
   readonly pixabayApiKey?: string;
 };
 
+export type ProjectArchiveResult = {
+  readonly filePath: string;
+  readonly backgroundCount: number;
+  readonly fontCount: number;
+  readonly presetCount: number;
+  readonly styleCount: number;
+};
+
+export type ProjectImportResult = ProjectArchiveResult & {
+  readonly workspace: WorkspaceState;
+};
+
 export type StockImage = {
   readonly id: string;
   readonly provider: "pixabay";

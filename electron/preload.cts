@@ -52,6 +52,8 @@ const api: CardnewsApi = {
   exportCardPng: (jobId: string, fileName: string) =>
     ipcRenderer.invoke("cardnews:exportCardPng", jobId, fileName),
   exportDeckZip: (jobId: string) => ipcRenderer.invoke("cardnews:exportDeckZip", jobId),
+  exportProject: () => ipcRenderer.invoke("cardnews:exportProject"),
+  importProject: () => ipcRenderer.invoke("cardnews:importProject"),
   openExternalLink: (url: string) => ipcRenderer.invoke("cardnews:openExternalLink", url)
 };
 

@@ -656,6 +656,7 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.project-panel,
 .bulk-panel,
 .bulk-result {
   border-top: 1px solid var(--border);

@@ -308,6 +308,35 @@
 
 **다음 단계**: V5-3 문제4(레이어 캔버스 직접 편집) S1부터 진행한다. 레이어 기본값 수정 → 오버레이 선택/이동 → 리사이즈 → 인라인 텍스트 → 인스펙터 연동 순서로 구현하고, Phase 완료 시 표준 검증 명령과 smoke를 다시 통과시킨 뒤 커밋한다.
 
+## 6-9. V5-3 레이어 캔버스 직접 편집 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v5-completion-prd.md`
+
+**구현 완료**:
+- 중앙 미리보기 위에 편집 모드 전용 투명 오버레이를 추가했다. iframe은 진실의 렌더 HTML로 유지하고, 편집 모드에서만 pointer events를 오버레이가 받는다.
+- 레이어 클릭 선택, 드래그 이동, 8방향 리사이즈 핸들, 8px 스냅/Shift 해제, 중앙/세이프존 가이드를 구현했다.
+- 텍스트 레이어 더블클릭 인라인 편집, blur/Ctrl+Enter 커밋, Esc 취소, 방향키 이동, Delete 삭제를 구현했다.
+- 우측 디자인 탭에 선택 레이어 속성 패널을 연결했다. 텍스트 색/크기/굵기/기울임/정렬, 도형 색/형태, 선 색/두께, z순서를 조정할 수 있다.
+- 신규 텍스트 레이어 기본값을 투명 배경, 현재 스타일 ink 색, 40px, 중앙 정렬로 바꿨다. 도형 기본값은 accent 20% 불투명 채움으로 조정했다.
+- 레이어 텍스트의 품질 게이트 폰트 측정이 브라우저 computed style의 16px 폴백에 흔들리지 않도록 `data-font-size`와 style 속성 파서를 메트릭 계약에 추가했다.
+- reset 시 레이어 선택/인라인 편집 상태를 함께 정리하고, `CARDNEWS_SMOKE_ACTION=edit-layer` smoke를 추가했다. 이 smoke는 실제 UI에서 리셋 → 편집 모드 → 텍스트 레이어 추가 → 드래그 이동 → 더블클릭 텍스트 수정 → PNG 생성까지 검증한다.
+
+**증거**:
+- 표준 gate: `.omc/evidence/v5/task-v5-3-standard-gate.txt` — typecheck exit 0, `10` files / `64` tests pass, build exit 0.
+- style matrix: `.omc/evidence/v5/task-v5-3-style-matrix.txt` — exit 0, 모든 hardGate pass. 기존 advisory `font_variety` warning은 잔존.
+- dev smoke: `.omc/evidence/v5/task-v5-3-dev-smoke.log`, `.omc/evidence/v5/smoke.png`, `.omc/evidence/v5/smoke.txt` — `CARDNEWS_SMOKE_ACTION=render-deck` exit 0.
+- edit-layer smoke: `.omc/evidence/v5/task-v5-3-edit-layer-smoke.log`, `.omc/evidence/v5/task-v5-3-edit-layer-smoke.png`, `.omc/evidence/v5/task-v5-3-edit-layer-smoke.txt` — UI 텍스트 `직접 편집 완료`, 결과 `렌더 완료: 10장 (경고 8개)`.
+
+**디버깅 감사**:
+1. H1 stale workspace/reset race: `edit-layer` smoke가 이전 레이어를 함께 렌더해 hard fail이 났다. reset 이후 overlay 레이어 수 0 대기, 시작 안정화 대기, reset 시 선택/편집 상태 정리로 해소했다.
+2. H2 smoke drag target collision: 레이어를 너무 위/아래로 이동시켜 header/footer와 overlap hard fail이 났다. 안전 영역 내부 y 이동값으로 조정해 `edit-layer` smoke가 렌더 완료까지 통과했다.
+3. H3 layer font metric fallback: Chromium computed style이 레이어 텍스트를 16px로 보고 `font_floor` hard fail이 났다. 렌더 계약에 `data-font-size`와 style 속성 파서를 추가하고 단위 테스트로 고정했다.
+
+**잔여 리스크 / 다음 개선 후보**:
+1. V5-3 범위는 PRD대로 기본 슬롯이 아니라 사용자 추가 레이어만 직접 편집한다. 기본 제목/본문 슬롯 직접 편집은 후속 기능이다.
+2. hard gate는 통과하지만 style matrix와 smoke에 advisory `font_variety` 경고가 남아 있다. 이 경고는 V5-1/V5-2부터 이어진 기존 스타일 경고이며 PNG 생성은 실패시키지 않는다.
+3. 레이어 편집 UI는 마우스/키보드 기본 조작을 구현했지만, 멀티 선택/정렬 분배/복제 같은 Canva 고급 기능은 아직 없다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

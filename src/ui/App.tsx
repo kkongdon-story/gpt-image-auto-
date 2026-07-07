@@ -1,5 +1,14 @@
 // noqa: SIZE_OK - v4 release keeps the integrated app shell stable; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement
+} from "react";
 import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
 import { parseCardText } from "../domain/cardParser";
 import { buildBulkCsvTemplate } from "../domain/csvBulk";
@@ -47,6 +56,132 @@ type ParsedCardEntry = {
   readonly error: CardnewsError | undefined;
 };
 
+type LayerRect = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
+type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
+type TextLayer = Extract<CardLayer, { readonly kind: "text" }>;
+
+type DragState =
+  | {
+      readonly kind: "move";
+      readonly layerId: string;
+      readonly startClientX: number;
+      readonly startClientY: number;
+      readonly startRect: LayerRect;
+    }
+  | {
+      readonly kind: "resize";
+      readonly layerId: string;
+      readonly handle: ResizeHandle;
+      readonly startClientX: number;
+      readonly startClientY: number;
+      readonly startRect: LayerRect;
+    };
+
+const resizeHandles: readonly ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+
+function layerRect(layer: CardLayer): LayerRect {
+  return {
+    x: layer.x,
+    y: layer.y,
+    width: layer.width,
+    height: layer.height
+  };
+}
+
+function roundLayerValue(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function clampLayerRect(rect: LayerRect): LayerRect {
+  const width = Math.min(100, Math.max(1, rect.width));
+  const height = Math.min(100, Math.max(1, rect.height));
+  const x = Math.min(100 - width, Math.max(0, rect.x));
+  const y = Math.min(100 - height, Math.max(0, rect.y));
+  return {
+    x: roundLayerValue(x),
+    y: roundLayerValue(y),
+    width: roundLayerValue(width),
+    height: roundLayerValue(height)
+  };
+}
+
+function snapValue(value: number, gridPercent: number): number {
+  return Math.round(value / gridPercent) * gridPercent;
+}
+
+function snapLayerRect(rect: LayerRect, cardWidth: number, cardHeight: number): LayerRect {
+  return clampLayerRect({
+    x: snapValue(rect.x, (8 / cardWidth) * 100),
+    y: snapValue(rect.y, (8 / cardHeight) * 100),
+    width: snapValue(rect.width, (8 / cardWidth) * 100),
+    height: snapValue(rect.height, (8 / cardHeight) * 100)
+  });
+}
+
+function transformMoveRect(startRect: LayerRect, deltaXPercent: number, deltaYPercent: number): LayerRect {
+  return clampLayerRect({
+    ...startRect,
+    x: startRect.x + deltaXPercent,
+    y: startRect.y + deltaYPercent
+  });
+}
+
+function transformResizeRect(
+  startRect: LayerRect,
+  handle: ResizeHandle,
+  deltaXPercent: number,
+  deltaYPercent: number
+): LayerRect {
+  let { x, y, width, height } = startRect;
+  const touchesWest = handle.includes("w");
+  const touchesEast = handle.includes("e");
+  const touchesNorth = handle.includes("n");
+  const touchesSouth = handle.includes("s");
+
+  if (touchesWest) {
+    x += deltaXPercent;
+    width -= deltaXPercent;
+  }
+  if (touchesEast) {
+    width += deltaXPercent;
+  }
+  if (touchesNorth) {
+    y += deltaYPercent;
+    height -= deltaYPercent;
+  }
+  if (touchesSouth) {
+    height += deltaYPercent;
+  }
+
+  if (width < 1 && touchesWest) {
+    x -= 1 - width;
+  }
+  if (height < 1 && touchesNorth) {
+    y -= 1 - height;
+  }
+
+  return clampLayerRect({ x, y, width, height });
+}
+
+function layerLabel(layer: CardLayer): string {
+  if (layer.kind === "text") {
+    return layer.text.trim() || "텍스트 입력";
+  }
+  if (layer.kind === "shape") {
+    return layer.shape === "ellipse" ? "타원" : "모형";
+  }
+  if (layer.kind === "line") {
+    return "선";
+  }
+  return "이미지";
+}
+
 function isCardnewsError<T>(result: CardnewsResult<T>): result is CardnewsError {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
 }
@@ -78,14 +213,46 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 function StageCanvas({
   html,
   cardWidth,
-  cardHeight
+  cardHeight,
+  editMode,
+  layers,
+  selectedLayerId,
+  editingLayerId,
+  editingText,
+  onSelectLayer,
+  onTransformLayer,
+  onNudgeLayer,
+  onDeleteLayer,
+  onStartTextEdit,
+  onEditingTextChange,
+  onCommitTextEdit,
+  onCancelTextEdit
 }: {
   readonly html: string;
   readonly cardWidth: number;
   readonly cardHeight: number;
+  readonly editMode: boolean;
+  readonly layers: readonly CardLayer[];
+  readonly selectedLayerId: string | null;
+  readonly editingLayerId: string | null;
+  readonly editingText: string;
+  readonly onSelectLayer: (layerId: string | null) => void;
+  readonly onTransformLayer: (layerId: string, rect: LayerRect) => void;
+  readonly onNudgeLayer: (layerId: string, deltaXPercent: number, deltaYPercent: number) => void;
+  readonly onDeleteLayer: (layerId: string) => void;
+  readonly onStartTextEdit: (layer: CardLayer) => void;
+  readonly onEditingTextChange: (value: string) => void;
+  readonly onCommitTextEdit: () => void;
+  readonly onCancelTextEdit: () => void;
 }): ReactElement {
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const draftRectRef = useRef<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
   const [scale, setScale] = useState(0.4);
+  const [draftRect, setDraftRect] = useState<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
+  const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
+  const editingLayer = layers.find((layer): layer is TextLayer => layer.id === editingLayerId && layer.kind === "text");
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -103,6 +270,127 @@ function StageCanvas({
     return () => observer.disconnect();
   }, [cardWidth]);
 
+  function rectFor(layer: CardLayer): LayerRect {
+    return draftRect?.layerId === layer.id ? draftRect.rect : layerRect(layer);
+  }
+
+  function layerStyle(rect: LayerRect): CSSProperties {
+    return {
+      left: `${rect.x}%`,
+      top: `${rect.y}%`,
+      width: `${rect.width}%`,
+      height: `${rect.height}%`
+    };
+  }
+
+  function setDraft(nextDraft: { readonly layerId: string; readonly rect: LayerRect } | null): void {
+    draftRectRef.current = nextDraft;
+    setDraftRect(nextDraft);
+  }
+
+  function beginMove(event: ReactPointerEvent<HTMLElement>, layer: CardLayer): void {
+    if (!editMode) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(layer.id);
+    const rect = rectFor(layer);
+    dragRef.current = {
+      kind: "move",
+      layerId: layer.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: rect
+    };
+    setDraft({ layerId: layer.id, rect });
+  }
+
+  function beginResize(event: ReactPointerEvent<HTMLElement>, layer: CardLayer, handle: ResizeHandle): void {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(layer.id);
+    const rect = rectFor(layer);
+    dragRef.current = {
+      kind: "resize",
+      layerId: layer.id,
+      handle,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: rect
+    };
+    setDraft({ layerId: layer.id, rect });
+  }
+
+  function updateDraft(event: ReactPointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current;
+    const overlay = overlayRef.current;
+    if (!drag || !overlay) {
+      return;
+    }
+    const bounds = overlay.getBoundingClientRect();
+    const deltaXPercent = ((event.clientX - drag.startClientX) / bounds.width) * 100;
+    const deltaYPercent = ((event.clientY - drag.startClientY) / bounds.height) * 100;
+    const nextRect =
+      drag.kind === "move"
+        ? transformMoveRect(drag.startRect, deltaXPercent, deltaYPercent)
+        : transformResizeRect(drag.startRect, drag.handle, deltaXPercent, deltaYPercent);
+    setDraft({
+      layerId: drag.layerId,
+      rect: event.shiftKey ? nextRect : snapLayerRect(nextRect, cardWidth, cardHeight)
+    });
+  }
+
+  function finishDraft(): void {
+    const draft = draftRectRef.current;
+    if (draft) {
+      onTransformLayer(draft.layerId, draft.rect);
+    }
+    dragRef.current = null;
+    setDraft(null);
+  }
+
+  function handleOverlayKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (!editMode || !selectedLayer || editingLayerId) {
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      onDeleteLayer(selectedLayer.id);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onSelectLayer(null);
+      return;
+    }
+
+    const step = event.shiftKey ? 10 : 1;
+    const horizontal = (step / cardWidth) * 100;
+    const vertical = (step / cardHeight) * 100;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      onNudgeLayer(selectedLayer.id, -horizontal, 0);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      onNudgeLayer(selectedLayer.id, horizontal, 0);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onNudgeLayer(selectedLayer.id, 0, -vertical);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onNudgeLayer(selectedLayer.id, 0, vertical);
+    }
+  }
+
   return (
     <div
       className="stage-canvas"
@@ -116,8 +404,94 @@ function StageCanvas({
         title="selected-card"
         srcDoc={html}
         scrolling="no"
-        style={{ width: cardWidth, height: cardHeight, transform: `scale(${scale})` }}
+        style={{
+          width: cardWidth,
+          height: cardHeight,
+          pointerEvents: editMode ? "none" : "auto",
+          transform: `scale(${scale})`
+        }}
       />
+      {editMode ? (
+        <div
+          className="edit-overlay"
+          ref={overlayRef}
+          tabIndex={0}
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) {
+              onSelectLayer(null);
+            }
+          }}
+          onPointerMove={updateDraft}
+          onPointerUp={finishDraft}
+          onPointerCancel={finishDraft}
+          onKeyDown={handleOverlayKeyDown}
+        >
+          <div className="edit-guide center-x" />
+          <div className="edit-guide center-y" />
+          <div className="edit-safe-zone" />
+          {layers.map((layer) => {
+            const rect = rectFor(layer);
+            const selected = layer.id === selectedLayerId;
+            const editing = layer.id === editingLayerId;
+            return (
+              <div
+                key={layer.id}
+                className={`edit-layer-box edit-layer-${layer.kind}${selected ? " selected" : ""}${editing ? " editing" : ""}`}
+                data-smoke-role="layer-box"
+                data-layer-id={layer.id}
+                style={layerStyle(rect)}
+                onPointerDown={(event) => beginMove(event, layer)}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (layer.kind === "text") {
+                    onStartTextEdit(layer);
+                  }
+                }}
+              >
+                <span>{layerLabel(layer)}</span>
+                {selected
+                  ? resizeHandles.map((handle) => (
+                      <span
+                        key={handle}
+                        className={`resize-handle ${handle}`}
+                        onPointerDown={(event) => beginResize(event, layer, handle)}
+                      />
+                    ))
+                  : null}
+              </div>
+            );
+          })}
+          {editingLayer ? (
+            <textarea
+              className="layer-inline-textarea"
+              value={editingText}
+              style={{
+                ...layerStyle(rectFor(editingLayer)),
+                color: editingLayer.color ?? "inherit",
+                fontSize: `${Math.max(10, (editingLayer.fontSize ?? 40) * scale)}px`,
+                fontStyle: editingLayer.italic === true ? "italic" : "normal",
+                fontWeight: editingLayer.fontWeight ?? 700,
+                textAlign: editingLayer.align ?? "left"
+              }}
+              autoFocus
+              onPointerDown={(event) => event.stopPropagation()}
+              onChange={(event) => onEditingTextChange(event.target.value)}
+              onBlur={onCommitTextEdit}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancelTextEdit();
+                }
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  onCommitTextEdit();
+                }
+              }}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -160,6 +534,10 @@ export function App(): ReactElement {
   const [stockFallbackUrl, setStockFallbackUrl] = useState<string | null>(null);
   const [stockLoading, setStockLoading] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
+  const [editingLayerText, setEditingLayerText] = useState("");
   const [railWidth, setRailWidth] = useState(150);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("design");
   const [cardEditorTab, setCardEditorTab] = useState<CardEditorTab>("content");
@@ -258,6 +636,8 @@ export function App(): ReactElement {
   const selectedEntry = parsedEntries[selectedIndex];
   const selectedCardNumber = selectedIndex + 1;
   const selectedOverride = overrides[String(selectedCardNumber)];
+  const selectedLayers = useMemo(() => selectedOverride?.layers ?? [], [selectedOverride]);
+  const selectedLayer = selectedLayers.find((layer) => layer.id === selectedLayerId);
 
   // ── 시작 시 라이브러리/프리셋/워크스페이스 복원 ──
   useEffect(() => {
@@ -357,6 +737,20 @@ export function App(): ReactElement {
   }, [backgroundId, backgroundPreviews, overrides]);
 
   useEffect(() => () => clearFontBlobUrl(), []);
+
+  useEffect(() => {
+    setSelectedLayerId(null);
+    setEditingLayerId(null);
+    setEditingLayerText("");
+  }, [selectedIndex]);
+
+  useEffect(() => {
+    if (selectedLayerId && !selectedLayers.some((layer) => layer.id === selectedLayerId)) {
+      setSelectedLayerId(null);
+      setEditingLayerId(null);
+      setEditingLayerText("");
+    }
+  }, [selectedLayerId, selectedLayers]);
 
   function applySnapshot(snapshot: {
     readonly headerLabel: string;
@@ -550,15 +944,89 @@ export function App(): ReactElement {
   }
 
   function addLayer(kind: CardLayer["kind"]): void {
-    updateSelectedLayers([...(selectedOverride?.layers ?? []), createLayer(kind)]);
+    const layer = createLayer(kind);
+    updateSelectedLayers([...selectedLayers, layer]);
+    setSelectedLayerId(layer.id);
+    setEditMode(true);
+    setInspectorTab("design");
   }
 
   function updateLayer(layerId: string, updater: (layer: CardLayer) => CardLayer): void {
-    updateSelectedLayers((selectedOverride?.layers ?? []).map((layer) => (layer.id === layerId ? updater(layer) : layer)));
+    updateSelectedLayers(selectedLayers.map((layer) => (layer.id === layerId ? updater(layer) : layer)));
+  }
+
+  function updateSelectedLayer(updater: (layer: CardLayer) => CardLayer): void {
+    if (!selectedLayerId) {
+      return;
+    }
+    updateLayer(selectedLayerId, updater);
   }
 
   function removeLayer(layerId: string): void {
-    updateSelectedLayers((selectedOverride?.layers ?? []).filter((layer) => layer.id !== layerId));
+    updateSelectedLayers(selectedLayers.filter((layer) => layer.id !== layerId));
+    if (selectedLayerId === layerId) {
+      setSelectedLayerId(null);
+      setEditingLayerId(null);
+      setEditingLayerText("");
+    }
+  }
+
+  function selectLayer(layerId: string | null): void {
+    setSelectedLayerId(layerId);
+    if (layerId) {
+      setEditMode(true);
+      setInspectorTab("design");
+    } else {
+      setEditingLayerId(null);
+      setEditingLayerText("");
+    }
+  }
+
+  function transformLayer(layerId: string, rect: LayerRect): void {
+    updateLayer(layerId, (layer) => ({ ...layer, ...clampLayerRect(rect) }));
+  }
+
+  function nudgeLayer(layerId: string, deltaXPercent: number, deltaYPercent: number): void {
+    updateLayer(layerId, (layer) => ({
+      ...layer,
+      ...clampLayerRect({
+        x: layer.x + deltaXPercent,
+        y: layer.y + deltaYPercent,
+        width: layer.width,
+        height: layer.height
+      })
+    }));
+  }
+
+  function startLayerTextEdit(layer: CardLayer): void {
+    if (layer.kind !== "text") {
+      return;
+    }
+    setSelectedLayerId(layer.id);
+    setEditingLayerId(layer.id);
+    setEditingLayerText(layer.text);
+  }
+
+  function commitLayerTextEdit(): void {
+    const layerId = editingLayerId;
+    if (!layerId) {
+      return;
+    }
+    updateLayer(layerId, (layer) => (layer.kind === "text" ? { ...layer, text: editingLayerText } : layer));
+    setEditingLayerId(null);
+    setEditingLayerText("");
+  }
+
+  function cancelLayerTextEdit(): void {
+    setEditingLayerId(null);
+    setEditingLayerText("");
+  }
+
+  function changeLayerZ(direction: "back" | "forward"): void {
+    updateSelectedLayer((layer) => ({
+      ...layer,
+      zIndex: Math.min(20, Math.max(0, (layer.zIndex ?? 4) + (direction === "forward" ? 1 : -1)))
+    }));
   }
 
   function createLayer(kind: CardLayer["kind"]): CardLayer {
@@ -568,16 +1036,15 @@ export function App(): ReactElement {
         return {
           id,
           kind,
-          x: 12,
-          y: 68,
-          width: 76,
-          height: 10,
+          x: 18,
+          y: 44,
+          width: 64,
+          height: 12,
           zIndex: 5,
-          text: "추가 텍스트",
-          color: "#111111",
-          backgroundColor: "#ffffff",
-          fontSize: 34,
-          fontWeight: 800,
+          text: "텍스트 입력",
+          color: preset.ink,
+          fontSize: 40,
+          fontWeight: 700,
           align: "center"
         };
       case "shape":
@@ -589,8 +1056,9 @@ export function App(): ReactElement {
           width: 22,
           height: 10,
           zIndex: 1,
+          opacity: 0.2,
           shape: "rect",
-          fill: "#f3a3c2",
+          fill: accentColor,
           radius: 20
         };
       case "line":
@@ -958,6 +1426,10 @@ export function App(): ReactElement {
     setSelectedFontId(null);
     void loadFontCss(null);
     setOverrides({});
+    setEditMode(false);
+    setSelectedLayerId(null);
+    setEditingLayerId(null);
+    setEditingLayerText("");
     setSelectedIndex(0);
     setRenderResult(null);
     setBulkResult(null);
@@ -1223,7 +1695,7 @@ export function App(): ReactElement {
           <button type="button" className="credit-pill" onClick={() => void openCreatorLink()}>
             @kkongdon_story
           </button>
-          <button type="button" className="ghost" onClick={resetWorkspace}>
+          <button type="button" className="ghost" data-smoke-action="reset-workspace" onClick={resetWorkspace}>
             초기화
           </button>
           <button
@@ -1284,10 +1756,33 @@ export function App(): ReactElement {
         />
 
         <section className="stage" aria-label="live preview">
+          <div className="stage-toolbar">
+            <button
+              type="button"
+              className={editMode ? "active" : ""}
+              data-smoke-action="toggle-edit-mode"
+              onClick={() => setEditMode((current) => !current)}
+            >
+              편집 모드
+            </button>
+          </div>
           <StageCanvas
             html={previewHtmls[selectedIndex] ?? ""}
             cardWidth={cardRatio.width}
             cardHeight={cardRatio.height}
+            editMode={editMode}
+            layers={selectedLayers}
+            selectedLayerId={selectedLayerId}
+            editingLayerId={editingLayerId}
+            editingText={editingLayerText}
+            onSelectLayer={selectLayer}
+            onTransformLayer={transformLayer}
+            onNudgeLayer={nudgeLayer}
+            onDeleteLayer={removeLayer}
+            onStartTextEdit={startLayerTextEdit}
+            onEditingTextChange={setEditingLayerText}
+            onCommitTextEdit={commitLayerTextEdit}
+            onCancelTextEdit={cancelLayerTextEdit}
           />
           <p className="stage-status">{status}</p>
         </section>
@@ -1299,6 +1794,7 @@ export function App(): ReactElement {
                 type="button"
                 key={tab}
                 className={inspectorTab === tab ? "active" : ""}
+                data-smoke-action={`inspector-${tab}`}
                 onClick={() => setInspectorTab(tab)}
               >
                 {tab === "design" ? "디자인" : tab === "content" ? "콘텐츠" : "내보내기"}
@@ -1500,6 +1996,7 @@ export function App(): ReactElement {
               <button
                 type="button"
                 className={cardEditorTab === "design" ? "active" : ""}
+                data-smoke-action="card-design-tab"
                 onClick={() => setCardEditorTab("design")}
               >
                 디자인
@@ -1677,7 +2174,7 @@ export function App(): ReactElement {
                 <div className="layer-controls">
                   <p className="panel-title">레이어</p>
                   <div className="row">
-                    <button type="button" onClick={() => addLayer("text")}>
+                    <button type="button" data-smoke-action="add-text-layer" onClick={() => addLayer("text")}>
                       텍스트 박스
                     </button>
                     <button type="button" onClick={() => addLayer("shape")}>
@@ -1690,7 +2187,168 @@ export function App(): ReactElement {
                       이미지
                     </button>
                   </div>
-                  {(selectedOverride?.layers ?? []).map((layer) => (
+                  {selectedLayer ? (
+                    <div className="selected-layer-panel">
+                      <div className="layer-editor-header">
+                        <strong>{layerLabel(selectedLayer)}</strong>
+                        <div className="row">
+                          <button type="button" className="ghost" onClick={() => changeLayerZ("back")}>
+                            뒤로
+                          </button>
+                          <button type="button" className="ghost" onClick={() => changeLayerZ("forward")}>
+                            앞으로
+                          </button>
+                        </div>
+                      </div>
+                      <label className="dim-row">
+                        <span>불투명도</span>
+                        <input
+                          type="range"
+                          min={10}
+                          max={100}
+                          value={Math.round((selectedLayer.opacity ?? 1) * 100)}
+                          onChange={(event) =>
+                            updateSelectedLayer((layer) => ({ ...layer, opacity: Number(event.target.value) / 100 }))
+                          }
+                        />
+                        <small>{Math.round((selectedLayer.opacity ?? 1) * 100)}%</small>
+                      </label>
+                      {selectedLayer.kind === "text" ? (
+                        <div className="selected-layer-fields">
+                          <textarea
+                            className="layer-text-input"
+                            value={selectedLayer.text}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "text" ? { ...layer, text: event.target.value } : layer
+                              )
+                            }
+                          />
+                          <div className="row">
+                            <input
+                              type="color"
+                              value={selectedLayer.color ?? preset.ink}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "text" ? { ...layer, color: event.target.value } : layer
+                                )
+                              }
+                            />
+                            <input
+                              type="number"
+                              min={10}
+                              max={144}
+                              value={selectedLayer.fontSize ?? 40}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "text" ? { ...layer, fontSize: Number(event.target.value) } : layer
+                                )
+                              }
+                            />
+                            <input
+                              type="number"
+                              min={100}
+                              max={950}
+                              step={50}
+                              value={selectedLayer.fontWeight ?? 700}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "text" ? { ...layer, fontWeight: Number(event.target.value) } : layer
+                                )
+                              }
+                            />
+                          </div>
+                          <div className="row">
+                            <label className="check-row compact">
+                              <input
+                                type="checkbox"
+                                checked={selectedLayer.italic === true}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "text" ? { ...layer, italic: event.target.checked } : layer
+                                  )
+                                }
+                              />
+                              <span>기울기</span>
+                            </label>
+                            <select
+                              value={selectedLayer.align ?? "left"}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "text"
+                                    ? {
+                                        ...layer,
+                                        align:
+                                          event.target.value === "center"
+                                            ? "center"
+                                            : event.target.value === "right"
+                                              ? "right"
+                                              : "left"
+                                      }
+                                    : layer
+                                )
+                              }
+                            >
+                              <option value="left">왼쪽</option>
+                              <option value="center">가운데</option>
+                              <option value="right">오른쪽</option>
+                            </select>
+                          </div>
+                        </div>
+                      ) : null}
+                      {selectedLayer.kind === "shape" ? (
+                        <div className="row">
+                          <input
+                            type="color"
+                            value={selectedLayer.fill}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "shape" ? { ...layer, fill: event.target.value } : layer
+                              )
+                            }
+                          />
+                          <select
+                            value={selectedLayer.shape}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "shape"
+                                  ? { ...layer, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
+                                  : layer
+                              )
+                            }
+                          >
+                            <option value="rect">사각형</option>
+                            <option value="ellipse">타원</option>
+                          </select>
+                        </div>
+                      ) : null}
+                      {selectedLayer.kind === "line" ? (
+                        <div className="row">
+                          <input
+                            type="color"
+                            value={selectedLayer.color}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "line" ? { ...layer, color: event.target.value } : layer
+                              )
+                            }
+                          />
+                          <input
+                            type="number"
+                            min={1}
+                            max={40}
+                            value={selectedLayer.strokeWidth ?? 4}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "line" ? { ...layer, strokeWidth: Number(event.target.value) } : layer
+                              )
+                            }
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {selectedLayers.map((layer) => (
                     <div className="layer-editor" key={layer.id}>
                       <div className="layer-editor-header">
                         <strong>{layer.kind}</strong>

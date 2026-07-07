@@ -332,6 +332,8 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
     }
     case "project-roundtrip":
       return await runProjectRoundtripSmoke(mainWindow);
+    case "edit-layer":
+      return await runLayerEditSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
@@ -418,6 +420,128 @@ async function seedProjectSmokeWorkspace(): Promise<WorkspaceState> {
   };
   await saveWorkspaceState(storageRoot(), workspace);
   return workspace;
+}
+
+async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Layer edit smoke target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Layer edit smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(120);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(description);
+      };
+
+      window.confirm = () => true;
+      await delay(1200);
+      await clickAction("reset-workspace");
+      await delay(350);
+      if (!document.querySelector(".edit-overlay")) {
+        await clickAction("toggle-edit-mode");
+      }
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await waitUntil(
+        () => document.querySelectorAll('[data-smoke-role="layer-box"]').length === 0,
+        "Layer reset did not clear existing boxes."
+      );
+      await clickAction("add-text-layer");
+
+      let box = await waitFor('[data-smoke-role="layer-box"]');
+      const overlay = await waitFor(".edit-overlay");
+      const before = box.getBoundingClientRect();
+      const startX = before.left + Math.min(24, Math.max(8, before.width / 2));
+      const startY = before.top + Math.min(24, Math.max(8, before.height / 2));
+      box.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerId: 42,
+        clientX: startX,
+        clientY: startY,
+        buttons: 1
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointermove", {
+        bubbles: true,
+        pointerId: 42,
+        clientX: startX + 20,
+        clientY: startY + 145,
+        buttons: 1,
+        shiftKey: true
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true,
+        pointerId: 42,
+        clientX: startX + 20,
+        clientY: startY + 145,
+        buttons: 0
+      }));
+      await delay(350);
+
+      box = await waitFor('[data-smoke-role="layer-box"]');
+      const after = box.getBoundingClientRect();
+      box.dispatchEvent(new MouseEvent("dblclick", {
+        bubbles: true,
+        clientX: after.left + Math.min(24, Math.max(8, after.width / 2)),
+        clientY: after.top + Math.min(24, Math.max(8, after.height / 2))
+      }));
+      const textarea = await waitFor(".layer-inline-textarea");
+      if (!(textarea instanceof HTMLTextAreaElement)) {
+        throw new Error("Layer edit textarea was not available.");
+      }
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+      if (!setter) {
+        throw new Error("Layer edit textarea setter was not available.");
+      }
+      setter.call(textarea, "직접 편집 완료");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.blur();
+      await delay(350);
+
+      const generate = await waitFor('[data-smoke-action="generate"]');
+      if (!(generate instanceof HTMLButtonElement)) {
+        throw new Error("Layer edit render button was not available.");
+      }
+      generate.click();
+      return {
+        edited: document.body.innerText.includes("직접 편집 완료"),
+        moved: Math.abs(after.left - before.left) > 6 || Math.abs(after.top - before.top) > 80
+      };
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Layer edit smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  if (record["moved"] !== true || record["edited"] !== true) {
+    return { ok: false, message: `Layer edit smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  return await readRenderSmokeResult(mainWindow);
 }
 
 async function clickSmokeButton(mainWindow: BrowserWindow, action: string): Promise<void> {

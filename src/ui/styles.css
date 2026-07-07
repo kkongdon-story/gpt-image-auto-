@@ -312,6 +312,19 @@ textarea:focus {
   padding: 22px;
 }
 
+.stage-toolbar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  width: 100%;
+}
+
+.stage-toolbar button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
 .stage-canvas {
   border-radius: 12px;
   box-shadow: 0 18px 45px rgba(32, 36, 44, 0.16);
@@ -326,6 +339,153 @@ textarea:focus {
   position: absolute;
   top: 0;
   transform-origin: top left;
+}
+
+.edit-overlay {
+  cursor: default;
+  inset: 0;
+  outline: none;
+  position: absolute;
+  z-index: 10;
+}
+
+.edit-guide {
+  background: rgba(53, 87, 232, 0.34);
+  pointer-events: none;
+  position: absolute;
+}
+
+.edit-guide.center-x {
+  height: 100%;
+  left: 50%;
+  top: 0;
+  width: 1px;
+}
+
+.edit-guide.center-y {
+  height: 1px;
+  left: 0;
+  top: 50%;
+  width: 100%;
+}
+
+.edit-safe-zone {
+  border: 1px dashed rgba(53, 87, 232, 0.38);
+  inset: 5.33%;
+  pointer-events: none;
+  position: absolute;
+}
+
+.edit-layer-box {
+  align-items: center;
+  background: rgba(53, 87, 232, 0.08);
+  border: 1px solid rgba(53, 87, 232, 0.7);
+  color: #17306a;
+  cursor: move;
+  display: flex;
+  font-size: 12px;
+  justify-content: center;
+  min-height: 18px;
+  overflow: visible;
+  position: absolute;
+  touch-action: none;
+  user-select: none;
+}
+
+.edit-layer-box span:first-child {
+  background: rgba(255, 255, 255, 0.84);
+  border-radius: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-layer-box.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(53, 87, 232, 0.2);
+}
+
+.edit-layer-box.edit-layer-shape span:first-child,
+.edit-layer-box.edit-layer-line span:first-child,
+.edit-layer-box.edit-layer-image span:first-child {
+  opacity: 0;
+}
+
+.resize-handle {
+  background: white;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  height: 10px;
+  position: absolute;
+  width: 10px;
+}
+
+.resize-handle.n,
+.resize-handle.s {
+  cursor: ns-resize;
+  left: calc(50% - 5px);
+}
+
+.resize-handle.e,
+.resize-handle.w {
+  cursor: ew-resize;
+  top: calc(50% - 5px);
+}
+
+.resize-handle.n {
+  top: -5px;
+}
+
+.resize-handle.s {
+  bottom: -5px;
+}
+
+.resize-handle.e {
+  right: -5px;
+}
+
+.resize-handle.w {
+  left: -5px;
+}
+
+.resize-handle.ne,
+.resize-handle.nw,
+.resize-handle.se,
+.resize-handle.sw {
+  cursor: nwse-resize;
+}
+
+.resize-handle.ne {
+  right: -5px;
+  top: -5px;
+}
+
+.resize-handle.nw {
+  left: -5px;
+  top: -5px;
+}
+
+.resize-handle.se {
+  bottom: -5px;
+  right: -5px;
+}
+
+.resize-handle.sw {
+  bottom: -5px;
+  left: -5px;
+}
+
+.layer-inline-textarea {
+  background: rgba(255, 255, 255, 0.92);
+  border: 2px solid var(--accent);
+  box-shadow: 0 10px 24px rgba(20, 30, 60, 0.18);
+  line-height: 1.24;
+  padding: 8px 10px;
+  position: absolute;
+  resize: none;
+  z-index: 20;
 }
 
 .stage-status {
@@ -558,14 +718,39 @@ textarea:focus {
   padding: 10px;
 }
 
+.selected-layer-panel {
+  background: #ffffff;
+  border: 1px solid rgba(53, 87, 232, 0.28);
+  border-radius: 8px;
+  box-shadow: inset 3px 0 0 var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.selected-layer-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
 .layer-editor-header {
   align-items: center;
   display: flex;
+  gap: 8px;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .layer-editor-header strong {
+  min-width: 0;
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-transform: uppercase;
 }
 

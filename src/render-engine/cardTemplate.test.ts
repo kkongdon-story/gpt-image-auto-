@@ -225,6 +225,34 @@ describe("buildCardHtml (aspect ratio + font)", () => {
     expect(html).toContain('class="layer layer-text"');
   });
 
+  it("keeps default text layers transparent and sized for direct editing", () => {
+    const backdrop = findStylePreset("minimal").textBackdrop;
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({ styleId: "minimal" }),
+      override: {
+        layers: [
+          {
+            id: "layer-default-text",
+            kind: "text",
+            x: 18,
+            y: 44,
+            width: 64,
+            height: 12,
+            text: "텍스트 입력"
+          }
+        ]
+      }
+    });
+
+    expect(html).toContain('data-slot="layer-layer-default-text"');
+    expect(html).toContain("background: transparent");
+    expect(html).toContain("font-size: 40px");
+    expect(html).toContain('data-font-size="40"');
+    expect(html).toContain(`data-background-color="${backdrop}"`);
+  });
+
   it("applies per-card image and layout overrides deterministically", () => {
     const html = buildCardHtml({
       backgroundCssUrl: "file:///C:/tmp/bg.png",

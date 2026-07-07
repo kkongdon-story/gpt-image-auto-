@@ -103,11 +103,22 @@ export function buildCardHtml(input: CardTemplateInput): string {
         return Array.from(document.querySelectorAll("[data-slot]")).map((element) => {
           const rect = element.getBoundingClientRect();
           const style = window.getComputedStyle(element);
+          const inlineFontSize = Number.parseFloat(element.style.fontSize) || 0;
+          const dataFontSize = Number.parseFloat(element.getAttribute("data-font-size") || "") || 0;
+          const styleAttribute = element.getAttribute("style") || "";
+          const attributeFontSize =
+            Number.parseFloat(
+              styleAttribute
+                .split(";")
+                .map((part) => part.trim())
+                .find((part) => part.startsWith("font-size:"))
+                ?.slice("font-size:".length) || ""
+            ) || 0;
           return {
             backgroundColor: element.getAttribute("data-background-color") || "${preset.textBackdrop}",
             cardIndex,
             color: style.color,
-            fontSize: Number.parseFloat(style.fontSize) || 0,
+            fontSize: Math.max(Number.parseFloat(style.fontSize) || 0, inlineFontSize, dataFontSize, attributeFontSize),
             height: Math.round(rect.height * 100) / 100,
             left: Math.round(rect.left * 100) / 100,
             slot: element.getAttribute("data-slot") || "unknown",
@@ -386,12 +397,12 @@ function renderLayer(
     case "text": {
       const color = normalizeHexColor(layer.color) ?? theme.preset.ink;
       const background = normalizeHexColor(layer.backgroundColor) ?? "transparent";
-      const fontSize = Math.round(clampRange(layer.fontSize ?? 34, 10, 144));
+      const fontSize = Math.round(clampRange(layer.fontSize ?? 40, 10, 144));
       const fontWeight = Math.round(clampRange(layer.fontWeight ?? theme.typography.weight ?? 700, 100, 950));
       const align = layer.align ?? "left";
       const justify = align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start";
       const backdrop = background === "transparent" ? theme.preset.textBackdrop : background;
-      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" style="${baseStyle} color: ${color}; background: ${background}; font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody}; font-size: ${fontSize}px; font-style: ${layer.italic === true ? "italic" : "normal"}; font-weight: ${fontWeight}; justify-content: ${justify}; text-align: ${align};">${escapeHtml(layer.text)}</div>`;
+      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${baseStyle} color: ${color}; background: ${background}; font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody}; font-size: ${fontSize}px; font-style: ${layer.italic === true ? "italic" : "normal"}; font-weight: ${fontWeight}; justify-content: ${justify}; text-align: ${align};">${escapeHtml(layer.text)}</div>`;
     }
     case "shape": {
       const fill = normalizeHexColor(layer.fill) ?? withAlpha(theme.accent, 0.28);

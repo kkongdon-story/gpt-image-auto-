@@ -67,6 +67,7 @@ const devServerUrl = process.env["VITE_DEV_SERVER_URL"];
 const smokeScreenshotPath = process.env["CARDNEWS_SMOKE_SCREENSHOT"];
 const smokeTextPath = process.env["CARDNEWS_SMOKE_TEXT"];
 const smokeAction = process.env["CARDNEWS_SMOKE_ACTION"];
+const allowedCreatorUrl = "https://www.threads.com/@kkongdon_story";
 let selectedStyleReferenceImages: readonly StoredLocalImage[] = [];
 let approvedStyleProfile: StyleProfile | undefined;
 
@@ -225,6 +226,53 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
             }
             if (Date.now() - started > 8000) {
               reject(new Error("Background select was not ready."));
+              return;
+            }
+            setTimeout(tick, 100);
+          };
+          tick();
+        })
+      `);
+      await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+      return await readRenderSmokeResult(mainWindow);
+    case "render-with-font":
+      await mainWindow.webContents.executeJavaScript(`
+        new Promise((resolve, reject) => {
+          const started = Date.now();
+          const tick = () => {
+            const fontSelect = document.querySelector('[data-smoke-role="font-select"]');
+            const button = document.querySelector('[data-smoke-action="generate"]');
+            if (fontSelect instanceof HTMLSelectElement && button instanceof HTMLButtonElement) {
+              const fontOption = Array.from(fontSelect.options).find((option) => option.value.startsWith("font-"));
+              if (!fontOption) {
+                if (Date.now() - started > 10000) {
+                  reject(new Error("No library font option was found."));
+                  return;
+                }
+                setTimeout(tick, 100);
+                return;
+              }
+              fontSelect.value = fontOption.value;
+              fontSelect.dispatchEvent(new Event("change", { bubbles: true }));
+              const waitForFont = () => {
+                if (document.fonts.check('16px "Cardnews User Font"')) {
+                  setTimeout(() => {
+                    button.click();
+                    resolve(true);
+                  }, 500);
+                  return;
+                }
+                if (Date.now() - started > 10000) {
+                  reject(new Error("User font was not ready."));
+                  return;
+                }
+                setTimeout(waitForFont, 100);
+              };
+              waitForFont();
+              return;
+            }
+            if (Date.now() - started > 8000) {
+              reject(new Error("Font select was not ready."));
               return;
             }
             setTimeout(tick, 100);
@@ -1528,6 +1576,14 @@ app.whenReady().then(() => {
 
     const error = await shell.openPath(getRenderOutputDirectory(storageRoot(), jobId));
     return error.length > 0 ? invalidInput(error) : undefined;
+  });
+  ipcMain.handle("cardnews:openExternalLink", async (_event, url: unknown) => {
+    if (url !== allowedCreatorUrl) {
+      return invalidInput("허용되지 않은 외부 링크입니다.");
+    }
+
+    await shell.openExternal(allowedCreatorUrl);
+    return undefined;
   });
 
   createWindow();

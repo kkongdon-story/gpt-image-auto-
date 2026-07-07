@@ -37,6 +37,7 @@ import {
 const maxCards = 12;
 const defaultHeaderLabel = "MONEY NOTE";
 const defaultFooterAccount = "@kkongdon_story";
+const creatorUrl = "https://www.threads.com/@kkongdon_story";
 
 type InspectorTab = "design" | "content" | "export";
 type CardEditorTab = "content" | "design";
@@ -158,6 +159,7 @@ export function App(): ReactElement {
   const [stockImages, setStockImages] = useState<readonly StockImage[]>([]);
   const [stockFallbackUrl, setStockFallbackUrl] = useState<string | null>(null);
   const [stockLoading, setStockLoading] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const [railWidth, setRailWidth] = useState(150);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("design");
   const [cardEditorTab, setCardEditorTab] = useState<CardEditorTab>("content");
@@ -171,6 +173,7 @@ export function App(): ReactElement {
   const [approvedJobId, setApprovedJobId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const workspaceReady = useRef(false);
+  const fontBlobUrlRef = useRef<string | null>(null);
 
   const preset = resolveStylePreset(styleId, customStyles);
   const accentColor = customAccent ?? preset.accentDefault;
@@ -367,6 +370,8 @@ export function App(): ReactElement {
     }
   }, [backgroundId, backgroundPreviews, overrides]);
 
+  useEffect(() => () => clearFontBlobUrl(), []);
+
   function applySnapshot(snapshot: {
     readonly headerLabel: string;
     readonly footerAccount: string;
@@ -434,10 +439,18 @@ export function App(): ReactElement {
     setBackgroundPreviews((current) => ({ ...current, [nextBackgroundId]: preview }));
   }
 
+  function clearFontBlobUrl(): void {
+    if (fontBlobUrlRef.current) {
+      URL.revokeObjectURL(fontBlobUrlRef.current);
+      fontBlobUrlRef.current = null;
+    }
+  }
+
   async function loadFontCss(nextFontId: string | null): Promise<void> {
     const fontResult = await window.cardnews.getFontData(nextFontId);
     if (isCardnewsError(fontResult)) {
       setStatus(fontResult.message);
+      clearFontBlobUrl();
       setFontCss(null);
       return;
     }
@@ -467,8 +480,10 @@ export function App(): ReactElement {
   }
 
   function buildPreviewFontFaceCss(fontData: FontData): string {
+    clearFontBlobUrl();
     const bytes = Uint8Array.from(atob(fontData.base64), (char) => char.charCodeAt(0));
     const blobUrl = URL.createObjectURL(new Blob([bytes], { type: fontData.mimeType }));
+    fontBlobUrlRef.current = blobUrl;
     return buildFontFaceCss(blobUrl, {
       family: fontData.cssFamily,
       format: fontData.cssFormat
@@ -487,8 +502,14 @@ export function App(): ReactElement {
       setBackgroundLibrary(library);
     }
 
-    await applyBackgroundSelection(added.id);
-    setStatus(`배경 추가: ${added.displayName}`);
+    setStatus(`배경 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
+  }
+
+  async function openCreatorLink(): Promise<void> {
+    const result = await window.cardnews.openExternalLink(creatorUrl);
+    if (isCardnewsError(result)) {
+      setStatus(result.message);
+    }
   }
 
   function updateSelectedOverride(next: CardOverride): void {
@@ -771,9 +792,8 @@ export function App(): ReactElement {
     if (!isCardnewsError(library)) {
       setBackgroundLibrary(library);
     }
-    await applyBackgroundSelection(added.id);
     setStockSearchOpen(false);
-    setStatus(`Pixabay 이미지 추가: ${added.displayName}`);
+    setStatus(`Pixabay 이미지 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
   }
 
   function startRailResize(event: ReactPointerEvent<HTMLDivElement>): void {
@@ -1113,14 +1133,15 @@ export function App(): ReactElement {
 
   return (
     <main className="studio">
+      {fontCss ? <style>{fontCss}</style> : null}
       <header className="topbar">
-        <div className="brand">
+        <button type="button" className="brand brand-button" onClick={() => setInfoOpen(true)}>
           <strong>Cardnews Studio</strong>
           <span>정보형 카드뉴스 제작기</span>
-        </div>
+        </button>
         <label className="topbar-field">
           <span>스타일</span>
-          <select value={styleId} onChange={(event) => setStyleId(event.target.value)}>
+          <select className="topbar-style-select" value={styleId} onChange={(event) => setStyleId(event.target.value)}>
             {allStyleEntries.map((style) => (
               <option key={style.id} value={style.id}>
                 {style.group} · {style.name}
@@ -1130,7 +1151,11 @@ export function App(): ReactElement {
         </label>
         <label className="topbar-field">
           <span>비율</span>
-          <select value={aspectRatioId} onChange={(event) => setAspectRatioId(event.target.value)}>
+          <select
+            className="topbar-ratio-select"
+            value={aspectRatioId}
+            onChange={(event) => setAspectRatioId(event.target.value)}
+          >
             {aspectRatios.map((ratio) => (
               <option key={ratio.id} value={ratio.id}>
                 {ratio.name}
@@ -1147,6 +1172,9 @@ export function App(): ReactElement {
           <input value={footerAccount} onChange={(event) => setFooterAccount(event.target.value)} />
         </label>
         <div className="topbar-actions">
+          <button type="button" className="credit-pill" onClick={() => void openCreatorLink()}>
+            @kkongdon_story
+          </button>
           <button type="button" className="ghost" onClick={resetWorkspace}>
             초기화
           </button>
@@ -1325,6 +1353,7 @@ export function App(): ReactElement {
               <select
                 value={selectedFontId ?? ""}
                 onChange={(event) => void selectFont(event.target.value === "" ? null : event.target.value)}
+                data-smoke-role="font-select"
               >
                 <option value="">번들 Pretendard</option>
                 {fontLibrary.map((font) => (
@@ -1337,7 +1366,17 @@ export function App(): ReactElement {
                 ttf/otf 추가
               </button>
             </div>
-            <small className="hint">추가한 폰트는 미리보기와 PNG 렌더에 함께 임베드됩니다.</small>
+            <div
+              className="font-sample"
+              style={{
+                fontFamily: selectedFontId
+                  ? '"Cardnews User Font", "Pretendard", "Malgun Gothic", sans-serif'
+                  : '"Pretendard", "Malgun Gothic", sans-serif'
+              }}
+            >
+              <span>가나다 ABC</span>
+              <small>{selectedFontId ? "선택 폰트" : "Pretendard"}</small>
+            </div>
           </section>
 
           <section className="panel" hidden={inspectorTab !== "design"}>
@@ -1877,6 +1916,22 @@ export function App(): ReactElement {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+      ) : null}
+      {infoOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="about Cardnews Studio">
+          <div className="info-modal">
+            <div className="modal-header">
+              <strong>Cardnews Studio</strong>
+              <button type="button" className="ghost" onClick={() => setInfoOpen(false)}>
+                닫기
+              </button>
+            </div>
+            <p>Creator credit</p>
+            <button type="button" className="credit-link" onClick={() => void openCreatorLink()}>
+              만든 사람 @kkongdon_story
+            </button>
           </div>
         </div>
       ) : null}

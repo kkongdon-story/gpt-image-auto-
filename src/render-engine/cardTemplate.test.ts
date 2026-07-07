@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Card, Deck } from "../domain/types.js";
-import { buildCardHtml } from "./cardTemplate.js";
+import { buildCardHtml, buildFontFaceCss } from "./cardTemplate.js";
 import { findStylePreset, stylePresets } from "./stylePresets.js";
 
 const sampleCard: Card = {
@@ -132,6 +132,20 @@ describe("buildCardHtml (style presets)", () => {
 });
 
 describe("buildCardHtml (aspect ratio + font)", () => {
+  it("emits stable font-face descriptors for imported static fonts", () => {
+    const css = buildFontFaceCss("file:///C:/fonts/custom.ttf", {
+      family: "Cardnews User Font",
+      format: "truetype"
+    });
+
+    expect(css).toContain('font-family: "Cardnews User Font"');
+    expect(css).toContain('format("truetype")');
+    expect(css).toContain("font-weight: 100 900;");
+    expect(css).toContain("font-style: normal;");
+    expect(css).not.toContain("font-weight: 45 920");
+    expect(css).not.toContain("font-style: normal italic");
+  });
+
   it("sizes the card by deck aspect ratio", () => {
     const square = buildCardHtml({
       backgroundCssUrl: undefined,
@@ -160,6 +174,55 @@ describe("buildCardHtml (aspect ratio + font)", () => {
 
     expect(html).toContain("height: 1350px");
     expect(html).toContain("blob:x");
+  });
+
+  it("applies the custom font family to card body, title, and text layers", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({
+        fontId: "font-test",
+        overrides: {
+          "2": {
+            layers: [
+              {
+                id: "layer-font-test",
+                kind: "text",
+                x: 10,
+                y: 10,
+                width: 80,
+                height: 10,
+                text: "Layer font",
+                fontSize: 28
+              }
+            ]
+          }
+        }
+      }),
+      fontCss: buildFontFaceCss("data:font/ttf;base64,AA==", {
+        family: "Cardnews User Font",
+        format: "truetype"
+      }),
+      override: {
+        layers: [
+          {
+            id: "layer-font-test",
+            kind: "text",
+            x: 10,
+            y: 10,
+            width: 80,
+            height: 10,
+            text: "Layer font",
+            fontSize: 28
+          }
+        ]
+      }
+    });
+
+    const family = 'font-family: "Cardnews User Font", "Pretendard", "Malgun Gothic", sans-serif';
+    expect(html).toContain(family);
+    expect((html.match(/Cardnews User Font/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(html).toContain('class="layer layer-text"');
   });
 
   it("applies per-card image and layout overrides deterministically", () => {

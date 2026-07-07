@@ -51,7 +51,8 @@ const api: CardnewsApi = {
   loadWorkspace: () => ipcRenderer.invoke("cardnews:loadWorkspace"),
   exportCardPng: (jobId: string, fileName: string) =>
     ipcRenderer.invoke("cardnews:exportCardPng", jobId, fileName),
-  exportDeckZip: (jobId: string) => ipcRenderer.invoke("cardnews:exportDeckZip", jobId)
+  exportDeckZip: (jobId: string) => ipcRenderer.invoke("cardnews:exportDeckZip", jobId),
+  openExternalLink: (url: string) => ipcRenderer.invoke("cardnews:openExternalLink", url)
 };
 
 contextBridge.exposeInMainWorld("cardnews", api);

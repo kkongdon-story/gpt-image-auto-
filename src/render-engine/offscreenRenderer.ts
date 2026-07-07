@@ -134,7 +134,7 @@ async function renderCard(
     const htmlPath = path.join(input.outputDir, `card-${String(card.index).padStart(2, "0")}.html`);
     await fs.writeFile(htmlPath, html, "utf8");
     await window.loadURL(pathToFileURL(htmlPath).toString());
-    await waitForFonts(window);
+    await waitForFonts(window, Boolean(input.deck.fontId));
     await waitForImageAssets(window);
     await window.webContents.executeJavaScript(
       "document.body.dataset.cardnewsReady = String(Date.now()); true"
@@ -208,13 +208,27 @@ function buildAssetCssUrls(
   );
 }
 
-async function waitForFonts(window: BrowserWindow): Promise<void> {
-  await window.webContents.executeJavaScript(`
-    Promise.race([
-      document.fonts ? document.fonts.ready.then(() => true) : Promise.resolve(true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 5000))
-    ])
-  `);
+async function waitForFonts(window: BrowserWindow, requireUserFont: boolean): Promise<void> {
+  const result = (await window.webContents.executeJavaScript(`
+    (async () => {
+      const ready = await Promise.race([
+        document.fonts ? document.fonts.ready.then(() => true) : Promise.resolve(true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 5000))
+      ]);
+      const userFontLoaded = document.fonts
+        ? document.fonts.check('16px "Cardnews User Font"')
+        : true;
+      return { ready, userFontLoaded };
+    })()
+  `)) as { readonly ready?: unknown; readonly userFontLoaded?: unknown };
+
+  if (result.ready !== true) {
+    throw new Error("폰트 로딩 시간이 초과되었습니다.");
+  }
+
+  if (requireUserFont && result.userFontLoaded !== true) {
+    throw new Error("사용자 폰트를 로드하지 못했습니다: Cardnews User Font");
+  }
 }
 
 async function waitForImageAssets(window: BrowserWindow): Promise<void> {

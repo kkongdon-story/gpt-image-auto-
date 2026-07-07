@@ -264,6 +264,30 @@
 3. 스타일 매트릭스 hard gate는 통과하지만 advisory warning은 남아 있다. 다음 개선 시 body 카드 폰트 단계와 source 대비를 다듬으면 줄일 수 있다.
 4. 대부분 파일이 아직 Git 추적 전 상태로 보인다. 후속 커밋 시 전체 diff를 다시 검토하고 `AGENTS.md`의 Lore Commit Protocol을 따라야 한다.
 
+## 6-7. V5-1 빠른 수정 묶음 완료 (2026-07-07 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v5-completion-prd.md`
+
+**구현 완료**:
+- CSV 템플릿 BOM 검증: Excel에서 한글 헤더/본문이 깨지지 않도록 기존 BOM 계약을 테스트와 바이트 체크로 재확인했다.
+- 폰트 문제는 PRD 지시대로 수정 전에 진단을 먼저 수행했다. 기존 라이브러리 폰트 `font-mraqlugy`로 UI 렌더 전/후를 비교했고, 이후 `@font-face` descriptor를 정리했다.
+- 오프스크린 PNG 렌더러가 `document.fonts.ready` timeout을 실패로 처리하고, 선택 폰트가 있을 때 `Cardnews User Font` 로드를 명시 검증한다.
+- Electron smoke에 `CARDNEWS_SMOKE_ACTION=render-with-font`를 추가해 실제 UI 폰트 셀렉트 선택, `document.fonts.check()`, PNG 생성을 한 번에 검증할 수 있게 했다.
+- 배경 파일 추가와 Pixabay 다운로드는 라이브러리에만 추가하고 자동 적용하지 않도록 변경했다. 사용자가 목록에서 선택해야 적용된다.
+- 상단/인스펙터 UI overflow guard를 보강하고, 긴 select 라벨이 잘리지 않도록 상단 select 폭을 고정했다.
+- `@kkongdon_story` 크레딧을 앱 상단과 정보 모달, `usage.html`에 노출했고, 외부 링크는 allowlist IPC로만 열린다.
+
+**증거**:
+- V5-1 요약: `.omc/evidence/v5/v5-1-summary.md`
+- 폰트 수정 전 진단: `.omc/evidence/v5/task-02-font-diagnosis.md`
+- 폰트 수정 후 UI smoke: `.omc/evidence/v5/task-03-font-postfix-smoke.log`, `.omc/evidence/v5/task-03-font-postfix-check.txt`
+- 배경 기본값 없음/자동 적용 방지: `.omc/evidence/v5/task-04-first-run-bg-none-check.txt`
+- 표준 gate: `.omc/evidence/v5/task-v5-1-standard-gate.txt`
+- style matrix: `.omc/evidence/v5/task-v5-1-style-matrix.txt`
+- dev smoke: `.omc/evidence/v5/task-v5-1-dev-smoke.log`, `.omc/evidence/v5/smoke.png`, `.omc/evidence/v5/smoke.txt`
+
+**다음 단계**: V5-2 문제6(세팅/프로젝트 명시적 저장·불러오기)부터 진행한다. Phase 완료 시 표준 검증 명령과 smoke를 다시 통과시킨 뒤 Lore Commit Protocol로 커밋한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

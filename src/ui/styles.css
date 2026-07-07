@@ -42,6 +42,7 @@ button {
   font-size: 13px;
   padding: 8px 14px;
   box-shadow: var(--shadow);
+  max-width: 100%;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 
@@ -81,6 +82,8 @@ textarea {
   color: var(--text);
   font-family: inherit;
   font-size: 13px;
+  max-width: 100%;
+  min-width: 0;
   padding: 8px 10px;
 }
 
@@ -107,13 +110,30 @@ textarea:focus {
   flex-shrink: 0;
   gap: 16px;
   box-shadow: var(--shadow);
+  min-width: 0;
   padding: 10px 18px;
 }
 
 .brand {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text);
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   margin-right: 8px;
+  padding: 0;
+  text-align: left;
+}
+
+.brand:hover {
+  border-color: transparent;
+}
+
+.brand-button {
+  cursor: pointer;
 }
 
 .brand strong {
@@ -130,6 +150,7 @@ textarea:focus {
   align-items: center;
   display: flex;
   gap: 8px;
+  min-width: 0;
 }
 
 .topbar-field > span {
@@ -143,10 +164,33 @@ textarea:focus {
   width: 170px;
 }
 
+.topbar-field select {
+  width: 176px;
+}
+
+.topbar-field .topbar-style-select {
+  width: 200px;
+}
+
+.topbar-field .topbar-ratio-select {
+  width: 240px;
+}
+
 .topbar-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
   margin-left: auto;
+  min-width: 0;
+}
+
+.credit-pill,
+.credit-link {
+  background: #18191b;
+  border-color: #18191b;
+  color: #ffffff;
+  font-weight: 700;
 }
 
 /* ── 3패널 레이아웃 ─────────────────────────── */
@@ -196,7 +240,9 @@ textarea:focus {
 .row {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .row > select,
@@ -207,6 +253,8 @@ textarea:focus {
 
 .row > button {
   flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -294,6 +342,8 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 14px;
 }
@@ -303,6 +353,8 @@ textarea:focus {
   display: grid;
   gap: 6px;
   grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
 .inspector-tabs button,
@@ -310,6 +362,10 @@ textarea:focus {
   background: var(--panel-2);
   box-shadow: none;
   color: var(--text-sub);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspector-tabs button.active,
@@ -327,6 +383,7 @@ textarea:focus {
   flex-direction: column;
   flex-shrink: 0;
   gap: 10px;
+  min-width: 0;
   padding: 12px;
   box-shadow: var(--shadow);
 }
@@ -349,6 +406,7 @@ textarea:focus {
   gap: 8px;
   letter-spacing: 0.08em;
   margin: 0;
+  min-width: 0;
   text-transform: uppercase;
 }
 
@@ -425,6 +483,33 @@ textarea:focus {
 
 .check-row input {
   accent-color: var(--accent);
+}
+
+.font-sample {
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.font-sample span {
+  font-size: 20px;
+  font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-sample small {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 10px;
+  white-space: nowrap;
 }
 
 .hint {
@@ -615,6 +700,23 @@ textarea:focus {
   max-height: min(720px, 90vh);
   padding: 18px;
   width: min(760px, 92vw);
+}
+
+.info-modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(24, 25, 27, 0.24);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  width: min(360px, 92vw);
+}
+
+.info-modal p {
+  color: var(--text-sub);
+  margin: 0;
 }
 
 .modal-header {

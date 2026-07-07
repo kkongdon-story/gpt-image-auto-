@@ -52,8 +52,8 @@ export function buildFontFaceCss(source: string, options: FontFaceOptions = {}):
   return `@font-face {
         font-family: "${escapeAttribute(family)}";
         src: url("${escapeAttribute(source)}") format("${format}");
-        font-weight: 45 920;
-        font-style: normal italic;
+        font-weight: 100 900;
+        font-style: normal;
         font-display: block;
       }`;
 }

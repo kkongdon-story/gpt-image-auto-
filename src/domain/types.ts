@@ -44,6 +44,7 @@ export type DeckDraft = {
   readonly headerLabel: string;
   readonly footerAccount: string;
   readonly cards: readonly CardDraft[];
+  readonly chrome?: ChromeConfig;
   readonly styleId?: string;
   readonly accentColor?: string;
   readonly backgroundDim?: number;
@@ -85,6 +86,26 @@ export type CardTypographyOverride = {
   readonly italic?: boolean;
 };
 
+export type ChromeSlotStyle = {
+  readonly visible: boolean;
+  readonly color: string;
+  readonly fontSize: number;
+  readonly fontWeight: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
+  readonly useDeckFont: boolean;
+};
+
+export type ChromePageNumberStyle = ChromeSlotStyle & {
+  readonly template: string;
+};
+
+export type ChromeConfig = {
+  readonly header: ChromeSlotStyle;
+  readonly footer: ChromeSlotStyle;
+  readonly pageNumber: ChromePageNumberStyle;
+};
+
 export type CardLayerBase = {
   readonly id: string;
   readonly x: number;
@@ -115,11 +136,17 @@ export type CardShapeLayer = CardLayerBase & {
   readonly radius?: number;
 };
 
-export type CardLineLayer = CardLayerBase & {
+export type CardLineLayer = {
+  readonly id: string;
   readonly kind: "line";
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+  readonly thickness: number;
   readonly color: string;
-  readonly strokeWidth?: number;
-  readonly rotation?: number;
+  readonly zIndex?: number;
+  readonly opacity?: number;
 };
 
 export type CardImageLayer = CardLayerBase & {
@@ -146,6 +173,7 @@ export type Deck = {
   readonly headerLabel: string;
   readonly footerAccount: string;
   readonly cards: readonly Card[];
+  readonly chrome?: ChromeConfig;
   readonly backgroundImage?: LocalImageRef;
   readonly styleProfile?: StyleProfile;
   readonly styleId?: string;
@@ -269,6 +297,7 @@ export type DeckPreset = {
   readonly name: string;
   readonly headerLabel: string;
   readonly footerAccount: string;
+  readonly chrome?: ChromeConfig;
   readonly styleId: string;
   readonly accentColor?: string;
   readonly backgroundDim?: number;
@@ -283,6 +312,7 @@ export type DeckPreset = {
 export type WorkspaceState = {
   readonly headerLabel: string;
   readonly footerAccount: string;
+  readonly chrome?: ChromeConfig;
   readonly styleId: string;
   readonly accentColor?: string;
   readonly backgroundDim?: number;

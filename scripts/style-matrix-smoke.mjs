@@ -62,8 +62,10 @@ app.whenReady().then(async () => {
 
   let failures = 0;
   for (const combo of combos) {
+    const matrixDeck = { ...deck };
+    delete matrixDeck.chrome;
     const styledDeck = {
-      ...deck,
+      ...matrixDeck,
       styleId: combo.styleId,
       aspectRatio: combo.aspectRatio,
       accentColor: undefined

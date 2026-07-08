@@ -119,7 +119,7 @@ async function captureSmokePng(mainWindow: BrowserWindow): Promise<Buffer> {
 }
 
 async function runSmokeCapture(mainWindow: BrowserWindow): Promise<void> {
-  if (!smokeScreenshotPath && !smokeTextPath) {
+  if (!smokeAction && !smokeScreenshotPath && !smokeTextPath) {
     return;
   }
 
@@ -337,6 +337,10 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       return await runLayerEditSmoke(mainWindow);
     case "layer-controls-regression":
       return await runLayerControlsRegressionSmoke(mainWindow);
+    case "line-endpoint-regression":
+      return await runLineEndpointRegressionSmoke(mainWindow);
+    case "chrome-style-regression":
+      return await runChromeStyleRegressionSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
@@ -547,6 +551,164 @@ async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeAction
   return await readRenderSmokeResult(mainWindow);
 }
 
+async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Chrome smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Chrome smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native input value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readChromeState = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        const page = iframe.contentDocument.querySelector('[data-slot="page"]');
+        const footer = iframe.contentDocument.querySelector('[data-slot="footer"]');
+        return {
+          footerExists: footer !== null,
+          footerText: footer?.textContent?.trim() ?? "",
+          pageStyle: page?.getAttribute("style") ?? "",
+          pageText: page?.textContent?.trim() ?? ""
+        };
+      };
+
+      window.confirm = () => true;
+      await delay(1200);
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+
+      const templateInput = await waitFor('[data-smoke-role="chrome-page-template"]');
+      const colorInput = await waitFor('[data-smoke-role="chrome-page-color"]');
+      const offsetInput = await waitFor('[data-smoke-role="chrome-page-offset-y"]');
+      const footerVisibleInput = await waitFor('[data-smoke-role="chrome-footer-visible"]');
+      if (
+        !(templateInput instanceof HTMLInputElement) ||
+        !(colorInput instanceof HTMLInputElement) ||
+        !(offsetInput instanceof HTMLInputElement) ||
+        !(footerVisibleInput instanceof HTMLInputElement)
+      ) {
+        throw new Error("Chrome smoke controls were not input elements.");
+      }
+
+      setNativeValue(templateInput, "{n2}");
+      setNativeValue(colorInput, "#123456");
+      setNativeValue(offsetInput, 10);
+      if (footerVisibleInput.checked) {
+        footerVisibleInput.click();
+      }
+
+      await waitUntil(
+        () => {
+          const state = readChromeState();
+          return (
+            state.pageText === "01" &&
+            state.pageStyle.includes("color: #123456") &&
+            state.pageStyle.includes("translate(0px, 10px)") &&
+            state.footerExists === false
+          );
+        },
+        () => "Chrome preview did not update: " + JSON.stringify(readChromeState())
+      );
+
+      const evidence = {
+        controls: {
+          footerVisible: footerVisibleInput.checked,
+          offset: offsetInput.value,
+          template: templateInput.value
+        },
+        preview: readChromeState()
+      };
+      const pre = document.createElement("pre");
+      pre.id = "chrome-style-regression-result";
+      pre.textContent = "CHROME_STYLE_REGRESSION_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+
+      const generate = await waitFor('[data-smoke-action="generate"]');
+      if (!(generate instanceof HTMLButtonElement)) {
+        throw new Error("Chrome smoke render button was not available.");
+      }
+      generate.click();
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Chrome style smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const preview = record["preview"] as Record<string, unknown> | undefined;
+  const controls = record["controls"] as Record<string, unknown> | undefined;
+  const pageStyle = typeof preview?.["pageStyle"] === "string" ? preview["pageStyle"] : "";
+  const failed =
+    preview?.["pageText"] !== "01" ||
+    !pageStyle.includes("color: #123456") ||
+    !pageStyle.includes("translate(0px, 10px)") ||
+    preview?.["footerExists"] !== false ||
+    controls?.["template"] !== "{n2}" ||
+    controls?.["offset"] !== "10" ||
+    controls?.["footerVisible"] !== false;
+
+  if (failed) {
+    return { ok: false, message: `Chrome style smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  const savedDeck = await loadDeck(storageRoot(), currentDeckId);
+  if (isCardnewsError(savedDeck)) {
+    return savedDeck;
+  }
+  const savedChrome = savedDeck.chrome;
+  if (!savedChrome) {
+    return { ok: false, message: "Saved deck chrome was missing." };
+  }
+  if (
+    savedChrome.pageNumber.template !== "{n2}" ||
+    savedChrome.pageNumber.color !== "#123456" ||
+    savedChrome.pageNumber.offsetY !== 10 ||
+    savedChrome.footer.visible !== false
+  ) {
+    return { ok: false, message: `Saved deck chrome was not updated: ${JSON.stringify(savedChrome)}` };
+  }
+  return await readRenderSmokeResult(mainWindow);
+}
+
 async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
   const result = (await mainWindow.webContents.executeJavaScript(`
     (async () => {
@@ -653,6 +815,8 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
 
       window.confirm = () => true;
       await delay(1200);
+      await clickAction("reset-workspace");
+      await delay(350);
       const threadsLink = await waitFor('[data-smoke-role="threads-link"]');
       const kakaoLink = await waitFor('[data-smoke-role="kakao-inquiry-link"]');
       const threadsLinkText = threadsLink.textContent?.trim() ?? "";
@@ -809,11 +973,12 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
         () => readIframeLayerStyle()?.lineStyleAttribute.includes("rotate(90deg)") === true,
         () => "Line preview style did not rotate: " + JSON.stringify(readIframeLayerStyle())
       );
-      const selectedLineOverlay = document.querySelector(".edit-layer-line.selected");
+      const selectedLineOverlay = document.querySelector(".edit-line-hit.selected");
       if (!(selectedLineOverlay instanceof HTMLElement)) {
         throw new Error("Selected line overlay was not found.");
       }
       const lineOverlayTransform = window.getComputedStyle(selectedLineOverlay).transform;
+      const lineEndpointCount = document.querySelectorAll(".line-endpoint-handle").length;
       const rotatedLineStyle = readIframeLayerStyle();
 
       const badgeSlider = await waitFor('[data-smoke-role="badge-gap-slider"]');
@@ -846,6 +1011,7 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
         fontWeightInputValue: fontWeightInput.value,
         kakaoLinkText,
         lineLabelText,
+        lineEndpointCount,
         lineOverlayTransform,
         lineRotationInputValue: lineRotationInput.value,
         lineStyleAttribute: rotatedLineStyle?.lineStyleAttribute ?? "",
@@ -890,6 +1056,8 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
     typeof record["thumbnailCenterDelta"] === "number" ? record["thumbnailCenterDelta"] : Number.POSITIVE_INFINITY;
   const lineOverlayTransform =
     typeof record["lineOverlayTransform"] === "string" ? record["lineOverlayTransform"] : "";
+  const lineEndpointCount =
+    typeof record["lineEndpointCount"] === "number" ? record["lineEndpointCount"] : 0;
   const failed =
     record["noOverlayTextDuplicate"] !== true ||
     record["contentTabStillActive"] !== true ||
@@ -897,7 +1065,6 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
     record["normalizedPreviewFooter"] !== "kkongdon_story" ||
     missingStyleNames.length > 0 ||
     Math.abs(thumbnailCenterDelta) > 2 ||
-    (lineOverlayTransform !== "" && lineOverlayTransform !== "none") ||
     record["fontWeightInputValue"] !== "950" ||
     textStyle?.["fontSize"] !== "80px" ||
     textStyle?.["fontWeight"] !== "950" ||
@@ -907,6 +1074,7 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
     !lineLabelText.includes("선 색상") ||
     !lineLabelText.includes("선 두께") ||
     !lineLabelText.includes("각도") ||
+    lineEndpointCount !== 2 ||
     record["lineRotationInputValue"] !== "90" ||
     !lineStyleAttribute.includes("rotate(90deg)") ||
     record["badgeScale"] !== "1.800";
@@ -927,6 +1095,152 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
     return { ok: false, message: `Saved deck footer was not normalized: ${savedDeck.footerAccount}` };
   }
   return await readRenderSmokeResult(mainWindow);
+}
+
+async function runLineEndpointRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = (selector, timeout = 8000) =>
+        new Promise((resolve, reject) => {
+          const started = Date.now();
+          const tick = () => {
+            const element = document.querySelector(selector);
+            if (element) {
+              resolve(element);
+              return;
+            }
+            if (Date.now() - started > timeout) {
+              reject(new Error("Timed out waiting for " + selector));
+              return;
+            }
+            setTimeout(tick, 100);
+          };
+          tick();
+        });
+      const waitUntil = (predicate, message, timeout = 8000) =>
+        new Promise((resolve, reject) => {
+          const started = Date.now();
+          const tick = () => {
+            if (predicate()) {
+              resolve(true);
+              return;
+            }
+            if (Date.now() - started > timeout) {
+              reject(new Error(typeof message === "function" ? message() : message));
+              return;
+            }
+            setTimeout(tick, 100);
+          };
+          tick();
+        });
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error(action + " was not a button.");
+        }
+        button.click();
+        await delay(150);
+      };
+      const readLineStyle = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        return iframe.contentDocument.querySelector(".layer-line")?.getAttribute("style") ?? "";
+      };
+
+      window.confirm = () => true;
+      await delay(1200);
+      await clickAction("reset-workspace");
+      const editToggle = await waitFor('[data-smoke-action="toggle-edit-mode"]');
+      if (editToggle instanceof HTMLButtonElement && !editToggle.classList.contains("active")) {
+        editToggle.click();
+        await delay(150);
+      }
+      await clickAction("card-design-tab");
+      await clickAction("add-line-layer");
+
+      const body = await waitFor(".edit-line-hit.selected");
+      const endpointStart = await waitFor('[data-smoke-role="line-endpoint-start"]');
+      const endpointEnd = await waitFor('[data-smoke-role="line-endpoint-end"]');
+      const overlay = await waitFor(".edit-overlay");
+      if (
+        !(body instanceof HTMLElement) ||
+        !(endpointStart instanceof HTMLElement) ||
+        !(endpointEnd instanceof HTMLElement) ||
+        !(overlay instanceof HTMLElement)
+      ) {
+        throw new Error("Line endpoint controls were not HTMLElement instances.");
+      }
+
+      const noLegacyBBox = document.querySelector(".edit-layer-line") === null;
+      const endpointCountBefore = document.querySelectorAll(".line-endpoint-handle").length;
+      const beforeStyle = readLineStyle();
+      const beforeEndRect = endpointEnd.getBoundingClientRect();
+      endpointEnd.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerId: 91,
+        clientX: beforeEndRect.left + beforeEndRect.width / 2,
+        clientY: beforeEndRect.top + beforeEndRect.height / 2,
+        buttons: 1
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointermove", {
+        bubbles: true,
+        pointerId: 91,
+        clientX: beforeEndRect.left + beforeEndRect.width / 2 + 96,
+        clientY: beforeEndRect.top + beforeEndRect.height / 2 - 80,
+        buttons: 1
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true,
+        pointerId: 91,
+        clientX: beforeEndRect.left + beforeEndRect.width / 2 + 96,
+        clientY: beforeEndRect.top + beforeEndRect.height / 2 - 80,
+        buttons: 0
+      }));
+      await waitUntil(
+        () => readLineStyle() !== beforeStyle,
+        () => "Line iframe style did not update after endpoint drag: " + readLineStyle()
+      );
+      const afterEndRect = endpointEnd.getBoundingClientRect();
+      const afterStyle = readLineStyle();
+      const endpointMoved =
+        Math.abs(afterEndRect.left - beforeEndRect.left) > 8 ||
+        Math.abs(afterEndRect.top - beforeEndRect.top) > 8;
+      const endpointCountAfter = document.querySelectorAll(".line-endpoint-handle").length;
+      const evidence = {
+        afterStyle,
+        beforeStyle,
+        endpointCountAfter,
+        endpointCountBefore,
+        endpointMoved,
+        noLegacyBBox,
+        styleChanged: afterStyle !== beforeStyle
+      };
+      const pre = document.createElement("pre");
+      pre.id = "line-endpoint-regression-result";
+      pre.textContent = "LINE_ENDPOINT_REGRESSION_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Line endpoint smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  if (
+    record["noLegacyBBox"] !== true ||
+    record["endpointMoved"] !== true ||
+    record["styleChanged"] !== true ||
+    record["endpointCountBefore"] !== 2 ||
+    record["endpointCountAfter"] !== 2
+  ) {
+    return { ok: false, message: `Line endpoint smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  return { ok: true };
 }
 
 async function clickSmokeButton(mainWindow: BrowserWindow, action: string): Promise<void> {
@@ -1210,11 +1524,19 @@ function isDeckDraft(input: unknown): input is DeckDraft {
     return false;
   }
 
+  if ("chrome" in input && input.chrome !== undefined && !isChromeConfigCandidate(input.chrome)) {
+    return false;
+  }
+
   if ("overrides" in input && input.overrides !== undefined && !isCardOverrideMap(input.overrides)) {
     return false;
   }
 
   return input.cards.every(isDeckDraftCard);
+}
+
+function isChromeConfigCandidate(input: unknown): boolean {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
 }
 
 function isDeckDraftCard(input: unknown): input is DeckDraft["cards"][number] {
@@ -1303,14 +1625,23 @@ function isCardLayer(input: unknown): boolean {
   }
 
   const record = input as Record<string, unknown>;
-  const hasBox =
+  const hasCommon =
     typeof record["id"] === "string" &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number");
+  if (!hasCommon) {
+    return false;
+  }
+
+  if (record["kind"] === "line") {
+    return isEndpointLineLayer(record) || isLegacyLineLayer(record);
+  }
+
+  const hasBox =
     typeof record["x"] === "number" &&
     typeof record["y"] === "number" &&
     typeof record["width"] === "number" &&
-    typeof record["height"] === "number" &&
-    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
-    (record["opacity"] === undefined || typeof record["opacity"] === "number");
+    typeof record["height"] === "number";
   if (!hasBox) {
     return false;
   }
@@ -1337,12 +1668,6 @@ function isCardLayer(input: unknown): boolean {
         (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
         (record["radius"] === undefined || typeof record["radius"] === "number")
       );
-    case "line":
-      return (
-        typeof record["color"] === "string" &&
-        (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
-        (record["rotation"] === undefined || typeof record["rotation"] === "number")
-      );
     case "image":
       return (
         typeof record["backgroundId"] === "string" &&
@@ -1353,6 +1678,37 @@ function isCardLayer(input: unknown): boolean {
     default:
       return false;
   }
+}
+
+function isEndpointLineLayer(record: Record<string, unknown>): boolean {
+  return (
+    record["kind"] === "line" &&
+    typeof record["id"] === "string" &&
+    typeof record["x1"] === "number" &&
+    typeof record["y1"] === "number" &&
+    typeof record["x2"] === "number" &&
+    typeof record["y2"] === "number" &&
+    typeof record["thickness"] === "number" &&
+    typeof record["color"] === "string" &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number")
+  );
+}
+
+function isLegacyLineLayer(record: Record<string, unknown>): boolean {
+  return (
+    record["kind"] === "line" &&
+    typeof record["id"] === "string" &&
+    typeof record["x"] === "number" &&
+    typeof record["y"] === "number" &&
+    typeof record["width"] === "number" &&
+    typeof record["height"] === "number" &&
+    typeof record["color"] === "string" &&
+    (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
+    (record["rotation"] === undefined || typeof record["rotation"] === "number") &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number")
+  );
 }
 
 function isStyleProfile(input: unknown): input is StyleProfile {

@@ -2,6 +2,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseCardText } from "../domain/cardParser.js";
+import { normalizeChromeConfig } from "../domain/chromeConfig.js";
+import {
+  migrateLineLayer,
+  normalizeLineLayer,
+  type LegacyLineLayer
+} from "../domain/lineLayer.js";
 import type {
   AppSettings,
   BackgroundLibraryItem,
@@ -86,6 +92,7 @@ export function buildDeckFromDraft(
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
     ...(input.fontId ? { fontId: input.fontId } : {}),
+    ...(input.chrome ? { chrome: normalizeChromeConfig(input.chrome) } : {}),
     ...(input.overrides ? { overrides: sanitizeOverrideMap(input.overrides) } : {})
   };
 
@@ -286,6 +293,9 @@ function parseStoredDeck(deckText: string): CardnewsResult<Deck> {
     ...("fontId" in parsed && typeof parsed.fontId === "string"
       ? { fontId: parsed.fontId }
       : {}),
+    ...("chrome" in parsed && isChromeConfigCandidate(parsed.chrome)
+      ? { chrome: normalizeChromeConfig(parsed.chrome) }
+      : {}),
     ...("overrides" in parsed && isCardOverrideMap(parsed.overrides)
       ? { overrides: sanitizeOverrideMap(parsed.overrides) }
       : {})
@@ -411,20 +421,33 @@ function isCardTypographyOverride(candidate: unknown): candidate is CardTypograp
   );
 }
 
+function isChromeConfigCandidate(candidate: unknown): candidate is Record<string, unknown> {
+  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+}
+
 function isCardLayer(candidate: unknown): candidate is CardLayer {
   if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
     return false;
   }
 
   const record = candidate as Record<string, unknown>;
-  const hasBox =
+  const hasCommon =
     typeof record["id"] === "string" &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number");
+  if (!hasCommon) {
+    return false;
+  }
+
+  if (record["kind"] === "line") {
+    return isEndpointLineLayerRecord(record) || isLegacyLineLayerRecord(record);
+  }
+
+  const hasBox =
     typeof record["x"] === "number" &&
     typeof record["y"] === "number" &&
     typeof record["width"] === "number" &&
-    typeof record["height"] === "number" &&
-    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
-    (record["opacity"] === undefined || typeof record["opacity"] === "number");
+    typeof record["height"] === "number";
   if (!hasBox) {
     return false;
   }
@@ -451,11 +474,6 @@ function isCardLayer(candidate: unknown): candidate is CardLayer {
         (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
         (record["radius"] === undefined || typeof record["radius"] === "number")
       );
-    case "line":
-      return (
-        typeof record["color"] === "string" &&
-        (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number")
-      );
     case "image":
       return (
         typeof record["backgroundId"] === "string" &&
@@ -469,8 +487,95 @@ function isCardLayer(candidate: unknown): candidate is CardLayer {
 }
 
 function sanitizeOverrideMap(overrides: CardOverrideMap): CardOverrideMap {
-  const entries = Object.entries(overrides).filter(([, override]) => !isEmptyOverride(override));
+  const entries = Object.entries(overrides)
+    .map(([key, override]) => [key, sanitizeOverride(override)] as const)
+    .filter(([, override]) => !isEmptyOverride(override));
   return Object.fromEntries(entries);
+}
+
+function sanitizeOverride(override: CardOverride): CardOverride {
+  const layers = override.layers?.map(sanitizeCardLayer);
+  return {
+    ...override,
+    ...(layers ? { layers } : {})
+  };
+}
+
+function sanitizeCardLayer(layer: CardLayer): CardLayer {
+  const record = layer as unknown as Record<string, unknown>;
+  if (isEndpointLineLayerRecord(record)) {
+    return normalizeLineLayer({
+      id: record["id"],
+      kind: "line",
+      x1: record["x1"],
+      y1: record["y1"],
+      x2: record["x2"],
+      y2: record["y2"],
+      thickness: record["thickness"],
+      color: record["color"],
+      ...(record["zIndex"] !== undefined ? { zIndex: record["zIndex"] } : {}),
+      ...(record["opacity"] !== undefined ? { opacity: record["opacity"] } : {})
+    });
+  }
+  if (isLegacyLineLayerRecord(record)) {
+    return migrateLineLayer({
+      id: record["id"],
+      kind: "line",
+      x: record["x"],
+      y: record["y"],
+      width: record["width"],
+      height: record["height"],
+      color: record["color"],
+      ...(record["strokeWidth"] !== undefined ? { strokeWidth: record["strokeWidth"] } : {}),
+      ...(record["rotation"] !== undefined ? { rotation: record["rotation"] } : {}),
+      ...(record["zIndex"] !== undefined ? { zIndex: record["zIndex"] } : {}),
+      ...(record["opacity"] !== undefined ? { opacity: record["opacity"] } : {})
+    });
+  }
+
+  return layer;
+}
+
+function isEndpointLineLayerRecord(record: Record<string, unknown>): record is {
+  readonly id: string;
+  readonly kind: "line";
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+  readonly thickness: number;
+  readonly color: string;
+  readonly zIndex?: number;
+  readonly opacity?: number;
+} {
+  return (
+    record["kind"] === "line" &&
+    typeof record["id"] === "string" &&
+    typeof record["x1"] === "number" &&
+    typeof record["y1"] === "number" &&
+    typeof record["x2"] === "number" &&
+    typeof record["y2"] === "number" &&
+    typeof record["thickness"] === "number" &&
+    typeof record["color"] === "string" &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number")
+  );
+}
+
+function isLegacyLineLayerRecord(record: Record<string, unknown>): record is LegacyLineLayer {
+  return (
+    record["kind"] === "line" &&
+    typeof record["id"] === "string" &&
+    typeof record["x"] === "number" &&
+    typeof record["y"] === "number" &&
+    typeof record["width"] === "number" &&
+    typeof record["height"] === "number" &&
+    typeof record["color"] === "string" &&
+    (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
+    (record["rotation"] === undefined || typeof record["rotation"] === "number") &&
+    (record["zIndex"] === undefined || typeof record["zIndex"] === "number") &&
+    (record["opacity"] === undefined || typeof record["opacity"] === "number")
+  );
 }
 
 function isEmptyOverride(override: CardOverride): boolean {
@@ -847,7 +952,7 @@ export async function listDeckPresets(storageRoot: string): Promise<readonly Dec
     return [];
   }
 
-  return parsed.filter(isDeckPreset);
+  return parsed.filter(isDeckPreset).map(sanitizeDeckPreset);
 }
 
 export async function saveDeckPresetToStore(
@@ -884,6 +989,7 @@ export function isDeckPreset(candidate: unknown): candidate is DeckPreset {
     typeof record["headerLabel"] === "string" &&
     typeof record["footerAccount"] === "string" &&
     typeof record["styleId"] === "string" &&
+    (record["chrome"] === undefined || isChromeConfigCandidate(record["chrome"])) &&
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
@@ -916,7 +1022,7 @@ export async function saveWorkspaceState(
 
 export async function loadWorkspaceState(storageRoot: string): Promise<WorkspaceState | null> {
   const parsed = await readJsonFile(getWorkspacePath(storageRoot));
-  return isWorkspaceState(parsed) ? parsed : null;
+  return isWorkspaceState(parsed) ? sanitizeWorkspaceState(parsed) : null;
 }
 
 export function isWorkspaceState(candidate: unknown): candidate is WorkspaceState {
@@ -929,6 +1035,7 @@ export function isWorkspaceState(candidate: unknown): candidate is WorkspaceStat
     typeof record["headerLabel"] === "string" &&
     typeof record["footerAccount"] === "string" &&
     typeof record["styleId"] === "string" &&
+    (record["chrome"] === undefined || isChromeConfigCandidate(record["chrome"])) &&
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
@@ -945,6 +1052,24 @@ export function isWorkspaceState(candidate: unknown): candidate is WorkspaceStat
 
 function getWorkspacePath(storageRoot: string): string {
   return path.join(storageRoot, "workspace.json");
+}
+
+function sanitizeDeckPreset(preset: DeckPreset): DeckPreset {
+  return {
+    ...preset,
+    footerAccount: normalizeFooterAccount(preset.footerAccount),
+    ...(preset.chrome ? { chrome: normalizeChromeConfig(preset.chrome) } : {}),
+    ...(preset.overrides ? { overrides: sanitizeOverrideMap(preset.overrides) } : {})
+  };
+}
+
+function sanitizeWorkspaceState(state: WorkspaceState): WorkspaceState {
+  return {
+    ...state,
+    footerAccount: normalizeFooterAccount(state.footerAccount),
+    ...(state.chrome ? { chrome: normalizeChromeConfig(state.chrome) } : {}),
+    ...(state.overrides ? { overrides: sanitizeOverrideMap(state.overrides) } : {})
+  };
 }
 
 export async function loadAppSettings(storageRoot: string): Promise<AppSettings> {

@@ -52,6 +52,60 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).toContain("&gt;&gt;&gt;&gt;");
   });
 
+  it("applies deck chrome slot styles and visibility through the shared template", () => {
+    const deck = {
+      ...sampleDeck(),
+      chrome: {
+        header: {
+          visible: true,
+          color: "#123456",
+          fontSize: 22,
+          fontWeight: 700,
+          offsetX: 4,
+          offsetY: -2,
+          useDeckFont: true
+        },
+        footer: {
+          visible: false,
+          color: "#141414",
+          fontSize: 30,
+          fontWeight: 800,
+          offsetX: 0,
+          offsetY: 0,
+          useDeckFont: true
+        },
+        pageNumber: {
+          visible: true,
+          color: "#ffffff",
+          fontSize: 24,
+          fontWeight: 850,
+          offsetX: -3,
+          offsetY: 10,
+          useDeckFont: true,
+          template: "{n2}"
+        }
+      }
+    };
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck
+    });
+
+    expect(html).toContain('data-slot="header"');
+    expect(html).toContain("color: #123456");
+    expect(html).toContain("font-size: 22px");
+    expect(html).toContain("font-weight: 700");
+    expect(html).toContain("translate(4px, -2px)");
+    expect(html).toContain('data-slot="page"');
+    expect(html).toContain(">02<");
+    expect(html).toContain("color: #ffffff");
+    expect(html).toContain("font-size: 24px");
+    expect(html).toContain("font-weight: 850");
+    expect(html).toContain("translate(-3px, 10px)");
+    expect(html).not.toContain('data-slot="footer"');
+  });
+
   it("applies the requested accent color", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,
@@ -256,7 +310,7 @@ describe("buildCardHtml (aspect ratio + font)", () => {
     expect(styleAttribute).toContain("font-size: 40px");
   });
 
-  it("renders line layers with rotation for vertical guides", () => {
+  it("renders endpoint line layers with pixel segment geometry", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,
       card: sampleCard,
@@ -264,23 +318,26 @@ describe("buildCardHtml (aspect ratio + font)", () => {
       override: {
         layers: [
           {
-            id: "vertical-line",
+            id: "endpoint-line",
             kind: "line",
-            x: 40,
-            y: 20,
-            width: 30,
-            height: 1,
+            x1: 55,
+            y1: 8.5,
+            x2: 55,
+            y2: 32.5,
             color: "#111111",
-            strokeWidth: 5,
-            rotation: 90
+            thickness: 5
           }
         ]
       }
     });
 
     expect(html).toContain('class="layer layer-line"');
+    expect(html).toContain("left: 594.000px");
+    expect(html).toContain("top: 114.750px");
+    expect(html).toContain("width: 324.000px");
+    expect(html).toContain("height: 5px");
     expect(html).toContain("transform: rotate(90deg)");
-    expect(html).toContain("transform-origin: center");
+    expect(html).toContain("transform-origin: 0 50%");
   });
 
   it("applies per-card image and layout overrides deterministically", () => {

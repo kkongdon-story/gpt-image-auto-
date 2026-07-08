@@ -11,18 +11,30 @@ import {
 } from "react";
 import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
 import { parseCardText } from "../domain/cardParser";
+import { defaultChromeConfig, normalizeChromeConfig } from "../domain/chromeConfig";
 import { buildBulkCsvTemplate } from "../domain/csvBulk";
 import { buildTemplateDocument, parseDeckDocument } from "../domain/deckImporter";
+import {
+  getLineLayerAngle,
+  getLineLayerRenderGeometry,
+  normalizeLineLayer,
+  rotateLineLayer,
+  setLineLayerEndpoint,
+  translateLineLayer
+} from "../domain/lineLayer";
 import type {
   AppSettings,
   BackgroundLibraryItem,
   BulkRenderResult,
   Card,
   CardLayer,
+  CardLineLayer,
   CardOverride,
   CardOverrideMap,
   CardnewsError,
   CardnewsResult,
+  ChromeSlotStyle,
+  ChromePageNumberStyle,
   DeckDraft,
   Deck,
   DeckPreset,
@@ -72,6 +84,8 @@ type LayerRect = {
 
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 type TextLayer = Extract<CardLayer, { readonly kind: "text" }>;
+type BoxLayer = Exclude<CardLayer, CardLineLayer>;
+type LineEndpoint = "start" | "end";
 
 type DragState =
   | {
@@ -80,6 +94,19 @@ type DragState =
       readonly startClientX: number;
       readonly startClientY: number;
       readonly startRect: LayerRect;
+    }
+  | {
+      readonly kind: "line-move";
+      readonly layerId: string;
+      readonly startClientX: number;
+      readonly startClientY: number;
+      readonly startLayer: CardLineLayer;
+    }
+  | {
+      readonly kind: "line-endpoint";
+      readonly layerId: string;
+      readonly endpoint: LineEndpoint;
+      readonly startLayer: CardLineLayer;
     }
   | {
       readonly kind: "resize";
@@ -93,6 +120,17 @@ type DragState =
 const resizeHandles: readonly ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 
 function layerRect(layer: CardLayer): LayerRect {
+  if (layer.kind === "line") {
+    const left = Math.min(layer.x1, layer.x2);
+    const top = Math.min(layer.y1, layer.y2);
+    return {
+      x: left,
+      y: top,
+      width: Math.max(1, Math.abs(layer.x2 - layer.x1)),
+      height: Math.max(1, Math.abs(layer.y2 - layer.y1))
+    };
+  }
+
   return {
     x: layer.x,
     y: layer.y,
@@ -121,6 +159,16 @@ function clampLayerFontWeight(value: number): number {
 function clampLayerRotation(value: number): number {
   const rotation = Math.round(clampControlNumber(value, -180, 180));
   return Object.is(rotation, -0) ? 0 : rotation;
+}
+
+function roundLineLayer(layer: CardLineLayer): CardLineLayer {
+  return normalizeLineLayer({
+    ...layer,
+    x1: roundLayerValue(layer.x1),
+    y1: roundLayerValue(layer.y1),
+    x2: roundLayerValue(layer.x2),
+    y2: roundLayerValue(layer.y2)
+  });
 }
 
 function clampLayerRect(rect: LayerRect): LayerRect {
@@ -246,6 +294,7 @@ function StageCanvas({
   editingText,
   onSelectLayer,
   onTransformLayer,
+  onTransformLineLayer,
   onNudgeLayer,
   onDeleteLayer,
   onStartTextEdit,
@@ -263,6 +312,7 @@ function StageCanvas({
   readonly editingText: string;
   readonly onSelectLayer: (layerId: string | null) => void;
   readonly onTransformLayer: (layerId: string, rect: LayerRect) => void;
+  readonly onTransformLineLayer: (layerId: string, layer: CardLineLayer) => void;
   readonly onNudgeLayer: (layerId: string, deltaXPercent: number, deltaYPercent: number) => void;
   readonly onDeleteLayer: (layerId: string) => void;
   readonly onStartTextEdit: (layer: CardLayer) => void;
@@ -274,8 +324,12 @@ function StageCanvas({
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const draftRectRef = useRef<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
+  const draftLineRef = useRef<{ readonly layerId: string; readonly layer: CardLineLayer } | null>(null);
   const [scale, setScale] = useState(0.4);
   const [draftRect, setDraftRect] = useState<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
+  const [draftLine, setDraftLineState] = useState<{ readonly layerId: string; readonly layer: CardLineLayer } | null>(
+    null
+  );
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
   const editingLayer = layers.find((layer): layer is TextLayer => layer.id === editingLayerId && layer.kind === "text");
 
@@ -299,6 +353,10 @@ function StageCanvas({
     return draftRect?.layerId === layer.id ? draftRect.rect : layerRect(layer);
   }
 
+  function lineFor(layer: CardLineLayer): CardLineLayer {
+    return draftLine?.layerId === layer.id ? draftLine.layer : layer;
+  }
+
   function layerStyle(rect: LayerRect): CSSProperties {
     return {
       left: `${rect.x}%`,
@@ -308,12 +366,36 @@ function StageCanvas({
     };
   }
 
+  function lineBodyStyle(layer: CardLineLayer): CSSProperties {
+    const geometry = getLineLayerRenderGeometry(layer, { width: cardWidth, height: cardHeight });
+    return {
+      left: `${layer.x1}%`,
+      top: `${layer.y1}%`,
+      width: `${(geometry.widthPx / cardWidth) * 100}%`,
+      height: `${Math.max(12, layer.thickness * scale + 8)}px`,
+      transform: `translateY(-50%) rotate(${geometry.angleDeg}deg)`,
+      transformOrigin: "0 50%"
+    };
+  }
+
+  function lineEndpointStyle(layer: CardLineLayer, endpoint: LineEndpoint): CSSProperties {
+    return {
+      left: `${endpoint === "start" ? layer.x1 : layer.x2}%`,
+      top: `${endpoint === "start" ? layer.y1 : layer.y2}%`
+    };
+  }
+
   function setDraft(nextDraft: { readonly layerId: string; readonly rect: LayerRect } | null): void {
     draftRectRef.current = nextDraft;
     setDraftRect(nextDraft);
   }
 
-  function beginMove(event: ReactPointerEvent<HTMLElement>, layer: CardLayer): void {
+  function setDraftLine(nextDraft: { readonly layerId: string; readonly layer: CardLineLayer } | null): void {
+    draftLineRef.current = nextDraft;
+    setDraftLineState(nextDraft);
+  }
+
+  function beginMove(event: ReactPointerEvent<HTMLElement>, layer: BoxLayer): void {
     if (!editMode) {
       return;
     }
@@ -355,6 +437,50 @@ function StageCanvas({
     setDraft({ layerId: layer.id, rect });
   }
 
+  function beginLineMove(event: ReactPointerEvent<HTMLElement>, layer: CardLineLayer): void {
+    if (!editMode) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(layer.id);
+    const currentLayer = lineFor(layer);
+    dragRef.current = {
+      kind: "line-move",
+      layerId: layer.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startLayer: currentLayer
+    };
+    setDraftLine({ layerId: layer.id, layer: currentLayer });
+  }
+
+  function beginLineEndpoint(
+    event: ReactPointerEvent<HTMLElement>,
+    layer: CardLineLayer,
+    endpoint: LineEndpoint
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(layer.id);
+    const currentLayer = lineFor(layer);
+    dragRef.current = {
+      kind: "line-endpoint",
+      layerId: layer.id,
+      endpoint,
+      startLayer: currentLayer
+    };
+    setDraftLine({ layerId: layer.id, layer: currentLayer });
+  }
+
   function updateDraft(event: ReactPointerEvent<HTMLDivElement>): void {
     const drag = dragRef.current;
     const overlay = overlayRef.current;
@@ -362,8 +488,33 @@ function StageCanvas({
       return;
     }
     const bounds = overlay.getBoundingClientRect();
+    if (drag.kind === "line-endpoint") {
+      const pointerX = ((event.clientX - bounds.left) / bounds.width) * 100;
+      const pointerY = ((event.clientY - bounds.top) / bounds.height) * 100;
+      setDraftLine({
+        layerId: drag.layerId,
+        layer: setLineLayerEndpoint(
+          drag.startLayer,
+          drag.endpoint,
+          pointerX,
+          pointerY,
+          event.shiftKey,
+          { width: cardWidth, height: cardHeight }
+        )
+      });
+      return;
+    }
+
     const deltaXPercent = ((event.clientX - drag.startClientX) / bounds.width) * 100;
     const deltaYPercent = ((event.clientY - drag.startClientY) / bounds.height) * 100;
+    if (drag.kind === "line-move") {
+      setDraftLine({
+        layerId: drag.layerId,
+        layer: translateLineLayer(drag.startLayer, deltaXPercent, deltaYPercent)
+      });
+      return;
+    }
+
     const nextRect =
       drag.kind === "move"
         ? transformMoveRect(drag.startRect, deltaXPercent, deltaYPercent)
@@ -379,8 +530,13 @@ function StageCanvas({
     if (draft) {
       onTransformLayer(draft.layerId, draft.rect);
     }
+    const lineDraft = draftLineRef.current;
+    if (lineDraft) {
+      onTransformLineLayer(lineDraft.layerId, lineDraft.layer);
+    }
     dragRef.current = null;
     setDraft(null);
+    setDraftLine(null);
   }
 
   function handleOverlayKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
@@ -456,6 +612,36 @@ function StageCanvas({
           <div className="edit-guide center-y" />
           <div className="edit-safe-zone" />
           {layers.map((layer) => {
+            if (layer.kind === "line") {
+              const currentLine = lineFor(layer);
+              const selected = layer.id === selectedLayerId;
+              return (
+                <div key={layer.id} className="edit-line-layer" data-layer-id={layer.id}>
+                  <div
+                    className={`edit-line-hit${selected ? " selected" : ""}`}
+                    data-smoke-role="line-body"
+                    data-layer-id={layer.id}
+                    aria-label={layerLabel(layer)}
+                    style={lineBodyStyle(currentLine)}
+                    onPointerDown={(event) => beginLineMove(event, layer)}
+                  >
+                    <span className="edit-line-stroke" />
+                  </div>
+                  {selected
+                    ? (["start", "end"] as const).map((endpoint) => (
+                        <span
+                          key={endpoint}
+                          className={`line-endpoint-handle ${endpoint}`}
+                          data-smoke-role={`line-endpoint-${endpoint}`}
+                          style={lineEndpointStyle(currentLine, endpoint)}
+                          onPointerDown={(event) => beginLineEndpoint(event, layer, endpoint)}
+                        />
+                      ))
+                    : null}
+                </div>
+              );
+            }
+
             const rect = rectFor(layer);
             const selected = layer.id === selectedLayerId;
             const editing = layer.id === editingLayerId;
@@ -536,6 +722,7 @@ function fallbackCard(index: number, error: CardnewsError): Card {
 export function App(): ReactElement {
   const [headerLabel, setHeaderLabel] = useState(defaultHeaderLabel);
   const [footerAccount, setFooterAccount] = useState(defaultFooterAccount);
+  const [chromeConfig, setChromeConfig] = useState(defaultChromeConfig);
   const [cards, setCards] = useState<readonly string[]>(initialCards);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [styleId, setStyleId] = useState<string>(defaultStyleId);
@@ -599,6 +786,7 @@ export function App(): ReactElement {
   const debouncedCards = useDebouncedValue(cards, 250);
   const debouncedHeader = useDebouncedValue(headerLabel, 250);
   const debouncedFooter = useDebouncedValue(footerAccount, 250);
+  const debouncedChrome = useDebouncedValue(chromeConfig, 250);
 
   const parsedEntries = useMemo<readonly ParsedCardEntry[]>(
     () =>
@@ -619,6 +807,7 @@ export function App(): ReactElement {
       headerLabel: debouncedHeader.trim() || "CARD NEWS",
       footerAccount: normalizeFooterAccount(debouncedFooter) || defaultFooterAccount,
       cards: parsedEntries.map((entry) => entry.card),
+      chrome: debouncedChrome,
       styleId,
       accentColor,
       backgroundDim,
@@ -631,6 +820,7 @@ export function App(): ReactElement {
       parsedEntries,
       debouncedHeader,
       debouncedFooter,
+      debouncedChrome,
       styleId,
       accentColor,
       backgroundDim,
@@ -729,6 +919,7 @@ export function App(): ReactElement {
     cards,
     headerLabel,
     footerAccount,
+    chromeConfig,
     styleId,
     aspectRatioId,
     customAccent,
@@ -782,6 +973,7 @@ export function App(): ReactElement {
   function applySnapshot(snapshot: {
     readonly headerLabel: string;
     readonly footerAccount: string;
+    readonly chrome?: ReturnType<typeof normalizeChromeConfig>;
     readonly styleId: string;
     readonly accentColor?: string;
     readonly backgroundDim?: number;
@@ -795,6 +987,7 @@ export function App(): ReactElement {
   }): void {
     setHeaderLabel(snapshot.headerLabel);
     setFooterAccount(normalizeFooterAccount(snapshot.footerAccount));
+    setChromeConfig(normalizeChromeConfig(snapshot.chrome));
     if (snapshot.styleId.trim().length > 0) {
       setStyleId(snapshot.styleId);
     }
@@ -816,6 +1009,30 @@ export function App(): ReactElement {
     }
 
     void applyBackgroundSelection(snapshot.backgroundId ?? null);
+  }
+
+  function updateChromeSlot(slot: "header" | "footer", patch: Partial<ChromeSlotStyle>): void {
+    setChromeConfig((current) =>
+      normalizeChromeConfig({
+        ...current,
+        [slot]: {
+          ...current[slot],
+          ...patch
+        }
+      })
+    );
+  }
+
+  function updateChromePageNumber(patch: Partial<ChromePageNumberStyle>): void {
+    setChromeConfig((current) =>
+      normalizeChromeConfig({
+        ...current,
+        pageNumber: {
+          ...current.pageNumber,
+          ...patch
+        }
+      })
+    );
   }
 
   async function loadBackgroundPreview(nextBackgroundId: string): Promise<void> {
@@ -1024,16 +1241,26 @@ export function App(): ReactElement {
     updateLayer(layerId, (layer) => ({ ...layer, ...clampLayerRect(rect) }));
   }
 
+  function transformLineLayer(layerId: string, lineLayer: CardLineLayer): void {
+    updateLayer(layerId, (layer) => (layer.kind === "line" ? roundLineLayer(lineLayer) : layer));
+  }
+
   function nudgeLayer(layerId: string, deltaXPercent: number, deltaYPercent: number): void {
-    updateLayer(layerId, (layer) => ({
-      ...layer,
-      ...clampLayerRect({
-        x: layer.x + deltaXPercent,
-        y: layer.y + deltaYPercent,
-        width: layer.width,
-        height: layer.height
-      })
-    }));
+    updateLayer(layerId, (layer) => {
+      if (layer.kind === "line") {
+        return translateLineLayer(layer, deltaXPercent, deltaYPercent);
+      }
+
+      return {
+        ...layer,
+        ...clampLayerRect({
+          x: layer.x + deltaXPercent,
+          y: layer.y + deltaYPercent,
+          width: layer.width,
+          height: layer.height
+        })
+      };
+    });
   }
 
   function startLayerTextEdit(layer: CardLayer): void {
@@ -1103,14 +1330,13 @@ export function App(): ReactElement {
         return {
           id,
           kind,
-          x: 12,
-          y: 82,
-          width: 46,
-          height: 1,
+          x1: 12,
+          y1: 82,
+          x2: 58,
+          y2: 82,
           zIndex: 4,
           color: accentColor,
-          strokeWidth: 6,
-          rotation: 0
+          thickness: 6
         };
       case "image":
         return {
@@ -1364,6 +1590,7 @@ export function App(): ReactElement {
       name,
       headerLabel,
       footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
+      chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
       ...(customAccent ? { accentColor: customAccent } : {}),
@@ -1458,6 +1685,7 @@ export function App(): ReactElement {
     setCards(initialCards);
     setHeaderLabel(defaultHeaderLabel);
     setFooterAccount(defaultFooterAccount);
+    setChromeConfig(defaultChromeConfig);
     setStyleId(defaultStyleId);
     setAspectRatioId(defaultAspectRatioId);
     setCustomAccent(null);
@@ -1659,6 +1887,7 @@ export function App(): ReactElement {
     return {
       headerLabel,
       footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
+      chrome: chromeConfig,
       styleId,
       accentColor,
       backgroundDim,
@@ -1677,6 +1906,7 @@ export function App(): ReactElement {
     return {
       headerLabel,
       footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
+      chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
       ...(customAccent ? { accentColor: customAccent } : {}),
@@ -1836,6 +2066,7 @@ export function App(): ReactElement {
             editingText={editingLayerText}
             onSelectLayer={selectLayer}
             onTransformLayer={transformLayer}
+            onTransformLineLayer={transformLineLayer}
             onNudgeLayer={nudgeLayer}
             onDeleteLayer={removeLayer}
             onStartTextEdit={startLayerTextEdit}
@@ -2082,6 +2313,147 @@ export function App(): ReactElement {
               </>
             ) : (
               <div className="card-design-controls">
+                <div className="chrome-controls">
+                  <p className="panel-title">상단/하단 바</p>
+                  <label className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={chromeConfig.header.visible}
+                      onChange={(event) => updateChromeSlot("header", { visible: event.target.checked })}
+                    />
+                    <span>헤더 표시</span>
+                  </label>
+                  <div className="layer-field-grid three">
+                    <label>
+                      <span>헤더 색</span>
+                      <input
+                        type="color"
+                        value={chromeConfig.header.color}
+                        onChange={(event) => updateChromeSlot("header", { color: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>헤더 크기</span>
+                      <input
+                        type="number"
+                        min={18}
+                        max={48}
+                        value={chromeConfig.header.fontSize}
+                        onChange={(event) => updateChromeSlot("header", { fontSize: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>헤더 굵기</span>
+                      <input
+                        type="number"
+                        min={100}
+                        max={950}
+                        step={50}
+                        value={chromeConfig.header.fontWeight}
+                        onChange={(event) => updateChromeSlot("header", { fontWeight: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                  <div className="layer-field-grid two">
+                    <label>
+                      <span>헤더 X</span>
+                      <input
+                        type="number"
+                        min={-40}
+                        max={40}
+                        value={chromeConfig.header.offsetX}
+                        onChange={(event) => updateChromeSlot("header", { offsetX: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>헤더 Y</span>
+                      <input
+                        type="number"
+                        min={-40}
+                        max={40}
+                        value={chromeConfig.header.offsetY}
+                        onChange={(event) => updateChromeSlot("header", { offsetY: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                  <label className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={chromeConfig.pageNumber.visible}
+                      onChange={(event) => updateChromePageNumber({ visible: event.target.checked })}
+                    />
+                    <span>페이지 번호 표시</span>
+                  </label>
+                  <div className="layer-field-grid two">
+                    <label>
+                      <span>페이지 형식</span>
+                      <input
+                        data-smoke-role="chrome-page-template"
+                        value={chromeConfig.pageNumber.template}
+                        onChange={(event) => updateChromePageNumber({ template: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>페이지 색</span>
+                      <input
+                        data-smoke-role="chrome-page-color"
+                        type="color"
+                        value={chromeConfig.pageNumber.color}
+                        onChange={(event) => updateChromePageNumber({ color: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>페이지 Y</span>
+                      <input
+                        data-smoke-role="chrome-page-offset-y"
+                        type="number"
+                        min={-40}
+                        max={40}
+                        value={chromeConfig.pageNumber.offsetY}
+                        onChange={(event) => updateChromePageNumber({ offsetY: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>페이지 크기</span>
+                      <input
+                        type="number"
+                        min={18}
+                        max={48}
+                        value={chromeConfig.pageNumber.fontSize}
+                        onChange={(event) => updateChromePageNumber({ fontSize: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                  <label className="check-row">
+                    <input
+                      data-smoke-role="chrome-footer-visible"
+                      type="checkbox"
+                      checked={chromeConfig.footer.visible}
+                      onChange={(event) => updateChromeSlot("footer", { visible: event.target.checked })}
+                    />
+                    <span>푸터 표시</span>
+                  </label>
+                  <div className="layer-field-grid two">
+                    <label>
+                      <span>푸터 색</span>
+                      <input
+                        type="color"
+                        value={chromeConfig.footer.color}
+                        onChange={(event) => updateChromeSlot("footer", { color: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>푸터 Y</span>
+                      <input
+                        type="number"
+                        min={-40}
+                        max={40}
+                        value={chromeConfig.footer.offsetY}
+                        onChange={(event) => updateChromeSlot("footer", { offsetY: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                </div>
                 <label className="stack-field">
                   <span>카드 배경</span>
                   <select
@@ -2427,11 +2799,11 @@ export function App(): ReactElement {
                               type="number"
                               min={1}
                               max={40}
-                              value={selectedLayer.strokeWidth ?? 4}
+                              value={selectedLayer.thickness}
                               onChange={(event) =>
                                 updateSelectedLayer((layer) =>
                                   layer.kind === "line"
-                                    ? { ...layer, strokeWidth: clampIntegerControl(Number(event.target.value), 1, 40) }
+                                    ? { ...layer, thickness: clampIntegerControl(Number(event.target.value), 1, 40) }
                                     : layer
                                 )
                               }
@@ -2444,11 +2816,17 @@ export function App(): ReactElement {
                               type="number"
                               min={-180}
                               max={180}
-                              value={selectedLayer.rotation ?? 0}
+                              value={Math.round(
+                                getLineLayerAngle(selectedLayer, { width: cardRatio.width, height: cardRatio.height })
+                              )}
                               onChange={(event) =>
                                 updateSelectedLayer((layer) =>
                                   layer.kind === "line"
-                                    ? { ...layer, rotation: clampLayerRotation(Number(event.target.value)) }
+                                    ? rotateLineLayer(
+                                        layer,
+                                        clampLayerRotation(Number(event.target.value)),
+                                        { width: cardRatio.width, height: cardRatio.height }
+                                      )
                                     : layer
                                 )
                               }
@@ -2466,56 +2844,131 @@ export function App(): ReactElement {
                           삭제
                         </button>
                       </div>
-                      <div className="quad-grid">
-                        <label>
-                          <span>X</span>
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={layer.x}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) => ({ ...current, x: Number(event.target.value) }))
-                            }
-                          />
-                        </label>
-                        <label>
-                          <span>Y</span>
-                          <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={layer.y}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) => ({ ...current, y: Number(event.target.value) }))
-                            }
-                          />
-                        </label>
-                        <label>
-                          <span>W</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={100}
-                            value={layer.width}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) => ({ ...current, width: Number(event.target.value) }))
-                            }
-                          />
-                        </label>
-                        <label>
-                          <span>H</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={100}
-                            value={layer.height}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) => ({ ...current, height: Number(event.target.value) }))
-                            }
-                          />
-                        </label>
-                      </div>
+                      {layer.kind === "line" ? (
+                        <div className="quad-grid">
+                          <label>
+                            <span>X1</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.x1}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? normalizeLineLayer({ ...current, x1: Number(event.target.value) })
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>Y1</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.y1}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? normalizeLineLayer({ ...current, y1: Number(event.target.value) })
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>X2</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.x2}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? normalizeLineLayer({ ...current, x2: Number(event.target.value) })
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>Y2</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.y2}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? normalizeLineLayer({ ...current, y2: Number(event.target.value) })
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="quad-grid">
+                          <label>
+                            <span>X</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.x}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) => ({ ...current, x: Number(event.target.value) }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>Y</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={layer.y}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) => ({ ...current, y: Number(event.target.value) }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>W</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              value={layer.width}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) => ({
+                                  ...current,
+                                  width: Number(event.target.value)
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>H</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              value={layer.height}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) => ({
+                                  ...current,
+                                  height: Number(event.target.value)
+                                }))
+                              }
+                            />
+                          </label>
+                        </div>
+                      )}
                       {layer.kind === "text" ? (
                         <textarea
                           className="layer-text-input"
@@ -2579,11 +3032,11 @@ export function App(): ReactElement {
                               type="number"
                               min={1}
                               max={40}
-                              value={layer.strokeWidth ?? 4}
+                              value={layer.thickness}
                               onChange={(event) =>
                                 updateLayer(layer.id, (current) =>
                                   current.kind === "line"
-                                    ? { ...current, strokeWidth: clampIntegerControl(Number(event.target.value), 1, 40) }
+                                    ? { ...current, thickness: clampIntegerControl(Number(event.target.value), 1, 40) }
                                     : current
                                 )
                               }
@@ -2595,11 +3048,15 @@ export function App(): ReactElement {
                               type="number"
                               min={-180}
                               max={180}
-                              value={layer.rotation ?? 0}
+                              value={Math.round(getLineLayerAngle(layer, { width: cardRatio.width, height: cardRatio.height }))}
                               onChange={(event) =>
                                 updateLayer(layer.id, (current) =>
                                   current.kind === "line"
-                                    ? { ...current, rotation: clampLayerRotation(Number(event.target.value)) }
+                                    ? rotateLineLayer(
+                                        current,
+                                        clampLayerRotation(Number(event.target.value)),
+                                        { width: cardRatio.width, height: cardRatio.height }
+                                      )
                                     : current
                                 )
                               }

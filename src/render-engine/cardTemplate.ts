@@ -4,11 +4,16 @@ import type {
   Card,
   CardImageAdjust,
   CardLayer,
+  CardLineLayer,
   CardLayoutOverride,
   CardOverride,
   CardTypographyOverride,
+  ChromeConfig,
+  ChromeSlotStyle,
   Deck
 } from "../domain/types.js";
+import { defaultChromeConfig, normalizeChromeConfig, renderPageNumber } from "../domain/chromeConfig.js";
+import { getLineLayerRenderGeometry, normalizeLineLayer } from "../domain/lineLayer.js";
 import { resolveStylePreset, type StylePreset } from "./stylePresets.js";
 
 export type CardTemplateInput = {
@@ -32,6 +37,7 @@ type ResolvedTheme = {
   readonly layout: CardLayoutOverride;
   readonly layers: readonly CardLayer[];
   readonly typography: ResolvedTypography;
+  readonly chrome: ChromeConfig;
 };
 
 type ResolvedTypography = {
@@ -85,17 +91,11 @@ export function buildCardHtml(input: CardTemplateInput): string {
     <article class="card ${preset.id} ${input.card.type}${hasPhoto ? " has-photo" : ""}${preset.usesPhoto ? " photo-preset" : " solid-preset"}" style="--title-scale: ${textFit.titleScale.toFixed(3)}; --body-scale: ${textFit.bodyScale.toFixed(3)}; --gap-scale: ${textFit.gapScale.toFixed(3)}; --chrome-scale: ${textFit.chromeScale.toFixed(3)}; --gap-badge-scale: ${theme.layout.gapBadge.toFixed(3)}; --gap-subtitle-scale: ${theme.layout.gapSubtitle.toFixed(3)};">
       ${photoLayer}
       ${renderLayers(theme, input.assetCssUrls ?? {})}
-      <div class="chrome header">
-        <span class="chrome-label" data-slot="header" data-background-color="${chromeBackdrop(theme)}">${escapeHtml(input.deck.headerLabel)}</span>
-        <span class="page-no" data-slot="page" data-background-color="${chromeBackdrop(theme)}">${input.card.index} / ${totalCards}</span>
-      </div>
+      ${renderHeaderChrome(input.deck, input.card, totalCards, theme)}
       <section class="content">
         ${renderCardBody(input.card, theme, bodyNumber)}
       </section>
-      <div class="chrome footer">
-        <span data-slot="footer" data-background-color="${chromeBackdrop(theme)}">${escapeHtml(input.deck.footerAccount)}</span>
-        ${input.card.index < totalCards ? `<span class="next-hint">&gt;&gt;&gt;&gt;</span>` : `<span class="next-hint">■</span>`}
-      </div>
+      ${renderFooterChrome(input.deck, input.card, totalCards, theme)}
     </article>
     <script>
       window.__CARDNEWS_COLLECT_METRICS__ = function () {
@@ -151,8 +151,50 @@ function resolveTheme(
     adjust: normalizeAdjust(override?.adjust),
     layout: normalizeLayout(override?.layout),
     layers: normalizeLayers(override?.layers),
-    typography: normalizeTypography(override?.typography, Boolean(deck.fontId))
+    typography: normalizeTypography(override?.typography, Boolean(deck.fontId)),
+    chrome: deck.chrome ? normalizeChromeConfig(deck.chrome) : defaultChromeForPreset(preset)
   };
+}
+
+function defaultChromeForPreset(preset: StylePreset): ChromeConfig {
+  const chromeBackground = normalizeHexColor(preset.chromeBackdrop);
+  const readableInk = chromeBackground ? pickReadableInk(chromeBackground) : defaultChromeConfig.header.color;
+  return {
+    header: { ...defaultChromeConfig.header, color: readableInk },
+    footer: { ...defaultChromeConfig.footer, color: readableInk },
+    pageNumber: { ...defaultChromeConfig.pageNumber, color: readableInk }
+  };
+}
+
+function renderHeaderChrome(deck: Deck, card: Card, totalCards: number, theme: ResolvedTheme): string {
+  const parts = [
+    theme.chrome.header.visible
+      ? `<span class="chrome-label" data-slot="header" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.header, theme))}">${escapeHtml(deck.headerLabel)}</span>`
+      : "",
+    theme.chrome.pageNumber.visible
+      ? `<span class="page-no" data-slot="page" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.pageNumber, theme))}">${escapeHtml(renderPageNumber(theme.chrome.pageNumber.template, card.index, totalCards))}</span>`
+      : ""
+  ].join("");
+
+  return parts.length > 0 ? `<div class="chrome header">${parts}</div>` : "";
+}
+
+function renderFooterChrome(deck: Deck, card: Card, totalCards: number, theme: ResolvedTheme): string {
+  const footer = theme.chrome.footer.visible
+    ? `<span data-slot="footer" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.footer, theme))}">${escapeHtml(deck.footerAccount)}</span>`
+    : "";
+  const nextHint =
+    card.index < totalCards ? `<span class="next-hint">&gt;&gt;&gt;&gt;</span>` : `<span class="next-hint">■</span>`;
+  return footer.length > 0 || nextHint.length > 0
+    ? `<div class="chrome footer">${footer}${nextHint}</div>`
+    : "";
+}
+
+function buildChromeSlotStyle(slot: ChromeSlotStyle, theme: ResolvedTheme): string {
+  const family = slot.useDeckFont
+    ? ` font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody};`
+    : "";
+  return `color: ${slot.color}; font-size: ${Math.round(slot.fontSize)}px; font-weight: ${Math.round(slot.fontWeight)}; transform: translate(${Math.round(slot.offsetX)}px, ${Math.round(slot.offsetY)}px);${family}`;
 }
 
 function buildCss(theme: ResolvedTheme): string {
@@ -396,10 +438,9 @@ function renderLayer(
   theme: ResolvedTheme,
   assetCssUrls: Readonly<Record<string, string>>
 ): string {
-  const baseStyle = buildLayerBaseStyle(layer);
-
   switch (layer.kind) {
     case "text": {
+      const baseStyle = buildLayerBaseStyle(layer);
       const color = normalizeHexColor(layer.color) ?? theme.preset.ink;
       const background = normalizeHexColor(layer.backgroundColor) ?? "transparent";
       const fontSize = Math.round(clampRange(layer.fontSize ?? 40, 10, 144));
@@ -411,6 +452,7 @@ function renderLayer(
       return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${escapeHtml(style)}">${escapeHtml(layer.text)}</div>`;
     }
     case "shape": {
+      const baseStyle = buildLayerBaseStyle(layer);
       const fill = normalizeHexColor(layer.fill) ?? withAlpha(theme.accent, 0.28);
       const stroke = normalizeHexColor(layer.stroke);
       const borderRadius = layer.shape === "ellipse" ? "9999px" : `${Math.round(clampRange(layer.radius ?? 0, 0, 80))}px`;
@@ -418,14 +460,18 @@ function renderLayer(
       return `<div class="layer layer-shape" style="${baseStyle} background: ${fill}; border: ${border}; border-radius: ${borderRadius};"></div>`;
     }
     case "line": {
+      const geometry = getLineLayerRenderGeometry(layer, {
+        width: theme.cardWidth,
+        height: theme.cardHeight
+      });
       const color = normalizeHexColor(layer.color) ?? theme.accent;
-      const strokeWidth = Math.round(clampRange(layer.strokeWidth ?? 4, 1, 40));
-      const rotation = clampLayerRotation(layer.rotation ?? 0);
-      const rotationStyle =
-        rotation === 0 ? "" : ` transform: rotate(${rotation}deg); transform-origin: center;`;
-      return `<div class="layer layer-line" style="${baseStyle}${rotationStyle} background: ${color}; height: ${strokeWidth}px;"></div>`;
+      const zIndex = Math.round(clampRange(layer.zIndex ?? defaultLayerZIndex(layer), 0, 20));
+      const opacity = clamp01(layer.opacity ?? 1);
+      const style = `left: ${geometry.leftPx.toFixed(3)}px; top: ${geometry.topPx.toFixed(3)}px; width: ${geometry.widthPx.toFixed(3)}px; height: ${geometry.heightPx}px; z-index: ${zIndex}; opacity: ${opacity.toFixed(3)}; transform: rotate(${geometry.angleDeg}deg); transform-origin: 0 50%; background: ${color};`;
+      return `<div class="layer layer-line" style="${escapeHtml(style)}"></div>`;
     }
     case "image": {
+      const baseStyle = buildLayerBaseStyle(layer);
       const source = assetCssUrls[layer.backgroundId];
       if (!source) {
         return `<div class="layer layer-image" style="${baseStyle} background: ${withAlpha(theme.accent, 0.16)};"></div>`;
@@ -435,7 +481,7 @@ function renderLayer(
   }
 }
 
-function buildLayerBaseStyle(layer: CardLayer): string {
+function buildLayerBaseStyle(layer: Exclude<CardLayer, CardLineLayer>): string {
   const left = clampRange(layer.x, 0, 100);
   const top = clampRange(layer.y, 0, 100);
   const width = clampRange(layer.width, 1, 100);
@@ -616,6 +662,10 @@ function normalizeTypography(
 
 function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly CardLayer[] {
   return (layers ?? []).slice(0, 24).map((layer) => {
+    if (layer.kind === "line") {
+      return normalizeLineLayer(layer);
+    }
+
     const base = {
       id: layer.id.trim() || "layer",
       x: clampRange(layer.x, 0, 100),
@@ -648,14 +698,6 @@ function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly Car
           ...(layer.stroke ? { stroke: layer.stroke } : {}),
           ...(layer.strokeWidth !== undefined ? { strokeWidth: clampRange(layer.strokeWidth, 1, 24) } : {}),
           ...(layer.radius !== undefined ? { radius: clampRange(layer.radius, 0, 80) } : {})
-        };
-      case "line":
-        return {
-          ...base,
-          kind: "line",
-          color: layer.color,
-          ...(layer.strokeWidth !== undefined ? { strokeWidth: clampRange(layer.strokeWidth, 1, 40) } : {}),
-          ...(layer.rotation !== undefined ? { rotation: clampLayerRotation(layer.rotation) } : {})
         };
       case "image":
         return {
@@ -791,11 +833,6 @@ function clampRange(value: number, minimum: number, maximum: number): number {
   }
 
   return Math.min(maximum, Math.max(minimum, value));
-}
-
-function clampLayerRotation(value: number): number {
-  const rotation = Math.round(clampRange(value, -180, 180));
-  return Object.is(rotation, -0) ? 0 : rotation;
 }
 
 function withAlpha(hexColor: string, alpha: number): string {

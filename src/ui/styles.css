@@ -427,6 +427,50 @@ textarea:focus {
   opacity: 0;
 }
 
+.edit-line-layer {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.edit-line-hit {
+  cursor: move;
+  pointer-events: auto;
+  position: absolute;
+  touch-action: none;
+  user-select: none;
+}
+
+.edit-line-stroke {
+  background: rgba(53, 87, 232, 0.72);
+  border-radius: 999px;
+  display: block;
+  height: 2px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: calc(50% - 1px);
+}
+
+.edit-line-hit.selected .edit-line-stroke {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(53, 87, 232, 0.16);
+}
+
+.line-endpoint-handle {
+  background: white;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+  cursor: crosshair;
+  height: 12px;
+  pointer-events: auto;
+  position: absolute;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+  width: 12px;
+}
+
 .resize-handle {
   background: white;
   border: 1px solid var(--accent);
@@ -712,6 +756,14 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.chrome-controls {
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
 }
 
 .layer-controls {

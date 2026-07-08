@@ -337,6 +337,37 @@
 2. hard gate는 통과하지만 style matrix와 smoke에 advisory `font_variety` 경고가 남아 있다. 이 경고는 V5-1/V5-2부터 이어진 기존 스타일 경고이며 PNG 생성은 실패시키지 않는다.
 3. 레이어 편집 UI는 마우스/키보드 기본 조작을 구현했지만, 멀티 선택/정렬 분배/복제 같은 Canva 고급 기능은 아직 없다.
 
+## 6-10. V6 M1 선 끝점·크롬 편집 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-lite-pro-prd.md`
+
+**구현 완료**:
+- 선 레이어를 legacy rect+rotation 모델에서 endpoint 모델(`x1/y1/x2/y2/thickness`)로 전환했다. v5 workspace/preset/deck의 기존 선은 로드 경계에서 자동 마이그레이션된다.
+- 선 렌더는 `buildCardHtml()` 단일 경로에서 endpoint→px segment로 계산되며, 미리보기와 PNG가 같은 HTML을 사용한다.
+- 편집 오버레이는 선 선택 시 8방향 박스 핸들 대신 양 끝점 핸들과 선분 근접 hit-test를 사용한다. 몸통 드래그는 두 끝점을 함께 이동하고, 각도 입력은 중심 기준 endpoint 회전으로 반영된다.
+- 헤더/멘션/페이지번호 chrome 설정 모델을 추가했다. 페이지번호 템플릿(`{n}`, `{n2}`, `{total}`), 색, 크기, 굵기, 오프셋, 표시 여부가 저장/복원된다.
+- `deck.chrome`이 없을 때는 각 스타일 프리셋의 `chromeBackdrop` 대비에 맞춰 기본 chrome ink를 고른다. 사용자 chrome override는 스타일 매트릭스 smoke에서 제거해 프리셋 기본값을 독립 검증한다.
+- style matrix의 hard contrast 기준에 맞게 `warmstudio`, `orangecards` muted/source 색을 보정했다.
+
+**증거**:
+- 최종 표준 gate:
+  - `.omc/evidence/v6/m1/final-typecheck.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/m1/final-test.log` — `npm test` exit 0
+  - `.omc/evidence/v6/m1/final-build.log` — `npm run build` exit 0
+- 최종 smoke:
+  - `.omc/evidence/v6/m1/final-smoke-style-matrix.log` — style matrix exit 0
+  - `.omc/evidence/v6/m1/final-smoke-layer-controls.log` — `layer-controls-regression` exit 0
+  - `.omc/evidence/v6/m1/final-smoke-line-endpoint.log` — `line-endpoint-regression` exit 0
+  - `.omc/evidence/v6/m1/final-smoke-chrome-style.log` — `chrome-style-regression` exit 0
+- RED/GREEN 기록:
+  - `.omc/evidence/v6/m1/red-r2-vitest.log`
+  - `.omc/evidence/v6/m1/red-r1-chrome.log`
+  - `.omc/evidence/v6/m1/test-r1-targeted.log`
+  - `.omc/evidence/v6/m1/test-r1-render-default-fix.log`
+  - `.omc/evidence/v6/m1/test-style-contrast-fix.log`
+
+**다음 단계**: V6 M2를 PRD 순서대로 진행한다. 먼저 R4 콘텐츠 폼+명시적 줄바꿈을 TDD로 구현하고, 이어 R3 배지/배경제거, R5 넘김기호 커스텀 이미지까지 완료한 뒤 표준 gate와 milestone smoke를 통과시키고 커밋한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

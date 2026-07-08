@@ -218,6 +218,60 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).not.toContain('data-slot="footer"');
   });
 
+  it("escapes chrome templates and never renders image ids as raw markup", () => {
+    const maliciousImageId = 'badge"><img src=x onerror=alert(1)>';
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({
+        chrome: {
+          header: {
+            visible: true,
+            color: "#141414",
+            fontSize: 20,
+            fontWeight: 700,
+            offsetX: 0,
+            offsetY: 0,
+            useDeckFont: true
+          },
+          footer: {
+            visible: true,
+            color: "#141414",
+            fontSize: 20,
+            fontWeight: 700,
+            offsetX: 0,
+            offsetY: 0,
+            useDeckFont: true
+          },
+          pageNumber: {
+            visible: true,
+            color: "#141414",
+            fontSize: 20,
+            fontWeight: 700,
+            offsetX: 0,
+            offsetY: 0,
+            useDeckFont: true,
+            template: '<img src=x onerror=alert(1)> {n}'
+          }
+        },
+        nextHint: { height: 40, imageId: maliciousImageId, kind: "image" },
+        overrides: {
+          "2": {
+            badge: { imageHeight: 80, imageId: maliciousImageId, shape: "none" }
+          }
+        }
+      }),
+      override: {
+        badge: { imageHeight: 80, imageId: maliciousImageId, shape: "none" }
+      },
+      assetCssUrls: {}
+    });
+
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt; 2");
+    expect(html).not.toContain("<img src=x onerror=alert(1)>");
+    expect(html).not.toContain(maliciousImageId);
+  });
+
   it("applies the requested accent color", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,

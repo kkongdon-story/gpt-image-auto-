@@ -1,6 +1,6 @@
 {
   "name": "gpt-cardnews-auto",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Deterministic Korean cardnews editor and renderer for Cardnews Studio.",
   "author": "Kkongdon",
   "private": true,

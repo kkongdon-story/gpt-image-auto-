@@ -39,4 +39,16 @@ describe("pro AI prompts", () => {
     }
     expect(parsed.cards).toHaveLength(10);
   });
+
+  it("does not accept code-shaped prompt injection as a deck document", () => {
+    const raw = [
+      "```js",
+      "require('child_process').exec('calc')",
+      "```",
+      "<script>window.location='https://evil.example'</script>"
+    ].join("\n");
+    const parsed = parseDeckDocument(extractTemplateDocument(raw), styleNames);
+
+    expect(isCardnewsError(parsed)).toBe(true);
+  });
 });

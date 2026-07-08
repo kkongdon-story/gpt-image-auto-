@@ -488,6 +488,60 @@
 1. M4는 실제 로그인된 Claude/Codex/Gemini 응답까지 검증하지 않았다. UI-파서-렌더 경로는 `CARDNEWS_MOCK_AI=1`로 결정적으로 검증했다.
 2. 다음 단계는 V6 M5 보안 점검/버전 2.0.0/최종 설치 파일 생성이다. M5에서 `release/` 산출물을 최종 갱신하고, packaged Lite `app.asar`까지 `verify-edition.mjs`로 다시 검사해야 한다.
 
+## 6-14. V6 M5 보안 점검·2.0.0 릴리즈 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-lite-pro-prd.md`
+
+**구현 완료**:
+- `package.json`과 `package-lock.json` 버전을 `2.0.0`으로 올렸다.
+- 보안 회귀 테스트를 보강했다.
+  - pageNumber template은 `escapeHtml()` 경유로 raw HTML이 렌더되지 않는다.
+  - malicious image id 문자열은 HTML에 raw markup으로 노출되지 않는다.
+  - 코드/스크립트 형태 AI 응답은 `parseDeckDocument()`에서 deck 문서로 승인되지 않는다.
+- §9 보안 체크리스트별 증거를 `.omc/evidence/v6/security/` 아래에 남겼다.
+- OneDrive `release/` 직접 빌드 rename 문제를 피하기 위해 PRD §0.3 방식대로 `%LOCALAPPDATA%`에 Pro/Lite NSIS를 만든 뒤, 최종 산출물을 프로젝트 `release/`로 복사했다.
+
+**최종 산출물 위치**:
+- Pro 설치파일: `C:\Users\js480\OneDrive\바탕 화면\1_Projects\gpt-cardnews-auto\release\Cardnews-Studio-Pro-Setup-2.0.0.exe`
+- Lite 설치파일: `C:\Users\js480\OneDrive\바탕 화면\1_Projects\gpt-cardnews-auto\release\Cardnews-Studio-Lite-Setup-2.0.0.exe`
+- Pro 무설치: `C:\Users\js480\OneDrive\바탕 화면\1_Projects\gpt-cardnews-auto\release\win-unpacked-pro-2.0.0\Cardnews Studio Pro.exe`
+- Lite 무설치: `C:\Users\js480\OneDrive\바탕 화면\1_Projects\gpt-cardnews-auto\release\win-unpacked-lite-2.0.0\Cardnews Studio Lite.exe`
+
+**증거**:
+- 보안 체크리스트 요약: `.omc/evidence/v6/security/checklist.md`
+- 표준 gate:
+  - `.omc/evidence/v6/security/final-typecheck.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/security/final-test.log` — `npm test` exit 0
+  - `.omc/evidence/v6/security/final-build-pro.log` — `npm run build` exit 0
+  - `.omc/evidence/v6/security/final-build-lite.log` — `npm run build:lite` exit 0
+- 보안/감사:
+  - `.omc/evidence/v6/security/security-targeted-tests.log` — 보강 테스트 exit 0
+  - `.omc/evidence/v6/security/ipc-audit.log`
+  - `.omc/evidence/v6/security/style-safety-audit.log`
+  - `.omc/evidence/v6/security/path-safety-audit.log`
+  - `.omc/evidence/v6/security/open-external-audit.log`
+  - `.omc/evidence/v6/security/ai-security-audit.log`
+  - `.omc/evidence/v6/security/electron-security-audit.log`
+  - `.omc/evidence/v6/security/npm-audit-high.log` — high 이상 audit exit 0
+- 패키징:
+  - `.omc/evidence/v6/security/dist-win-pro-local.log` — Pro NSIS exit 0
+  - `.omc/evidence/v6/security/dist-win-lite-local.log` — Lite NSIS exit 0
+  - `.omc/evidence/v6/security/final-release-artifacts.txt` — `release/` 산출물 크기 기록
+- Lite 스트리핑:
+  - `.omc/evidence/v6/security/verify-edition-lite-package.log` — `%LOCALAPPDATA%` Lite package scan exit 0
+  - `.omc/evidence/v6/security/manual-asar-grep-lite.log` — Lite `app.asar` 금지 문자열 수동 스캔 hits 없음
+  - `.omc/evidence/v6/security/verify-edition-release-lite.log` — `release/` Lite package scan exit 0
+- 실제 exe smoke:
+  - `.omc/evidence/v6/security/smoke-pro-exe-ai-draft.log` — local Pro unpacked AI draft smoke exit 0
+  - `.omc/evidence/v6/security/smoke-lite-exe-edition.log` — local Lite unpacked edition smoke exit 0
+  - `.omc/evidence/v6/security/smoke-release-pro-exe-ai-draft.log` — copied `release/` Pro exe smoke exit 0
+  - `.omc/evidence/v6/security/smoke-release-lite-exe-edition.log` — copied `release/` Lite exe smoke exit 0
+
+**주의 / 잔여 리스크**:
+1. 실제 로그인된 Claude/Codex/Gemini CLI 호출은 환경 의존이라 최종 gate에서는 mock AI로 검증했다. provider 감지/실행 코드는 allowlist와 stdin 전달로 고정되어 있다.
+2. 기존 v1 산출물은 사용자가 비교할 수 있도록 삭제하지 않았다. 최종 실행 대상은 위의 `2.0.0` Pro/Lite 산출물이다.
+3. Lite/Pro 매트릭스는 PRD §1 확정안 그대로 유지했다. 애매한 신규 AI 기능은 Pro 전용으로 두었다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

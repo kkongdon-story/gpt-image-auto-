@@ -2525,6 +2525,8 @@ function escapeCsvValue(value: string): string {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle("cardnews:getEdition", () => ({ edition: "pro", productName: "Cardnews Studio Pro" }));
+  ipcMain.handle("cardnews:requestLockedFeature", () => undefined);
   ipcMain.handle("cardnews:chooseStyleReferenceImages", async () => {
     const filePaths = await chooseImageFiles(true);
     if (!filePaths || filePaths.length === 0) {

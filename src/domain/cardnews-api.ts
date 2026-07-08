@@ -23,7 +23,16 @@ import type {
   WorkspaceState
 } from "./types.js";
 
-export type CardnewsApi = {
+export type CardnewsEdition = "lite" | "pro";
+
+export type EditionInfo = {
+  readonly edition: CardnewsEdition;
+  readonly productName: string;
+};
+
+export type LiteCardnewsApi = {
+  readonly getEdition: () => Promise<CardnewsResult<EditionInfo>>;
+  readonly requestLockedFeature: (featureCode: string) => Promise<CardnewsResult<void>>;
   readonly chooseStyleReferenceImages: () => Promise<CardnewsResult<readonly LocalImageRef[]>>;
   readonly loadDeck: () => Promise<CardnewsResult<Deck>>;
   readonly saveDeck: (input: DeckDraft) => Promise<CardnewsResult<Deck>>;
@@ -37,17 +46,10 @@ export type CardnewsApi = {
   readonly listFontLibrary: () => Promise<CardnewsResult<readonly FontLibraryItem[]>>;
   readonly importFontToLibrary: () => Promise<CardnewsResult<FontLibraryItem>>;
   readonly importDeckDocument: () => Promise<CardnewsResult<ImportedDocument>>;
-  readonly importBulkCsvFile: () => Promise<CardnewsResult<ImportedDocument>>;
-  readonly exportBulkCsvTemplate: (content: string) => Promise<CardnewsResult<string>>;
-  readonly renderBulkCsv: (csvText: string) => Promise<CardnewsResult<BulkRenderResult>>;
   readonly importCustomStyleFile: () => Promise<CardnewsResult<ImportedDocument>>;
   readonly exportTemplateFile: (content: string) => Promise<CardnewsResult<string>>;
   readonly listBackgroundLibrary: () => Promise<CardnewsResult<readonly BackgroundLibraryItem[]>>;
   readonly addBackgroundToLibrary: () => Promise<CardnewsResult<BackgroundLibraryItem>>;
-  readonly listImageLibrary: () => Promise<CardnewsResult<readonly ImageLibraryItem[]>>;
-  readonly addImageToLibrary: () => Promise<CardnewsResult<ImageLibraryItem>>;
-  readonly getImagePreview: (imageId: string) => Promise<CardnewsResult<string>>;
-  readonly removeImageBackground: (imageId: string, tolerance: number) => Promise<CardnewsResult<ImageLibraryItem>>;
   readonly searchStockImages: (query: string, page: number) => Promise<CardnewsResult<StockImageSearchResult>>;
   readonly downloadStockImage: (input: StockImageDownloadInput) => Promise<CardnewsResult<BackgroundLibraryItem>>;
   readonly loadSettings: () => Promise<CardnewsResult<AppSettings>>;
@@ -62,7 +64,19 @@ export type CardnewsApi = {
   readonly loadWorkspace: () => Promise<CardnewsResult<WorkspaceState | null>>;
   readonly exportCardPng: (jobId: string, fileName: string) => Promise<CardnewsResult<string>>;
   readonly exportDeckZip: (jobId: string) => Promise<CardnewsResult<string>>;
-  readonly exportProject: () => Promise<CardnewsResult<ProjectArchiveResult>>;
-  readonly importProject: () => Promise<CardnewsResult<ProjectImportResult>>;
   readonly openExternalLink: (url: string) => Promise<CardnewsResult<void>>;
 };
+
+export type ProCardnewsApi = LiteCardnewsApi & {
+  readonly importBulkCsvFile: () => Promise<CardnewsResult<ImportedDocument>>;
+  readonly exportBulkCsvTemplate: (content: string) => Promise<CardnewsResult<string>>;
+  readonly renderBulkCsv: (csvText: string) => Promise<CardnewsResult<BulkRenderResult>>;
+  readonly listImageLibrary: () => Promise<CardnewsResult<readonly ImageLibraryItem[]>>;
+  readonly addImageToLibrary: () => Promise<CardnewsResult<ImageLibraryItem>>;
+  readonly getImagePreview: (imageId: string) => Promise<CardnewsResult<string>>;
+  readonly removeImageBackground: (imageId: string, tolerance: number) => Promise<CardnewsResult<ImageLibraryItem>>;
+  readonly exportProject: () => Promise<CardnewsResult<ProjectArchiveResult>>;
+  readonly importProject: () => Promise<CardnewsResult<ProjectImportResult>>;
+};
+
+export type CardnewsApi = ProCardnewsApi;

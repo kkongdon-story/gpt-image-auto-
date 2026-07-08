@@ -9,9 +9,15 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
-    "package:dir": "npm run build && electron-builder --dir",
-    "dist:win": "npm run build && electron-builder --win nsis",
+    "build": "npm run build:pro",
+    "build:pro": "node scripts/build-edition.mjs pro",
+    "build:lite": "node scripts/build-edition.mjs lite",
+    "package:dir": "npm run package:dir:pro",
+    "package:dir:pro": "npm run build:pro && electron-builder --dir -c electron-builder.pro.json",
+    "package:dir:lite": "npm run build:lite && electron-builder --dir -c electron-builder.lite.json",
+    "dist:win": "npm run dist:win:pro",
+    "dist:win:pro": "npm run build:pro && electron-builder --win nsis -c electron-builder.pro.json",
+    "dist:win:lite": "npm run build:lite && electron-builder --win nsis -c electron-builder.lite.json && node scripts/verify-edition.mjs --edition lite --scan release/win-unpacked/resources/app.asar release/win-unpacked",
     "test": "vitest --run",
     "typecheck": "tsc -b --pretty false"
   },

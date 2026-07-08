@@ -1,0 +1,28 @@
+{
+  "appId": "story.kkongdon.cardnews.lite",
+  "productName": "Cardnews Studio Lite",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**",
+    "dist-electron/electron/**",
+    "package.json",
+    "usage.html",
+    "THIRD_PARTY_NOTICES.md",
+    "fonts/**"
+  ],
+  "win": {
+    "target": [
+      "nsis"
+    ],
+    "icon": "build/icon.ico"
+  },
+  "nsis": {
+    "allowToChangeInstallationDirectory": true,
+    "artifactName": "Cardnews-Studio-Lite-Setup-${version}.${ext}",
+    "createDesktopShortcut": true,
+    "oneClick": false,
+    "perMachine": false
+  }
+}

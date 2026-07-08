@@ -402,6 +402,54 @@
 
 **다음 단계**: V6 M3 R6 에디션 시스템을 시작한다. PRD §7의 Lite/Pro 매트릭스는 사용자 확정이므로 변경하지 말고, 빌드 타임 스트리핑 구조를 도입한 뒤 `scripts/verify-edition.mjs`와 `edition-lite-regression` smoke가 통과해야 M3 완료로 본다.
 
+## 6-12. V6 M3 Lite/Pro 에디션 시스템 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-lite-pro-prd.md`
+
+**구현 완료**:
+- Renderer 진입점을 `@edition` alias로 분기했다. Pro 빌드는 기존 `src/ui/App.tsx`를, Lite 빌드는 새 `src/ui/LiteApp.tsx`를 가져온다.
+- `src/domain/cardnews-api.ts`를 `LiteCardnewsApi`와 `ProCardnewsApi`로 분리했다. Lite preload는 Pro 메서드명을 노출하지 않고 공통 제작 기능과 잠금 요청만 제공한다.
+- Lite 전용 Electron main(`electron/lite-main.ts`)을 추가했다. CSV 벌크, 프로젝트 파일, 이미지 배경 제거, Pro UI/AI 코드를 import하지 않으며 저장/렌더 경계에서 `stripPro*` 필터로 Pro 필드를 제거한다.
+- `scripts/build-edition.mjs`를 추가했다. `build:pro`는 기존 전체 Electron 출력을 유지하고, `build:lite`는 renderer를 Lite alias로 빌드한 뒤 `dist-electron/electron/main.js`와 `preload.cjs`만 남기는 Lite bundle로 재구성한다.
+- electron-builder 설정을 `electron-builder.pro.json`, `electron-builder.lite.json`으로 분리했다. appId/productName/artifactName이 Pro/Lite에서 분리되어 한 PC에 공존 가능한 설치 대상이 된다.
+- `scripts/verify-edition.mjs`를 추가했다. Lite `dist`, `dist-electron`, packaged `app.asar`, `win-unpacked`를 스캔해 `renderBulkCsv`, `removeImageBackground`, `exportProject`, `aiChat`, `ProPanels` 등 Pro 전용 심볼이 남으면 실패한다.
+- Lite UI에는 `data-smoke-role="edition-lock"` 잠금 패널과 Threads/Kakao 문의 링크를 유지했다. 잠금 요청은 `not_implemented`로 응답한다.
+
+**증거**:
+- RED 기록:
+  - `.omc/evidence/v6/m3/red-r6-verify-edition.log` — 검증 스크립트 추가 전 실패
+  - `.omc/evidence/v6/m3/red-r6-edition-smoke.log` — `edition-lite-regression` 추가 전 실패
+- 최종 표준 gate:
+  - `.omc/evidence/v6/m3/final-typecheck.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/m3/final-test.log` — `npm test` exit 0, 13 files / 84 tests pass
+  - `.omc/evidence/v6/m3/final-build.log` — `npm run build` exit 0
+- Pro regression smoke:
+  - `.omc/evidence/v6/m3/smoke-style-matrix-pro.log` — style matrix exit 0
+  - `.omc/evidence/v6/m3/smoke-layer-controls-regression-pro.log` — exit 0
+  - `.omc/evidence/v6/m3/smoke-line-endpoint-regression-pro.log` — exit 0
+  - `.omc/evidence/v6/m3/smoke-chrome-style-regression-pro.log` — exit 0
+  - `.omc/evidence/v6/m3/smoke-content-form-regression-pro.log` — exit 0
+  - `.omc/evidence/v6/m3/smoke-badge-background-removal-regression-pro.log` — exit 0
+  - `.omc/evidence/v6/m3/smoke-next-hint-image-regression-pro.log` — exit 0
+- Lite/Pro 패키징:
+  - Pro release direct build는 OneDrive `EPERM rename win-unpacked.tmp -> win-unpacked`로 실패했다. 증거: `.omc/evidence/v6/m3/dist-win-pro-first.log`
+  - PRD §0.3 우회로 `LOCALAPPDATA` 출력 사용:
+    - Pro: `C:\Users\js480\AppData\Local\cardnews-release-pro\Cardnews-Studio-Pro-Setup-1.0.0.exe`
+    - Pro unpacked: `C:\Users\js480\AppData\Local\cardnews-release-pro\win-unpacked\Cardnews Studio Pro.exe`
+    - Lite: `C:\Users\js480\AppData\Local\cardnews-release-lite\Cardnews-Studio-Lite-Setup-1.0.0.exe`
+    - Lite unpacked: `C:\Users\js480\AppData\Local\cardnews-release-lite\win-unpacked\Cardnews Studio Lite.exe`
+  - `.omc/evidence/v6/m3/dist-win-pro-local.log` — Pro NSIS build exit 0
+  - `.omc/evidence/v6/m3/dist-win-lite-local.log` — Lite NSIS build exit 0
+  - `.omc/evidence/v6/m3/verify-edition-dist-first.log` — Lite dist/dist-electron stripping 검증 exit 0
+  - `.omc/evidence/v6/m3/verify-edition-lite-package.log` — Lite packaged `app.asar`/`win-unpacked` stripping 검증 exit 0
+  - `.omc/evidence/v6/m3/smoke-pro-exe.log` — 실제 Pro unpacked EXE `chrome-style-regression` exit 0
+  - `.omc/evidence/v6/m3/smoke-lite-exe.log` — 실제 Lite unpacked EXE `edition-lite-regression` exit 0
+
+**주의 / 다음 단계**:
+1. M3 완료 시점의 루트 `release/`에는 OneDrive EPERM 실패 전 v1 산출물과 `win-unpacked.tmp`가 남아 있을 수 있다. 최종 M5에서 PRD §0.3 방식으로 `LOCALAPPDATA`에 빌드한 뒤 필요한 설치 파일/무설치 폴더를 `release/`로 복사해 최종 산출물을 갱신해야 한다.
+2. M3의 Lite 스트리핑은 packaged `app.asar` 기준으로 Pro 실행 심볼 부재를 자동 검증했다. 후속 M4 AI는 반드시 `ProCardnewsApi`/Pro main 쪽에만 추가하고, Lite verify forbidden list에 `ai:*`/AI handler 심볼을 유지해야 한다.
+3. 다음 구현은 V6 M4 R7 프로그램 내 AI(Pro 전용)이다. CLI 실행은 stdin 전달/allowlist provider/AI 출력 parse-only 원칙을 지켜야 한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

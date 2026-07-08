@@ -14,6 +14,8 @@ import type {
 const { contextBridge, ipcRenderer } = electron;
 
 const api: CardnewsApi = {
+  getEdition: () => ipcRenderer.invoke("cardnews:getEdition"),
+  requestLockedFeature: (featureCode: string) => ipcRenderer.invoke("cardnews:requestLockedFeature", featureCode),
   chooseStyleReferenceImages: () => ipcRenderer.invoke("cardnews:chooseStyleReferenceImages"),
   loadDeck: () => ipcRenderer.invoke("cardnews:loadDeck"),
   saveDeck: (input: DeckDraft) => ipcRenderer.invoke("cardnews:saveDeck", input),

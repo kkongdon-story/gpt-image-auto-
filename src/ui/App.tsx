@@ -121,6 +121,27 @@ function buildImagePrompt(seed: string): string {
 
 type InspectorTab = "design" | "content" | "export";
 type CardEditorTab = "content" | "design";
+type AiPresetKind = "topic" | "research" | "draft" | "image";
+type AiThreadRole = "user" | "assistant";
+
+type AiDetectedDraft = {
+  readonly templateText: string;
+  readonly cardCount: number;
+};
+
+type AiThreadEntry = {
+  readonly id: string;
+  readonly role: AiThreadRole;
+  readonly content: string;
+  readonly detectedDraft?: AiDetectedDraft;
+  readonly retryPrompt?: string;
+  readonly status?: "loading" | "error";
+};
+
+type ImagePickerTarget =
+  | { readonly kind: "badge" }
+  | { readonly kind: "nextHint" }
+  | { readonly kind: "layer"; readonly layerId: string };
 
 type ParsedCardEntry = {
   readonly card: Card;
@@ -175,6 +196,16 @@ const cardTypeOptions: readonly { readonly value: CardType; readonly label: stri
   { value: "body", label: "본문" },
   { value: "cta", label: "마무리" }
 ];
+
+function createUiId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseHexColorInput(value: string): string | undefined {
+  const trimmed = value.trim();
+  const candidate = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+  return /^#[0-9a-fA-F]{6}$/.test(candidate) ? candidate.toLowerCase() : undefined;
+}
 
 function layerRect(layer: CardLayer): LayerRect {
   if (layer.kind === "line") {
@@ -934,10 +965,14 @@ export function App(): ReactElement {
   const [aiProviders, setAiProviders] = useState<readonly AiProviderStatus[]>([]);
   const [aiProviderId, setAiProviderId] = useState<AiProviderId>("claude");
   const [aiInput, setAiInput] = useState("Codex로 카드뉴스 제작 시간을 줄이는 방법");
-  const [aiTranscript, setAiTranscript] = useState<readonly AiChatMessage[]>([]);
-  const [aiDraftText, setAiDraftText] = useState("");
+  const [aiThread, setAiThread] = useState<readonly AiThreadEntry[]>([]);
+  const [, setAiDraftText] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
   const [aiStatus, setAiStatus] = useState("CLI 상태를 확인하세요.");
+  const [imagePickerTarget, setImagePickerTarget] = useState<ImagePickerTarget | null>(null);
+  const [imagePickerSelectedId, setImagePickerSelectedId] = useState<string | null>(null);
+  const [imagePickerBusy, setImagePickerBusy] = useState(false);
   const [stockSearchOpen, setStockSearchOpen] = useState(false);
   const [stockQuery, setStockQuery] = useState("money background");
   const [stockImages, setStockImages] = useState<readonly StockImage[]>([]);
@@ -961,6 +996,7 @@ export function App(): ReactElement {
   const [approvedJobId, setApprovedJobId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const workspaceReady = useRef(false);
+  const aiInputRef = useRef<HTMLTextAreaElement | null>(null);
   const fontBlobUrlRef = useRef<string | null>(null);
 
   const preset = resolveStylePreset(styleId, customStyles);
@@ -977,6 +1013,14 @@ export function App(): ReactElement {
   const styleNameEntries = useMemo(
     () => allStyleEntries.map((style) => ({ id: style.id, name: style.name })),
     [allStyleEntries]
+  );
+  const selectedAiProvider = useMemo(
+    () => aiProviders.find((provider) => provider.id === aiProviderId),
+    [aiProviderId, aiProviders]
+  );
+  const imagePickerSelectedItem = useMemo(
+    () => imageLibrary.find((item) => item.id === imagePickerSelectedId),
+    [imageLibrary, imagePickerSelectedId]
   );
 
   const debouncedCards = useDebouncedValue(cards, 250);
@@ -1308,6 +1352,21 @@ export function App(): ReactElement {
     setImagePreviews((current) => ({ ...current, [imageId]: preview }));
   }
 
+  async function refreshImageLibraryWithPreviews(preferredId?: string | null): Promise<void> {
+    const library = await listEditionImages();
+    if (isCardnewsError(library)) {
+      setStatus(library.message);
+      return;
+    }
+
+    setImageLibrary(library);
+    for (const item of library) {
+      if (!imagePreviews[item.id] || item.id === preferredId) {
+        void loadImagePreview(item.id);
+      }
+    }
+  }
+
   async function applyBackgroundSelection(nextBackgroundId: string | null): Promise<void> {
     setBackgroundId(nextBackgroundId);
     if (nextBackgroundId === null) {
@@ -1392,57 +1451,69 @@ export function App(): ReactElement {
     setStatus(`배경 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
   }
 
-  async function addImage(): Promise<void> {
+  async function addImageThroughPicker(): Promise<void> {
     const added = await addEditionImage();
     if (isCardnewsError(added)) {
       setStatus(added.message);
       return;
     }
 
-    const library = await listEditionImages();
-    if (!isCardnewsError(library)) {
-      setImageLibrary(library);
-    }
+    await refreshImageLibraryWithPreviews(added.id);
     await loadImagePreview(added.id);
-    updateSelectedBadge({ imageId: added.id });
-    setStatus(`이미지 추가: ${added.displayName} · 현재 카드 배지로 적용했습니다.`);
+    setImagePickerSelectedId(added.id);
+    setStatus(`이미지 추가: ${added.displayName}`);
   }
 
-  async function addNextHintImage(): Promise<void> {
-    const added = await addEditionImage();
-    if (isCardnewsError(added)) {
-      setStatus(added.message);
+  function openImagePicker(target: ImagePickerTarget, currentImageId?: string | null): void {
+    setImagePickerTarget(target);
+    setImagePickerSelectedId(currentImageId ?? null);
+    void refreshImageLibraryWithPreviews(currentImageId ?? null);
+  }
+
+  function closeImagePicker(): void {
+    setImagePickerTarget(null);
+    setImagePickerSelectedId(null);
+    setImagePickerBusy(false);
+  }
+
+  function applyImagePickerSelection(imageId: string | null): void {
+    const target = imagePickerTarget;
+    if (!target) {
       return;
     }
 
-    const library = await listEditionImages();
-    if (!isCardnewsError(library)) {
-      setImageLibrary(library);
+    if (target.kind === "badge") {
+      setSelectedBadgeImage(imageId);
+    } else if (target.kind === "nextHint") {
+      setNextHintImage(imageId);
+    } else {
+      updateLayer(target.layerId, (layer) =>
+        layer.kind === "image" ? { ...layer, backgroundId: imageId ?? "" } : layer
+      );
     }
-    await loadImagePreview(added.id);
-    setNextHintConfig(normalizeNextHintForUi({ kind: "image", imageId: added.id, height: nextHintConfig.height ?? 40 }));
-    setStatus(`이미지 추가: ${added.displayName} · 넘김 기호로 적용했습니다.`);
+
+    setStatus(imageId ? "이미지를 적용했습니다." : "이미지 선택을 해제했습니다.");
+    closeImagePicker();
   }
 
-  async function removeSelectedBadgeBackground(): Promise<void> {
-    const imageId = selectedOverride?.badge?.imageId;
+  async function removeSelectedPickerBackground(): Promise<void> {
+    const imageId = imagePickerSelectedId;
     if (!imageId) {
-      setStatus("배경을 제거할 배지 이미지를 먼저 선택하세요.");
+      setStatus("배경을 제거할 이미지를 먼저 선택하세요.");
       return;
     }
 
+    setImagePickerBusy(true);
     const processed = await removeEditionImageBackdrop(imageId, backgroundRemovalTolerance);
+    setImagePickerBusy(false);
     if (isCardnewsError(processed)) {
       setStatus(processed.message);
       return;
     }
 
-    const library = await listEditionImages();
-    if (!isCardnewsError(library)) {
-      setImageLibrary(library);
-    }
+    await refreshImageLibraryWithPreviews(processed.id);
     await loadImagePreview(processed.id);
-    updateSelectedBadge({ imageId: processed.id });
+    setImagePickerSelectedId(processed.id);
     setStatus(`배경 제거 완료: ${processed.displayName}`);
   }
 
@@ -1553,6 +1624,19 @@ export function App(): ReactElement {
       }
 
       return { ...currentOverride, badge: { ...currentBadge, imageId } };
+    });
+  }
+
+  function setSelectedBadgeTextColor(textColor: string | null): void {
+    updateSelectedOverrideWith((currentOverride) => {
+      const currentBadge = currentOverride.badge ?? {};
+      if (textColor === null) {
+        const { textColor: _removed, ...restBadge } = currentBadge;
+        return { ...currentOverride, badge: restBadge };
+      }
+
+      const normalized = parseHexColorInput(textColor);
+      return normalized ? { ...currentOverride, badge: { ...currentBadge, textColor: normalized } } : currentOverride;
     });
   }
 
@@ -1758,7 +1842,7 @@ export function App(): ReactElement {
           width: 32,
           height: 24,
           zIndex: 1,
-          backgroundId: imageLibrary[0]?.id ?? backgroundLibrary[0]?.id ?? backgroundId ?? "",
+          backgroundId: imageLibrary[0]?.id ?? "",
           objectFit: "cover"
         };
     }
@@ -1806,7 +1890,12 @@ export function App(): ReactElement {
   }
 
   function isEmptyBadgeOverride(badge: CardBadgeOverride): boolean {
-    return badge.shape === undefined && !badge.imageId && badge.imageHeight === undefined;
+    return (
+      badge.shape === undefined &&
+      !badge.imageId &&
+      badge.imageHeight === undefined &&
+      badge.textColor === undefined
+    );
   }
 
   async function exportDesignContract(): Promise<void> {
@@ -1922,58 +2011,137 @@ export function App(): ReactElement {
     setAiStatus(`기본 AI provider: ${nextProviderId}`);
   }
 
-  async function runAiPreset(kind: "topic" | "research" | "draft"): Promise<void> {
-    const prompt =
-      kind === "topic"
-        ? buildTopicPrompt(aiInput)
-        : kind === "research"
-          ? buildResearchPrompt(aiInput)
-          : buildDraftPrompt(aiInput, styleNameEntries);
-    await runAiPrompt(prompt, kind);
-  }
-
-  async function runAiFreeChat(): Promise<void> {
-    const prompt = aiInput.trim();
-    if (!prompt) {
-      setAiStatus("AI에 보낼 내용을 입력하세요.");
-      return;
+  function buildAiPresetPrompt(kind: AiPresetKind): string {
+    switch (kind) {
+      case "topic":
+        return buildTopicPrompt(aiInput);
+      case "research":
+        return buildResearchPrompt(aiInput);
+      case "draft":
+        return buildDraftPrompt(aiInput, styleNameEntries);
+      case "image":
+        return buildImagePrompt(aiInput);
     }
-    await runAiPrompt(prompt, "chat");
   }
 
-  async function runAiPrompt(
-    prompt: string,
-    mode: "topic" | "research" | "draft" | "chat"
-  ): Promise<void> {
+  function fillAiPreset(kind: AiPresetKind): void {
+    setAiInput(buildAiPresetPrompt(kind));
+    window.setTimeout(() => aiInputRef.current?.focus(), 0);
+  }
+
+  function resetAiThread(): void {
+    setAiThread([]);
+    setAiDraftText("");
+    setAiStatus("새 AI 대화를 시작했습니다.");
+    window.setTimeout(() => aiInputRef.current?.focus(), 0);
+  }
+
+  async function sendAiMessage(promptOverride?: string): Promise<void> {
     if (aiBusy) {
       return;
     }
 
-    const nextMessages: readonly AiChatMessage[] = [{ role: "user", content: prompt }];
+    const prompt = (promptOverride ?? aiInput).trim();
+    if (!prompt) {
+      setAiStatus("AI에 보낼 내용을 입력하세요.");
+      return;
+    }
+
+    const userMessage: AiThreadEntry = {
+      id: createUiId("ai-user"),
+      role: "user",
+      content: prompt
+    };
+    const assistantMessageId = createUiId("ai-assistant");
+    const loadingMessage: AiThreadEntry = {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "응답을 기다리는 중...",
+      status: "loading"
+    };
+    const priorMessages: readonly AiChatMessage[] = aiThread
+      .filter((message) => message.status === undefined)
+      .map((message): AiChatMessage => ({ role: message.role, content: message.content }));
+    const userChatMessage: AiChatMessage = { role: "user", content: prompt };
+    const nextMessages: readonly AiChatMessage[] = [...priorMessages, userChatMessage].slice(-12);
+
     try {
       setAiBusy(true);
       setAiStatus("AI 응답 대기 중...");
+      setAiThread((current) => [...current, userMessage, loadingMessage]);
       const result = await runEditionAi(aiProviderId, nextMessages);
       if (isCardnewsError(result)) {
-        setAiStatus(result.message);
+        updateAiAssistantMessage(assistantMessageId, {
+          content: result.message,
+          retryPrompt: prompt,
+          status: "error"
+        });
         setStatus(`AI 오류: ${result.message}`);
         return;
       }
 
-      const assistantMessage: AiChatMessage = { role: "assistant", content: result.content };
-      setAiTranscript((current) => [...current.slice(-5), { role: "user", content: prompt }, assistantMessage]);
-      if (mode === "draft") {
-        applyAiDraft(result.content);
-      } else {
-        setAiStatus(`${result.providerId} 응답 완료`);
+      const detectedDraft = detectAiDraft(result.content);
+      updateAiAssistantMessage(assistantMessageId, {
+        content: result.content,
+        ...(detectedDraft ? { detectedDraft } : {})
+      });
+      if (detectedDraft) {
+        setAiDraftText(detectedDraft.templateText);
       }
+      setAiStatus(`${result.providerId} 응답 완료`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "알 수 없는 AI 오류";
+      updateAiAssistantMessage(assistantMessageId, {
+        content: message,
+        retryPrompt: prompt,
+        status: "error"
+      });
       setAiStatus(`AI 오류: ${message}`);
       setStatus(`AI 오류: ${message}`);
     } finally {
       setAiBusy(false);
     }
+  }
+
+  function updateAiAssistantMessage(
+    messageId: string,
+    patch: Pick<AiThreadEntry, "content"> &
+      Partial<Pick<AiThreadEntry, "detectedDraft" | "retryPrompt" | "status">>
+  ): void {
+    setAiThread((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? {
+              id: message.id,
+              role: message.role,
+              content: patch.content,
+              ...(patch.detectedDraft ? { detectedDraft: patch.detectedDraft } : {}),
+              ...(patch.retryPrompt ? { retryPrompt: patch.retryPrompt } : {}),
+              ...(patch.status ? { status: patch.status } : {})
+            }
+          : message
+      )
+    );
+    if (patch.status === "error") {
+      setAiStatus(`AI 오류: ${patch.content}`);
+    }
+  }
+
+  function detectAiDraft(rawText: string): AiDetectedDraft | undefined {
+    const templateText = extractTemplateDocument(rawText);
+    if (!templateText.includes("유형:") || !templateText.includes("제목:")) {
+      return undefined;
+    }
+
+    const parsed = parseDeckDocument(templateText, styleNameEntries);
+    if (isCardnewsError(parsed)) {
+      return undefined;
+    }
+
+    return {
+      templateText,
+      cardCount: parsed.cards.length
+    };
   }
 
   function applyAiDraft(rawText: string): void {
@@ -1993,16 +2161,31 @@ export function App(): ReactElement {
   }
 
   function applyMockAiDraft(): void {
-    applyAiDraft(buildMockDraftDocument());
+    const templateText = buildMockDraftDocument();
+    setAiThread((current) => [
+      ...current,
+      {
+        id: createUiId("ai-assistant"),
+        role: "assistant",
+        content: templateText,
+        detectedDraft: { templateText, cardCount: 10 }
+      }
+    ]);
+    applyAiDraft(templateText);
   }
 
-  async function copyAiImagePrompt(): Promise<void> {
-    const prompt = buildImagePrompt(aiInput);
+  async function copySelectedAiInstallHint(): Promise<void> {
+    const command = selectedAiProvider?.installHint;
+    if (!command) {
+      setAiStatus("복사할 설치 명령이 없습니다.");
+      return;
+    }
+
     try {
-      await navigator.clipboard.writeText(prompt);
-      setAiStatus("이미지 프롬프트를 클립보드에 복사했습니다. 생성 후 이미지 파일 추가로 등록하세요.");
+      await navigator.clipboard.writeText(command);
+      setAiStatus("설치 명령을 클립보드에 복사했습니다.");
     } catch {
-      setAiStatus(prompt);
+      setAiStatus(command);
     }
   }
 
@@ -2599,7 +2782,7 @@ export function App(): ReactElement {
             className="ghost"
             data-smoke-action="open-ai-panel"
             onClick={() => {
-              setInspectorTab("export");
+              setAiPanelOpen(true);
               if (!hasProTools) {
                 void requestLockedFeature("ai_panel");
               }
@@ -3235,40 +3418,60 @@ export function App(): ReactElement {
                       <option value="none">텍스트만</option>
                     </select>
                   </label>
-                  <label className="stack-field">
+                  <div className="stack-field">
                     <span>이미지 배지</span>
-                    <select
-                      data-smoke-role="badge-image-select"
-                      value={selectedOverride?.badge?.imageId ?? "__none__"}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setSelectedBadgeImage(value === "__none__" ? null : value);
-                        if (value !== "__none__") {
-                          void loadImagePreview(value);
-                        }
-                      }}
-                    >
-                      <option value="__none__">텍스트 배지 사용</option>
-                      {imageLibrary.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.displayName}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="row">
-                    <button type="button" data-smoke-action="add-badge-image" onClick={addImage}>
-                      이미지 추가
-                    </button>
-                    <button type="button" onClick={removeSelectedBadgeBackground}>
-                      배경 제거
-                    </button>
+                    <div className="image-picker-control" data-smoke-role="badge-image-control">
+                      <button
+                        type="button"
+                        data-smoke-action="open-badge-image-picker"
+                        onClick={() => openImagePicker({ kind: "badge" }, selectedOverride?.badge?.imageId ?? null)}
+                      >
+                        이미지 선택
+                      </button>
+                      {selectedOverride?.badge?.imageId ? (
+                        <button type="button" className="ghost" onClick={() => setSelectedBadgeImage(null)}>
+                          지우기
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   {selectedOverride?.badge?.imageId && imagePreviews[selectedOverride.badge.imageId] ? (
-                    <div className="image-badge-preview">
+                    <div className="image-badge-preview" data-smoke-role="badge-image-preview">
                       <img src={imagePreviews[selectedOverride.badge.imageId]} alt="" />
                     </div>
                   ) : null}
+                  <div className="stack-field">
+                    <span>배지 글자색</span>
+                    <div className="swatches compact-swatches" data-smoke-role="badge-text-color-swatches">
+                      {accentSwatches.map((swatch) => (
+                        <button
+                          type="button"
+                          key={swatch}
+                          className={`swatch${selectedOverride?.badge?.textColor === swatch ? " active" : ""}`}
+                          style={{ background: swatch }}
+                          aria-label={`배지 글자색 ${swatch}`}
+                          onClick={() => setSelectedBadgeTextColor(swatch)}
+                        />
+                      ))}
+                    </div>
+                    <div className="row">
+                      <input
+                        data-smoke-role="badge-text-color-input"
+                        value={selectedOverride?.badge?.textColor ?? preset.badgeInk}
+                        onChange={(event) => setSelectedBadgeTextColor(event.target.value)}
+                        placeholder="#141414"
+                      />
+                      <input
+                        type="color"
+                        value={selectedOverride?.badge?.textColor ?? preset.badgeInk}
+                        onChange={(event) => setSelectedBadgeTextColor(event.target.value)}
+                        aria-label="배지 글자색 선택"
+                      />
+                      <button type="button" className="ghost" onClick={() => setSelectedBadgeTextColor(null)}>
+                        스타일 기본값
+                      </button>
+                    </div>
+                  </div>
                   <label className="dim-row">
                     <span>이미지 높이</span>
                     <input
@@ -3309,31 +3512,25 @@ export function App(): ReactElement {
                   </label>
                   {nextHintConfig.kind === "image" ? (
                     <>
-                      <label className="stack-field">
+                      <div className="stack-field">
                         <span>이미지</span>
-                        <select
-                          data-smoke-role="next-hint-image-select"
-                          value={nextHintConfig.imageId ?? "__none__"}
-                          onChange={(event) => {
-                            const value = event.target.value;
-                            setNextHintImage(value === "__none__" ? null : value);
-                          }}
-                        >
-                          <option value="__none__">이미지 선택</option>
-                          {imageLibrary.map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.displayName}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <div className="row">
-                        <button type="button" data-smoke-action="add-next-hint-image" onClick={addNextHintImage}>
-                          이미지 추가
-                        </button>
+                        <div className="image-picker-control" data-smoke-role="next-hint-image-control">
+                          <button
+                            type="button"
+                            data-smoke-action="open-next-hint-image-picker"
+                            onClick={() => openImagePicker({ kind: "nextHint" }, nextHintConfig.imageId ?? null)}
+                          >
+                            이미지 선택
+                          </button>
+                          {nextHintConfig.imageId ? (
+                            <button type="button" className="ghost" onClick={() => setNextHintImage(null)}>
+                              지우기
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
                       {nextHintConfig.imageId && imagePreviews[nextHintConfig.imageId] ? (
-                        <div className="image-badge-preview">
+                        <div className="image-badge-preview" data-smoke-role="next-hint-image-preview">
                           <img src={imagePreviews[nextHintConfig.imageId]} alt="" />
                         </div>
                       ) : null}
@@ -3743,6 +3940,55 @@ export function App(): ReactElement {
                           </label>
                         </div>
                       ) : null}
+                      {selectedLayer.kind === "image" ? (
+                        <div className="selected-layer-fields" data-smoke-role="image-layer-controls">
+                          <div className="image-picker-control">
+                            <button
+                              type="button"
+                              data-smoke-action="open-layer-image-picker"
+                              onClick={() =>
+                                openImagePicker(
+                                  { kind: "layer", layerId: selectedLayer.id },
+                                  selectedLayer.backgroundId || null
+                                )
+                              }
+                            >
+                              이미지 선택
+                            </button>
+                            {selectedLayer.backgroundId ? (
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "image" ? { ...layer, backgroundId: "" } : layer
+                                  )
+                                }
+                              >
+                                지우기
+                              </button>
+                            ) : null}
+                          </div>
+                          {selectedLayer.backgroundId && imagePreviews[selectedLayer.backgroundId] ? (
+                            <div className="image-badge-preview" data-smoke-role="image-layer-preview">
+                              <img src={imagePreviews[selectedLayer.backgroundId]} alt="" />
+                            </div>
+                          ) : null}
+                          <select
+                            value={selectedLayer.objectFit ?? "cover"}
+                            onChange={(event) =>
+                              updateSelectedLayer((layer) =>
+                                layer.kind === "image"
+                                  ? { ...layer, objectFit: event.target.value === "contain" ? "contain" : "cover" }
+                                  : layer
+                              )
+                            }
+                          >
+                            <option value="cover">채우기</option>
+                            <option value="contain">맞추기</option>
+                          </select>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   {selectedLayers.map((layer) => (
@@ -3974,21 +4220,34 @@ export function App(): ReactElement {
                         </div>
                       ) : null}
                       {layer.kind === "image" ? (
-                        <select
-                          value={layer.backgroundId}
-                          onChange={(event) =>
-                            updateLayer(layer.id, (current) =>
-                              current.kind === "image" ? { ...current, backgroundId: event.target.value } : current
-                            )
-                          }
-                        >
-                          <option value="">이미지 선택</option>
-                          {backgroundLibrary.map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.displayName}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="selected-layer-fields">
+                          <div className="image-picker-control">
+                            <button
+                              type="button"
+                              onClick={() => openImagePicker({ kind: "layer", layerId: layer.id }, layer.backgroundId || null)}
+                            >
+                              이미지 선택
+                            </button>
+                            {layer.backgroundId ? (
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() =>
+                                  updateLayer(layer.id, (current) =>
+                                    current.kind === "image" ? { ...current, backgroundId: "" } : current
+                                  )
+                                }
+                              >
+                                지우기
+                              </button>
+                            ) : null}
+                          </div>
+                          {layer.backgroundId && imagePreviews[layer.backgroundId] ? (
+                            <div className="image-badge-preview">
+                              <img src={imagePreviews[layer.backgroundId]} alt="" />
+                            </div>
+                          ) : null}
+                        </div>
                       ) : null}
                     </div>
                   ))}
@@ -4115,108 +4374,238 @@ export function App(): ReactElement {
             ) : (
               renderEditionLock("bulk_csv", "CSV 대량 생성", "CSV 템플릿과 대량 PNG 생성은 Pro에서 열립니다.")
             )}
-            {hasProTools ? (
-            <div className="ai-panel" data-smoke-role="ai-panel">
-              <p className="panel-title">AI 설정/대본</p>
-              <div className="row ai-provider-row">
-                <select
-                  value={aiProviderId}
-                  onChange={(event) => {
-                    const nextProviderId = event.target.value;
-                    if (nextProviderId === "claude" || nextProviderId === "codex" || nextProviderId === "gemini") {
-                      void selectAiProvider(nextProviderId);
-                    }
-                  }}
-                >
-                  {aiProviderOrder.map((providerId) => {
-                    const provider = aiProviders.find((entry) => entry.id === providerId);
-                    return (
-                      <option key={providerId} value={providerId}>
-                        {provider?.label ?? providerId} · {provider?.installed ? provider.version ?? "감지됨" : "미설치"}
-                      </option>
-                    );
-                  })}
-                </select>
-                <button type="button" data-smoke-action="ai-refresh" onClick={refreshAiProviders}>
-                  새로고침
-                </button>
-              </div>
-              <small className="hint">
-                {aiStatus}
-                {aiProviders.length > 0
-                  ? ` · 설치 안내: ${
-                      aiProviders.find((provider) => provider.id === aiProviderId)?.installHint ?? "CLI 설치 후 새로고침"
-                    }`
-                  : ""}
-              </small>
-              <textarea
-                className="ai-input"
-                value={aiInput}
-                onChange={(event) => setAiInput(event.target.value)}
-                placeholder="주제, 자료, 대본 요청을 입력하세요."
-                spellCheck={false}
-              />
-              <div className="row">
-                <button type="button" onClick={() => void runAiPreset("topic")} disabled={aiBusy}>
-                  주제 탐색
-                </button>
-                <button type="button" onClick={() => void runAiPreset("research")} disabled={aiBusy}>
-                  자료 검색
-                </button>
-                <button
-                  type="button"
-                  data-smoke-action="ai-draft"
-                  onClick={() => void runAiPreset("draft")}
-                  disabled={aiBusy}
-                >
-                  대본 작성
-                </button>
-                <button type="button" className="ghost" onClick={runAiFreeChat} disabled={aiBusy}>
-                  보내기
-                </button>
-              </div>
-              <div className="row">
-                <button type="button" className="ghost" onClick={copyAiImagePrompt}>
-                  이미지 프롬프트 복사
-                </button>
-                <button type="button" className="ghost" onClick={applyMockAiDraft}>
-                  샘플 대본 적용
-                </button>
-              </div>
-              <textarea
-                className="ai-draft-input"
-                value={aiDraftText}
-                onChange={(event) => setAiDraftText(event.target.value)}
-                placeholder="AI가 만든 양식.md가 여기에 표시됩니다. 필요하면 수정 후 카드에 적용하세요."
-                spellCheck={false}
-              />
-              <button
-                type="button"
-                data-smoke-action="ai-apply-draft"
-                onClick={() => applyAiDraft(aiDraftText)}
-                disabled={!aiDraftText.trim()}
-              >
-                카드에 적용
-              </button>
-              {aiTranscript.length > 0 ? (
-                <ol className="ai-transcript">
-                  {aiTranscript.slice(-4).map((message, index) => (
-                    <li key={`${message.role}-${index}`}>
-                      <strong>{message.role === "assistant" ? "AI" : "나"}</strong>
-                      <span>{message.content.slice(0, 160)}</span>
-                    </li>
-                  ))}
-                </ol>
-              ) : null}
-            </div>
-            ) : (
-              <div className="ai-panel" data-smoke-role="ai-panel">
-                {renderEditionLock("ai_panel", "AI 설정/대본", "프로그램 내 AI 대본 생성과 자동 적용은 Pro에서 열립니다.")}
-              </div>
-            )}
           </section>
         </aside>
       </div>
+      {aiPanelOpen ? (
+        <div className="drawer-layer" role="dialog" aria-modal="true" aria-label="AI assistant">
+          <button
+            type="button"
+            className="drawer-scrim"
+            aria-label="AI 패널 닫기"
+            onClick={() => setAiPanelOpen(false)}
+          />
+          <aside className="ai-drawer" data-smoke-role="ai-panel">
+            <div className="ai-drawer-header">
+              <div>
+                <strong>AI</strong>
+                <span className={`status-dot ${selectedAiProvider?.installed ? "installed" : "missing"}`} />
+              </div>
+              <button type="button" className="ghost" onClick={() => setAiPanelOpen(false)}>
+                닫기
+              </button>
+            </div>
+            {hasProTools ? (
+              <>
+                <div className="ai-provider-strip">
+                  <select
+                    value={aiProviderId}
+                    onChange={(event) => {
+                      const nextProviderId = event.target.value;
+                      if (nextProviderId === "claude" || nextProviderId === "codex" || nextProviderId === "gemini") {
+                        void selectAiProvider(nextProviderId);
+                      }
+                    }}
+                  >
+                    {aiProviderOrder.map((providerId) => {
+                      const provider = aiProviders.find((entry) => entry.id === providerId);
+                      return (
+                        <option key={providerId} value={providerId}>
+                          {provider?.label ?? providerId} · {provider?.installed ? provider.version ?? "감지됨" : "미설치"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <button type="button" data-smoke-action="ai-refresh" onClick={refreshAiProviders}>
+                    새로고침
+                  </button>
+                </div>
+                {selectedAiProvider && !selectedAiProvider.installed ? (
+                  <div className="ai-install-hint">
+                    <span>{selectedAiProvider.installHint}</span>
+                    <button type="button" className="ghost" onClick={copySelectedAiInstallHint}>
+                      복사
+                    </button>
+                  </div>
+                ) : null}
+                <small className="hint">{aiStatus}</small>
+                <div className="ai-thread" data-smoke-role="ai-thread">
+                  {aiThread.length === 0 ? (
+                    <p className="hint">AI와 대화하며 카드뉴스 대본을 만들 수 있습니다.</p>
+                  ) : (
+                    aiThread.map((message) => (
+                      <div
+                        key={message.id}
+                        className={`ai-bubble ${message.role}${message.status === "error" ? " error" : ""}`}
+                        data-smoke-role={message.role === "assistant" ? "ai-assistant-bubble" : "ai-user-bubble"}
+                      >
+                        {message.status === "loading" ? (
+                          <span className="ai-loading">작성 중...</span>
+                        ) : message.detectedDraft ? (
+                          <p>양식.md 응답을 감지했습니다.</p>
+                        ) : (
+                          <p>{message.content}</p>
+                        )}
+                        {message.detectedDraft ? (
+                          <div className="ai-draft-detection">
+                            <span data-smoke-role="ai-draft-card-count">
+                              카드 {message.detectedDraft.cardCount}장 감지
+                            </span>
+                            <details>
+                              <summary>양식.md 보기</summary>
+                              <pre>{message.detectedDraft.templateText}</pre>
+                            </details>
+                            <button
+                              type="button"
+                              data-smoke-action="ai-apply-draft"
+                              onClick={() => applyAiDraft(message.detectedDraft?.templateText ?? "")}
+                            >
+                              카드에 적용
+                            </button>
+                          </div>
+                        ) : null}
+                        {message.status === "error" && message.retryPrompt ? (
+                          <button
+                            type="button"
+                            className="ghost"
+                            data-smoke-action="ai-retry"
+                            onClick={() => void sendAiMessage(message.retryPrompt)}
+                            disabled={aiBusy}
+                          >
+                            다시 시도
+                          </button>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="ai-preset-chips">
+                  <button type="button" onClick={() => fillAiPreset("topic")}>
+                    주제
+                  </button>
+                  <button type="button" onClick={() => fillAiPreset("research")}>
+                    리서치
+                  </button>
+                  <button type="button" data-smoke-action="ai-preset-draft" onClick={() => fillAiPreset("draft")}>
+                    대본
+                  </button>
+                  <button type="button" onClick={() => fillAiPreset("image")}>
+                    이미지
+                  </button>
+                </div>
+                <textarea
+                  ref={aiInputRef}
+                  className="ai-composer-input"
+                  data-smoke-role="ai-input"
+                  value={aiInput}
+                  onChange={(event) => setAiInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void sendAiMessage();
+                    }
+                  }}
+                  placeholder="메시지를 입력하세요."
+                  spellCheck={false}
+                />
+                <div className="ai-composer-actions">
+                  <button type="button" className="ghost" onClick={resetAiThread}>
+                    새 대화
+                  </button>
+                  <button type="button" className="ghost" onClick={applyMockAiDraft}>
+                    샘플 적용
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    data-smoke-action="ai-send"
+                    onClick={() => void sendAiMessage()}
+                    disabled={aiBusy || !aiInput.trim()}
+                  >
+                    {aiBusy ? "전송 중" : "보내기"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              renderEditionLock("ai_panel", "AI", "프로그램 내 AI 대본 생성과 자동 적용은 Pro에서 열립니다.")
+            )}
+          </aside>
+        </div>
+      ) : null}
+      {imagePickerTarget ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="image picker">
+          <div className="image-picker-modal" data-smoke-role="image-picker-modal">
+            <div className="modal-header">
+              <strong>이미지 선택</strong>
+              <button type="button" className="ghost" onClick={closeImagePicker}>
+                닫기
+              </button>
+            </div>
+            <div className="image-picker-toolbar">
+              <button type="button" data-smoke-action="image-picker-add" onClick={addImageThroughPicker}>
+                파일 추가
+              </button>
+              <label className="dim-row">
+                <span>배경 제거</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={96}
+                  value={backgroundRemovalTolerance}
+                  onChange={(event) => setBackgroundRemovalTolerance(Number(event.target.value))}
+                />
+                <small>{backgroundRemovalTolerance}</small>
+              </label>
+              <button
+                type="button"
+                data-smoke-action="image-picker-remove-background"
+                onClick={removeSelectedPickerBackground}
+                disabled={!imagePickerSelectedId || imagePickerBusy}
+              >
+                {imagePickerBusy ? "처리 중" : "배경 제거"}
+              </button>
+            </div>
+            {imagePickerSelectedId && imagePreviews[imagePickerSelectedId] ? (
+              <div className="image-picker-preview checkerboard" data-smoke-role="image-picker-selected-preview">
+                <img src={imagePreviews[imagePickerSelectedId]} alt="" />
+              </div>
+            ) : null}
+            <div className="image-picker-grid" data-smoke-role="image-picker-grid">
+              {imageLibrary.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className={`image-picker-item${imagePickerSelectedId === item.id ? " active" : ""}`}
+                  data-smoke-action="image-picker-select"
+                  data-smoke-image-id={item.id}
+                  onClick={() => {
+                    setImagePickerSelectedId(item.id);
+                    void loadImagePreview(item.id);
+                  }}
+                >
+                  {imagePreviews[item.id] ? <img src={imagePreviews[item.id]} alt="" /> : <span>미리보기</span>}
+                  <small>{item.displayName}</small>
+                </button>
+              ))}
+            </div>
+            <div className="image-picker-actions">
+              <button type="button" className="ghost" data-smoke-action="image-picker-clear" onClick={() => applyImagePickerSelection(null)}>
+                선택 해제
+              </button>
+              <button
+                type="button"
+                className="primary"
+                data-smoke-action="image-picker-apply"
+                onClick={() => applyImagePickerSelection(imagePickerSelectedId)}
+                disabled={!imagePickerSelectedId}
+              >
+                선택
+              </button>
+            </div>
+            {imagePickerSelectedItem ? <small className="hint">{imagePickerSelectedItem.displayName}</small> : null}
+          </div>
+        </div>
+      ) : null}
       {stockSearchOpen ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="free image search">
           <div className="stock-modal">

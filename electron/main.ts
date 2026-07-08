@@ -903,56 +903,97 @@ async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindo
     return { ok: false, message: source.message };
   }
 
+  await reloadSmokeWindow(mainWindow);
   const result = (await mainWindow.webContents.executeJavaScript(`
     (async () => {
-      const failIfError = (result, label) => {
-        if (result && result.ok === false) {
-          throw new Error(label + ": " + result.message);
-        }
-        return result;
-      };
-      const processed = failIfError(
-        await window.cardnews.removeImageBackground(${JSON.stringify(source.id)}, 18),
-        "removeImageBackground"
-      );
-      const deck = failIfError(
-        await window.cardnews.saveDeck({
-          headerLabel: "MONEY NOTE",
-          footerAccount: "kkongdon_story",
-          styleId: "minimal",
-          aspectRatio: "4:5",
-          cards: [
-            {
-              index: 1,
-              rawText: [
-                "유형: 표지",
-                "배지: TEXT BADGE",
-                "제목: 이미지 배지 테스트",
-                "소제목: 누끼 결과가 렌더에 들어갑니다"
-              ].join("\\n")
-            }
-          ],
-          overrides: {
-            "1": {
-              badge: {
-                imageId: processed.id,
-                imageHeight: 88,
-                shape: "none"
-              }
-            }
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
           }
-        }),
-        "saveDeck"
+          await delay(80);
+        }
+        throw new Error("Badge picker smoke target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Badge picker action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const waitUntil = async (predicate, description, timeout = 10000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(100);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await clickAction("open-badge-image-picker");
+      const modal = await waitFor('[data-smoke-role="image-picker-modal"]');
+      const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
+      await waitUntil(
+        () => Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).some((button) =>
+          (button.textContent ?? "").includes("badge-smoke-source")
+        ),
+        () => "Badge picker grid did not show the saved source image: " + (grid.textContent ?? "")
       );
-      const rendered = failIfError(await window.cardnews.renderDeck(deck.id), "renderDeck");
+      const sourceButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
+        (button.textContent ?? "").includes("badge-smoke-source")
+      );
+      if (!(sourceButton instanceof HTMLButtonElement)) {
+        throw new Error("Badge source thumbnail button was not found.");
+      }
+      sourceButton.click();
+      await waitFor('[data-smoke-role="image-picker-selected-preview"]');
+      await clickAction("image-picker-remove-background");
+      await waitUntil(
+        () => (modal.textContent ?? "").includes("no-bg"),
+        () => "Badge picker did not add a background-removed image: " + (modal.textContent ?? ""),
+        12000
+      );
+      const noBgButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
+        (button.textContent ?? "").includes("no-bg")
+      );
+      if (!(noBgButton instanceof HTMLButtonElement)) {
+        throw new Error("Background-removed thumbnail button was not found.");
+      }
+      const noBgImageId = noBgButton.getAttribute("data-smoke-image-id");
+      if (!noBgImageId) {
+        throw new Error("Background-removed thumbnail did not expose an image id.");
+      }
+      noBgButton.click();
+      await clickAction("image-picker-apply");
+      await waitFor('[data-smoke-role="badge-image-preview"]');
+      await clickAction("generate");
+      await waitUntil(
+        () => document.body.innerText.includes("렌더 완료:"),
+        () => "Badge picker smoke render did not complete: " + document.body.innerText,
+        30000
+      );
+      const evidence = {
+        modalOpened: modal instanceof HTMLElement,
+        gridCount: grid.querySelectorAll('[data-smoke-action="image-picker-select"]').length,
+        noBgImageId,
+        previewShown: Boolean(document.querySelector('[data-smoke-role="badge-image-preview"]'))
+      };
       const pre = document.createElement("pre");
       pre.id = "badge-background-removal-regression-result";
-      pre.textContent = "BADGE_BACKGROUND_REMOVAL_RESULT " + JSON.stringify({
-        processed,
-        rendered
-      });
+      pre.textContent = "BADGE_BACKGROUND_REMOVAL_RESULT " + JSON.stringify(evidence);
       document.body.append(pre);
-      return { processed, rendered };
+      return evidence;
     })()
   `)) as unknown;
 
@@ -960,24 +1001,21 @@ async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindo
     return { ok: false, message: "Badge background removal smoke did not return a result." };
   }
   const record = result as Record<string, unknown>;
-  const processed = record["processed"];
-  const rendered = record["rendered"];
-  if (typeof processed !== "object" || processed === null || typeof rendered !== "object" || rendered === null) {
-    return { ok: false, message: "Badge background removal smoke result shape was invalid." };
+  const noBgImageId = typeof record["noBgImageId"] === "string" ? record["noBgImageId"] : "";
+  if (record["modalOpened"] !== true || record["previewShown"] !== true || noBgImageId.length === 0) {
+    return { ok: false, message: `Badge image picker UI did not complete: ${JSON.stringify(record)}` };
   }
-  const processedRecord = processed as Record<string, unknown>;
-  const renderedRecord = rendered as Record<string, unknown>;
-  const processedId = processedRecord["id"];
-  const outputDir = renderedRecord["outputDir"];
-  if (typeof processedId !== "string" || typeof outputDir !== "string") {
-    return { ok: false, message: "Badge background removal smoke did not return ids and output path." };
+
+  const outputDir = await findLatestRenderOutputDirectory();
+  if (!outputDir) {
+    return { ok: false, message: "Badge background removal smoke did not produce a render output directory." };
   }
 
   const html = await fs.readFile(path.join(outputDir, "card-01.html"), "utf8");
   if (!html.includes('class="badge-image"') || !html.includes('data-slot="badge-image"')) {
     return { ok: false, message: "Rendered HTML did not contain the image badge metric slot." };
   }
-  if (!html.includes(processedId)) {
+  if (!html.includes(noBgImageId)) {
     return { ok: false, message: "Rendered HTML did not use the processed background-removed image." };
   }
 
@@ -1000,74 +1038,127 @@ async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promi
     return { ok: false, message: source.message };
   }
 
+  await reloadSmokeWindow(mainWindow);
   const result = (await mainWindow.webContents.executeJavaScript(`
     (async () => {
-      const failIfError = (result, label) => {
-        if (result && result.ok === false) {
-          throw new Error(label + ": " + result.message);
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
         }
-        return result;
+        throw new Error("Next hint picker smoke target was not found: " + selector);
       };
-      const deck = failIfError(
-        await window.cardnews.saveDeck({
-          headerLabel: "MONEY NOTE",
-          footerAccount: "kkongdon_story",
-          styleId: "minimal",
-          aspectRatio: "4:5",
-          nextHint: {
-            kind: "image",
-            imageId: ${JSON.stringify(source.id)},
-            height: 44
-          },
-          cards: [
-            {
-              index: 1,
-              rawText: [
-                "유형: 표지",
-                "배지: NEXT",
-                "제목: 넘김 기호 이미지",
-                "소제목: 마지막 전 카드에만 보입니다"
-              ].join("\\n")
-            },
-            {
-              index: 2,
-              rawText: [
-                "유형: 마무리",
-                "제목: 마지막 카드",
-                "본문: 마지막 장에는 넘김 기호를 숨깁니다."
-              ].join("\\n")
-            }
-          ]
-        }),
-        "saveDeck"
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Next hint picker action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter for " + element.tagName);
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const waitUntil = async (predicate, description, timeout = 10000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(100);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      const nextHintKind = await waitFor('[data-smoke-role="next-hint-kind"]');
+      if (!(nextHintKind instanceof HTMLSelectElement)) {
+        throw new Error("Next hint kind select was not found.");
+      }
+      setNativeValue(nextHintKind, "image");
+      await clickAction("open-next-hint-image-picker");
+      const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
+      await waitUntil(
+        () => Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).some((button) =>
+          (button.textContent ?? "").includes("next-hint-smoke")
+        ),
+        () => "Next hint picker grid did not show the saved source image: " + (grid.textContent ?? "")
       );
-      const rendered = failIfError(await window.cardnews.renderDeck(deck.id), "renderDeck");
+      const sourceButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
+        (button.textContent ?? "").includes("next-hint-smoke")
+      );
+      if (!(sourceButton instanceof HTMLButtonElement)) {
+        throw new Error("Next hint source thumbnail button was not found.");
+      }
+      const selectedImageId = sourceButton.getAttribute("data-smoke-image-id");
+      if (!selectedImageId) {
+        throw new Error("Next hint thumbnail did not expose an image id.");
+      }
+      sourceButton.click();
+      await waitFor('[data-smoke-role="image-picker-selected-preview"]');
+      await clickAction("image-picker-apply");
+      await waitFor('[data-smoke-role="next-hint-image-preview"]');
+      const heightInput = await waitFor('[data-smoke-role="next-hint-height"]');
+      if (!(heightInput instanceof HTMLInputElement)) {
+        throw new Error("Next hint height slider was not found.");
+      }
+      setNativeValue(heightInput, "44");
+      await clickAction("generate");
+      await waitUntil(
+        () => document.body.innerText.includes("렌더 완료:"),
+        () => "Next hint image smoke render did not complete: " + document.body.innerText,
+        30000
+      );
+      const evidence = {
+        gridCount: grid.querySelectorAll('[data-smoke-action="image-picker-select"]').length,
+        selectedImageId,
+        previewShown: Boolean(document.querySelector('[data-smoke-role="next-hint-image-preview"]')
+        )
+      };
       const pre = document.createElement("pre");
       pre.id = "next-hint-image-regression-result";
-      pre.textContent = "NEXT_HINT_IMAGE_RESULT " + JSON.stringify({ rendered });
+      pre.textContent = "NEXT_HINT_IMAGE_RESULT " + JSON.stringify(evidence);
       document.body.append(pre);
-      return { rendered };
+      return evidence;
     })()
   `)) as unknown;
 
   if (typeof result !== "object" || result === null) {
     return { ok: false, message: "Next hint image smoke did not return a result." };
   }
-  const rendered = (result as Record<string, unknown>)["rendered"];
-  if (typeof rendered !== "object" || rendered === null) {
-    return { ok: false, message: "Next hint image smoke result shape was invalid." };
+  const record = result as Record<string, unknown>;
+  const selectedImageId = typeof record["selectedImageId"] === "string" ? record["selectedImageId"] : "";
+  if (record["previewShown"] !== true || selectedImageId.length === 0) {
+    return { ok: false, message: `Next hint image picker UI did not complete: ${JSON.stringify(record)}` };
   }
-  const outputDir = (rendered as Record<string, unknown>)["outputDir"];
-  if (typeof outputDir !== "string") {
-    return { ok: false, message: "Next hint image smoke did not return an output path." };
+  const outputDir = await findLatestRenderOutputDirectory();
+  if (!outputDir) {
+    return { ok: false, message: "Next hint image smoke did not produce a render output directory." };
   }
 
   const firstHtml = await fs.readFile(path.join(outputDir, "card-01.html"), "utf8");
-  const lastHtml = await fs.readFile(path.join(outputDir, "card-02.html"), "utf8");
+  const lastHtml = await fs.readFile(path.join(outputDir, "card-10.html"), "utf8");
   if (!firstHtml.includes('class="next-hint-image"') || !firstHtml.includes('data-slot="next-hint-image"')) {
     return { ok: false, message: "First card did not render next hint image slot." };
   }
-  if (!firstHtml.includes(source.id) || !firstHtml.includes("height: 44px")) {
+  if (!firstHtml.includes(selectedImageId) || !firstHtml.includes("height: 44px")) {
     return { ok: false, message: "First card did not use the configured next hint image and height." };
   }
   if (lastHtml.includes("next-hint") || lastHtml.includes("■")) {
@@ -1098,21 +1189,57 @@ async function runAiDraftRegressionSmoke(mainWindow: BrowserWindow): Promise<Smo
       const started = Date.now();
       const tick = () => {
         const panel = document.querySelector('[data-smoke-role="ai-panel"]');
-        const draftButton = document.querySelector('[data-smoke-action="ai-draft"]');
-        const panelSection = panel instanceof HTMLElement ? panel.closest("section") : null;
+        const draftButton = document.querySelector('[data-smoke-action="ai-preset-draft"]');
+        const input = document.querySelector('[data-smoke-role="ai-input"]');
+        const sendButton = document.querySelector('[data-smoke-action="ai-send"]');
         if (
           panel instanceof HTMLElement &&
           draftButton instanceof HTMLButtonElement &&
-          panelSection instanceof HTMLElement &&
-          panelSection.hidden === false &&
-          draftButton.disabled === false
+          input instanceof HTMLTextAreaElement &&
+          sendButton instanceof HTMLButtonElement &&
+          draftButton.disabled === false &&
+          sendButton.disabled === false
         ) {
           draftButton.click();
-          resolve(true);
+          const waitForPrompt = () => {
+            if (input.value.includes("앱에서 파싱하는 양식 계약")) {
+              sendButton.click();
+              resolve(true);
+              return;
+            }
+            if (Date.now() - started > 8000) {
+              reject(new Error("AI preset chip did not fill the draft prompt."));
+              return;
+            }
+            setTimeout(waitForPrompt, 80);
+          };
+          waitForPrompt();
           return;
         }
         if (Date.now() - started > 8000) {
           reject(new Error("AI panel did not become ready."));
+          return;
+        }
+        setTimeout(tick, 100);
+      };
+      tick();
+    })
+  `);
+  await waitForSmokeText(mainWindow, ["카드 10장 감지", "AI 오류"]);
+
+  await mainWindow.webContents.executeJavaScript(`
+    new Promise((resolve, reject) => {
+      const started = Date.now();
+      const tick = () => {
+        const assistant = document.querySelector('[data-smoke-role="ai-assistant-bubble"]');
+        const applyButton = document.querySelector('[data-smoke-action="ai-apply-draft"]');
+        if (assistant instanceof HTMLElement && applyButton instanceof HTMLButtonElement) {
+          applyButton.click();
+          resolve(true);
+          return;
+        }
+        if (Date.now() - started > 8000) {
+          reject(new Error("AI assistant bubble or apply button was not found."));
           return;
         }
         setTimeout(tick, 100);
@@ -1738,6 +1865,21 @@ async function clickSmokeButton(mainWindow: BrowserWindow, action: string): Prom
   `);
 }
 
+async function reloadSmokeWindow(mainWindow: BrowserWindow): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      mainWindow.webContents.removeListener("did-finish-load", handleLoad);
+      reject(new Error("Timed out waiting for smoke reload."));
+    }, 10000);
+    const handleLoad = (): void => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    mainWindow.webContents.once("did-finish-load", handleLoad);
+    mainWindow.webContents.reload();
+  });
+}
+
 async function waitForSmokeText(
   mainWindow: BrowserWindow,
   expectedTexts: readonly string[]
@@ -1784,6 +1926,25 @@ async function readRenderSmokeResult(mainWindow: BrowserWindow): Promise<SmokeAc
   }
 
   return { ok: false, message: "Render smoke did not reach a successful rendered state." };
+}
+
+async function findLatestRenderOutputDirectory(): Promise<string | undefined> {
+  const rendersRoot = path.join(storageRoot(), "renders");
+  try {
+    const entries = await fs.readdir(rendersRoot, { withFileTypes: true });
+    const candidates = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("render-"))
+        .map(async (entry) => {
+          const outputDir = path.join(rendersRoot, entry.name);
+          const stat = await fs.stat(outputDir);
+          return { outputDir, mtimeMs: stat.mtimeMs };
+        })
+    );
+    return candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.outputDir;
+  } catch {
+    return undefined;
+  }
 }
 
 async function readExportSmokeResult(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
@@ -3084,8 +3245,8 @@ app.whenReady().then(() => {
       }
 
       const { width } = image.getSize();
-      const resized = width > 1080 ? image.resize({ width: 1080 }) : image;
-      return `data:image/png;base64,${resized.toPNG().toString("base64")}`;
+      const resized = width > 512 ? image.resize({ width: 512 }) : image;
+      return `data:image/jpeg;base64,${resized.toJPEG(82).toString("base64")}`;
     } catch (error) {
       const message = error instanceof Error ? error.message : "알 수 없는 파일 오류";
       return invalidInput(`이미지를 읽지 못했습니다: ${message}`);

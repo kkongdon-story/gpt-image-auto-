@@ -199,6 +199,11 @@ async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise
       const exportTab = await waitFor('[data-smoke-action="inspector-export"]');
       exportTab.click();
       await wait(80);
+      const aiButton = await waitFor('[data-smoke-action="open-ai-panel"]');
+      if (aiButton instanceof HTMLButtonElement) {
+        aiButton.click();
+        await wait(120);
+      }
 
       const requiredLocks = [
         "card_design",

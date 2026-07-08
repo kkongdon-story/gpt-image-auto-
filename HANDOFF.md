@@ -575,6 +575,56 @@
 1. 이번 M6는 설치 파일 재패키징 범위가 아니다. 최종 배포 산출물 갱신이 필요하면 M5의 `%LOCALAPPDATA%` 우회 절차를 다시 사용한다.
 2. stash는 안전하게 `apply`로 재사용했다. 최종 diff에 반영되어 있으므로 이후 필요 없으면 별도 정리해도 된다.
 
+## 6-16. V6 M7/M8 Pro AI 챗봇·이미지 피커 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-m7-m8-spec.md`, `.omc/plans/v6-lite-pro-prd.md` §0·§1
+
+**구현 완료**:
+- M7 Pro AI를 내보내기 탭 패널에서 상단바 AI 버튼 기반 오른쪽 slide-over로 옮겼다. 대화 thread, reset, provider select/status/refresh, install hint 복사, preset chip(topic/research/draft/image), multiline composer, loading/error/retry, mock `양식.md` 감지/적용 UI를 제공한다.
+- AI 전송은 최근 12턴만 CLI에 전달하고 UI thread는 전체를 유지한다. `CARDNEWS_MOCK_AI=1`은 결정적 10장 `양식.md` 응답을 반환한다.
+- Lite에서는 AI topbar 버튼이 잠금 drawer/stub으로 표시되며, Pro AI 실행 심볼은 Lite dist 검증 대상이다.
+- M8 공용 이미지 피커 modal을 추가했다. 배지 이미지, 다음 힌트 이미지, 이미지 레이어 source가 파일명 dropdown 대신 썸네일 grid, 파일 추가, 배경 제거, 선택/해제/닫기 흐름을 사용한다.
+- Electron `getImagePreview()`는 512px 폭 기준 JPEG data URL을 반환하고 renderer가 preview cache를 관리한다.
+- `CardBadgeOverride.textColor?: string`을 추가하고 `#rrggbb`만 저장/로드/렌더되도록 검증했다. UI에는 스타일 기본값, swatch, custom hex 입력을 제공한다.
+- `badge-background-removal-regression`, `next-hint-image-regression`, `ai-draft-regression`, `edition-lite-regression` smoke를 M7/M8 흐름에 맞춰 보강했다. 이미지 피커 smoke는 누적된 동일 표시 이름 이미지가 있어도 실제 선택한 `data-smoke-image-id`로 렌더 HTML을 검증한다.
+
+**변경 파일**:
+- `src/ui/App.tsx` — AI slide-over, 이미지 피커 modal, 배지 textColor UI, Pro/Lite 잠금 흐름.
+- `src/ui/styles.css` — AI drawer, image picker, preview/swatch 스타일.
+- `electron/main.ts` — 이미지 preview JPEG IPC, M7/M8 smoke, render output 검증.
+- `electron/lite-main.ts` — Lite regression smoke가 AI lock drawer까지 검증.
+- `src/domain/types.ts`, `src/storage/deckStore.ts`, `src/render-engine/cardTemplate.ts` — badge textColor type/validation/render support.
+- `src/storage/deckStore.test.ts`, `src/render-engine/cardTemplate.test.ts` — badge textColor 저장/렌더 회귀 테스트.
+
+**증거**:
+- 표준 gate:
+  - `.omc/evidence/v6/m8-image-picker-badge/typecheck-after-next-hint-id.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/test-final.log` — `npm test` exit 0, 14 files / 91 tests pass
+  - `.omc/evidence/v6/m8-image-picker-badge/build-pro-final.log` — final `npm run build` exit 0, Pro dist로 마무리
+  - `.omc/evidence/v6/m8-image-picker-badge/build-lite-final.log` — `npm run build:lite` exit 0
+- Lite 스트리핑:
+  - `.omc/evidence/v6/m8-image-picker-badge/verify-edition-lite-final.log` — Lite `dist`/`dist-electron` forbidden-symbol scan exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/edition-lite-regression-final.log` — `edition-lite-regression` exit 0
+- M7/M8 smoke:
+  - `.omc/evidence/v6/m7-ai-chatbot/ai-draft-regression.log` — `CARDNEWS_SMOKE_ACTION=ai-draft-regression CARDNEWS_MOCK_AI=1` exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/badge-background-removal-regression.log` — `badge-background-removal-regression` exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/next-hint-image-regression.log` — `next-hint-image-regression` exit 0
+- Pro 회귀 smoke:
+  - `.omc/evidence/v6/m8-image-picker-badge/layer-controls-regression.log` — `layer-controls-regression` exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/chrome-style-regression.log` — `chrome-style-regression` exit 0
+  - `.omc/evidence/v6/m8-image-picker-badge/content-form-regression.log` — `content-form-regression` exit 0
+
+**디버깅 감사**:
+1. H1 Smoke가 잘못된 탭을 열었다: `open-badge-image-picker`가 `inspector-design`에는 없고 `inspector-content` -> `card-design-tab` 안에 있어 첫 배지 smoke가 target not found로 실패했다. 기존 layer smoke와 같은 tab 경로로 바꿔 UI target을 찾고 smoke가 다음 단계까지 진행됨을 확인했다.
+2. H2 렌더 HTML이 `no-bg` 표시 이름을 보존하지 않는다: image library는 displayName과 실제 저장 path를 분리하고 HTML은 `img-*.png` ID path를 사용한다. 피커 버튼에 `data-smoke-image-id`를 노출하고 smoke가 처리 이미지 ID를 HTML에서 검증하도록 바꿔 배지 background removal smoke exit 0을 확인했다.
+3. H3 누적 테스트 이미지가 source.id 검증을 흔든다: 같은 `next-hint-smoke.png` 표시 이름의 과거 이미지가 library에 남으면 smoke가 새 source가 아닌 기존 썸네일을 선택할 수 있다. 실제 선택한 썸네일 ID를 반환/검증하도록 바꿔 next hint image smoke exit 0을 확인했다.
+
+**주의 / 잔여 리스크**:
+1. 실제 로그인된 Claude/Codex/Gemini CLI 응답은 환경 의존이라 이번 M7 gate도 mock AI로 UI-파서-렌더 경로를 검증했다. Provider status/install hint와 stdin 전달 경계는 유지된다.
+2. `build:lite`는 `dist`를 Lite로 덮는다. 최종 작업에서는 `verify-edition lite` 후 다시 `npm run build`를 실행해 현재 루트 `dist`를 Pro 기준으로 되돌렸다.
+3. 이미지 preview는 spec대로 JPEG thumbnail이다. 배경 제거 결과의 투명도는 preview가 아니라 원본 PNG render path에서 유지된다.
+4. 이번 M7/M8은 설치 파일 재패키징 범위가 아니다. 배포 EXE 갱신이 필요하면 M5의 `%LOCALAPPDATA%` 우회 빌드 후 `release/` 복사 절차를 다시 사용한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

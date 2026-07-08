@@ -165,6 +165,7 @@ export type CardBadgeOverride = {
   readonly shape?: "pill" | "rect" | "none";
   readonly imageId?: string;
   readonly imageHeight?: number;
+  readonly textColor?: string;
 };
 
 export type NextHintConfig = {

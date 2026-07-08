@@ -59,6 +59,36 @@ describe("deckStore migration guards", () => {
     ).toBe(true);
   });
 
+  it("rejects malformed badge text colors at the workspace boundary", () => {
+    expect(
+      isWorkspaceState({
+        headerLabel: "MONEY NOTE",
+        footerAccount: "@kkongdon_story",
+        styleId: "minimal",
+        overrides: {
+          "1": {
+            badge: { textColor: "blue" }
+          }
+        },
+        cards: ["유형: 표지\n제목: 테스트"]
+      })
+    ).toBe(false);
+
+    expect(
+      isWorkspaceState({
+        headerLabel: "MONEY NOTE",
+        footerAccount: "@kkongdon_story",
+        styleId: "minimal",
+        overrides: {
+          "1": {
+            badge: { textColor: "#112233" }
+          }
+        },
+        cards: ["유형: 표지\n제목: 테스트"]
+      })
+    ).toBe(true);
+  });
+
   it("migrates legacy rect/rotation line layers when loading a workspace", async () => {
     const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cardnews-workspace-"));
     await fs.writeFile(

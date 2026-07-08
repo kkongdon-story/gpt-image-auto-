@@ -447,7 +447,9 @@ function isCardBadgeOverride(candidate: unknown): candidate is CardBadgeOverride
       record["shape"] === "rect" ||
       record["shape"] === "none") &&
     (record["imageId"] === undefined || typeof record["imageId"] === "string") &&
-    (record["imageHeight"] === undefined || typeof record["imageHeight"] === "number")
+    (record["imageHeight"] === undefined || typeof record["imageHeight"] === "number") &&
+    (record["textColor"] === undefined ||
+      (typeof record["textColor"] === "string" && isHexColor(record["textColor"])))
   );
 }
 
@@ -648,7 +650,16 @@ function isEmptyOverride(override: CardOverride): boolean {
 }
 
 function isEmptyCardBadgeOverride(badge: CardBadgeOverride): boolean {
-  return badge.shape === undefined && !badge.imageId && badge.imageHeight === undefined;
+  return (
+    badge.shape === undefined &&
+    !badge.imageId &&
+    badge.imageHeight === undefined &&
+    badge.textColor === undefined
+  );
+}
+
+function isHexColor(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
 function isStyleProfile(candidate: unknown): candidate is StyleProfile {

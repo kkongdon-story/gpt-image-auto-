@@ -116,6 +116,21 @@ describe("buildCardHtml (style presets)", () => {
     expect(imageBadge).not.toContain('<span class="badge"');
   });
 
+  it("renders badge text color overrides with a contrast metric background", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        badge: { textColor: "#0f172a" }
+      }
+    });
+
+    expect(html).toContain("color: #0f172a");
+    expect(html).toContain('data-slot="badge"');
+    expect(html).toContain('data-background-color="');
+  });
+
   it("renders deck-level next hint images and suppresses hints on the last card", () => {
     const imageHint = buildCardHtml({
       assetCssUrls: { "img-next": "file:///C:/tmp/next.png" },

@@ -48,6 +48,7 @@ type ResolvedBadge = {
   readonly shape: "pill" | "rect" | "none" | undefined;
   readonly imageId: string | undefined;
   readonly imageHeight: number;
+  readonly textColor: string | undefined;
 };
 
 type ResolvedNextHint = {
@@ -344,7 +345,7 @@ function buildCss(theme: ResolvedTheme): string {
         background: ${theme.badge.shape === "none" ? "transparent" : badge.background};
         border-left: ${theme.badge.shape === "none" ? "0" : badge.borderLeft};
         border-radius: ${badgeRadius(theme.badge, badge.radius)};
-        color: ${badge.color};
+        color: ${theme.badge.textColor ?? badge.color};
         display: block;
         font-size: calc(26px * var(--body-scale));
         font-weight: 800;
@@ -613,7 +614,7 @@ function renderBadge(
     return "";
   }
 
-  return `<span class="badge">${escapeHtml(card.badge)}</span>`;
+  return `<span class="badge" data-slot="badge" data-background-color="${badgeMetricBackdrop(theme)}">${escapeHtml(card.badge)}</span>`;
 }
 
 function computeBodyNumber(deck: Deck, card: Card): number | undefined {
@@ -740,8 +741,19 @@ function normalizeBadge(badge: CardBadgeOverride | undefined): ResolvedBadge {
   return {
     shape: badge?.shape === "pill" || badge?.shape === "rect" || badge?.shape === "none" ? badge.shape : undefined,
     imageId: imageId && imageId.length > 0 ? imageId : undefined,
-    imageHeight: Math.round(clampRange(badge?.imageHeight ?? 96, 40, 200))
+    imageHeight: Math.round(clampRange(badge?.imageHeight ?? 96, 40, 200)),
+    textColor: normalizeHexColor(badge?.textColor)
   };
+}
+
+function badgeMetricBackdrop(theme: ResolvedTheme): string {
+  const mutedInk = theme.preset.inkScale?.mute ?? theme.preset.inkMuted;
+  const badge = resolveEyebrowStyle(theme.preset, theme.accent, mutedInk);
+  if (theme.badge.shape === "none" || badge.background === "transparent") {
+    return textBackdrop(theme);
+  }
+
+  return badge.background;
 }
 
 function normalizeNextHint(nextHint: NextHintConfig | undefined): ResolvedNextHint {

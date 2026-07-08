@@ -119,6 +119,7 @@ export type CardLineLayer = CardLayerBase & {
   readonly kind: "line";
   readonly color: string;
   readonly strokeWidth?: number;
+  readonly rotation?: number;
 };
 
 export type CardImageLayer = CardLayerBase & {

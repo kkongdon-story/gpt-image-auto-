@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isDeckPreset, isWorkspaceState } from "./deckStore.js";
+import type { CardnewsError, CardnewsResult, Deck } from "../domain/types.js";
+import { buildDeckFromDraft, isDeckPreset, isWorkspaceState } from "./deckStore.js";
+
+function isCardnewsError(result: CardnewsResult<Deck>): result is CardnewsError {
+  return "ok" in result && result.ok === false;
+}
 
 describe("deckStore migration guards", () => {
   it("accepts v3 workspace snapshots without v4 optional fields", () => {
@@ -49,5 +54,24 @@ describe("deckStore migration guards", () => {
         cards: ["유형: 본문\n제목: 테스트"]
       })
     ).toBe(true);
+  });
+
+  it("normalizes legacy @ footer values at the deck boundary", () => {
+    for (const footerAccount of ["", "@", "@kkongdon_story", "kkongdon_story"]) {
+      const deck = buildDeckFromDraft(
+        "current",
+        {
+          headerLabel: "MONEY NOTE",
+          footerAccount,
+          cards: [{ index: 1, rawText: "유형: 표지\n제목: 테스트" }]
+        },
+        undefined
+      );
+
+      if (isCardnewsError(deck)) {
+        throw new Error(deck.message);
+      }
+      expect(deck.footerAccount).toBe("kkongdon_story");
+    }
   });
 });

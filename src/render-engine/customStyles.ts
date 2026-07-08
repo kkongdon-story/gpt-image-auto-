@@ -1,5 +1,6 @@
 // noqa: SIZE_OK - v4 release keeps design.md schema, parsing, and examples together; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
 import type { CardnewsError, CardnewsResult } from "../domain/types.js";
+import { isSafeStylePresetRecord, validateStylePresetSafety } from "./styleSafety.js";
 import { findStylePreset, stylePresets, type StylePreset } from "./stylePresets.js";
 
 export type ParsedCustomStyle = {
@@ -138,6 +139,11 @@ export function parseStyleJson(
     ...(scrimStops ? { scrimStops } : {})
   };
 
+  const safetyError = validateStylePresetSafety(preset);
+  if (safetyError) {
+    return invalidInput(safetyError);
+  }
+
   const inkContrast = contrastRatio(preset.ink, preset.textBackdrop);
   if (inkContrast < minimumContrastRatio) {
     warnings.push(
@@ -157,48 +163,7 @@ export function parseStyleJson(
 
 /** main 프로세스가 저장 전 재검증에 쓰는 형태 가드 */
 export function isStylePresetShape(candidate: unknown): candidate is StylePreset {
-  if (typeof candidate !== "object" || candidate === null) {
-    return false;
-  }
-
-  const record = candidate as Record<string, unknown>;
-  const stringFields = [
-    "id",
-    "name",
-    "pageBackground",
-    "textBackdrop",
-    "chromeBackdrop",
-    "ink",
-    "inkSub",
-    "inkMuted",
-    "accentDefault",
-    "badgeBackground",
-    "badgeInk",
-    "fontTitle",
-    "fontBody"
-  ];
-
-  return (
-    stringFields.every((field) => typeof record[field] === "string") &&
-    typeof record["usesPhoto"] === "boolean" &&
-    typeof record["usesSurface"] === "boolean" &&
-    typeof record["defaultDim"] === "number" &&
-    (record["numberInk"] === undefined || typeof record["numberInk"] === "string") &&
-    (record["surfaceLadder"] === undefined || parseStringTuple3(record["surfaceLadder"]) !== undefined) &&
-    (record["inkScale"] === undefined || parseInkScale(record["inkScale"]) !== undefined) &&
-    (record["hairline"] === undefined || typeof record["hairline"] === "string") &&
-    (record["eyebrowStyle"] === undefined ||
-      record["eyebrowStyle"] === "pill" ||
-      record["eyebrowStyle"] === "bar" ||
-      record["eyebrowStyle"] === "plain") &&
-    (record["titleTracking"] === undefined || typeof record["titleTracking"] === "number") &&
-    (record["badgeRadius"] === undefined || typeof record["badgeRadius"] === "string") &&
-    (record["bulletShape"] === undefined ||
-      record["bulletShape"] === "dot" ||
-      record["bulletShape"] === "square" ||
-      record["bulletShape"] === "dash") &&
-    (record["scrimStops"] === undefined || parseStringArray(record["scrimStops"]) !== undefined)
-  );
+  return isSafeStylePresetRecord(candidate);
 }
 
 /** 외부 AI(웹챗봇/바이브코더)에게 줄 스타일 계약 문서를 만든다. */

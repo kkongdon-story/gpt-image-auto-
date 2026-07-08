@@ -45,8 +45,15 @@ import {
 
 const maxCards = 12;
 const defaultHeaderLabel = "MONEY NOTE";
-const defaultFooterAccount = "@kkongdon_story";
-const creatorUrl = "https://www.threads.com/@kkongdon_story";
+const defaultFooterAccount = "kkongdon_story";
+const threadsUrl = "https://www.threads.com/@kkongdon_story";
+const kakaoInquiryUrl = "https://open.kakao.com/me/kkongdon";
+
+function normalizeFooterAccount(value: string): string {
+  const trimmed = value.trim();
+  const withoutAt = trimmed.replace(/^@+/, "").trim();
+  return withoutAt.length > 0 ? withoutAt : defaultFooterAccount;
+}
 
 type InspectorTab = "design" | "content" | "export";
 type CardEditorTab = "content" | "design";
@@ -96,6 +103,24 @@ function layerRect(layer: CardLayer): LayerRect {
 
 function roundLayerValue(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function clampControlNumber(value: number, min: number, max: number): number {
+  const finite = Number.isFinite(value) ? value : min;
+  return Math.min(max, Math.max(min, finite));
+}
+
+function clampIntegerControl(value: number, min: number, max: number): number {
+  return Math.round(clampControlNumber(value, min, max));
+}
+
+function clampLayerFontWeight(value: number): number {
+  return Math.round(clampControlNumber(value, 100, 950) / 50) * 50;
+}
+
+function clampLayerRotation(value: number): number {
+  const rotation = Math.round(clampControlNumber(value, -180, 180));
+  return Object.is(rotation, -0) ? 0 : rotation;
 }
 
 function clampLayerRect(rect: LayerRect): LayerRect {
@@ -402,6 +427,7 @@ function StageCanvas({
     >
       <iframe
         title="selected-card"
+        sandbox="allow-same-origin"
         srcDoc={html}
         scrolling="no"
         style={{
@@ -439,6 +465,7 @@ function StageCanvas({
                 className={`edit-layer-box edit-layer-${layer.kind}${selected ? " selected" : ""}${editing ? " editing" : ""}`}
                 data-smoke-role="layer-box"
                 data-layer-id={layer.id}
+                aria-label={layerLabel(layer)}
                 style={layerStyle(rect)}
                 onPointerDown={(event) => beginMove(event, layer)}
                 onDoubleClick={(event) => {
@@ -449,7 +476,7 @@ function StageCanvas({
                   }
                 }}
               >
-                <span>{layerLabel(layer)}</span>
+                {layer.kind === "text" ? null : <span className="edit-layer-label">{layerLabel(layer)}</span>}
                 {selected
                   ? resizeHandles.map((handle) => (
                       <span
@@ -590,7 +617,7 @@ export function App(): ReactElement {
     () => ({
       id: "preview",
       headerLabel: debouncedHeader.trim() || "CARD NEWS",
-      footerAccount: debouncedFooter.trim() || "@account",
+      footerAccount: normalizeFooterAccount(debouncedFooter) || defaultFooterAccount,
       cards: parsedEntries.map((entry) => entry.card),
       styleId,
       accentColor,
@@ -767,7 +794,7 @@ export function App(): ReactElement {
     readonly selectedIndex?: number;
   }): void {
     setHeaderLabel(snapshot.headerLabel);
-    setFooterAccount(snapshot.footerAccount);
+    setFooterAccount(normalizeFooterAccount(snapshot.footerAccount));
     if (snapshot.styleId.trim().length > 0) {
       setStyleId(snapshot.styleId);
     }
@@ -885,17 +912,21 @@ export function App(): ReactElement {
     setStatus(`배경 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
   }
 
-  async function openCreatorLink(): Promise<void> {
-    const result = await window.cardnews.openExternalLink(creatorUrl);
+  async function openExternalLink(url: string): Promise<void> {
+    const result = await window.cardnews.openExternalLink(url);
     if (isCardnewsError(result)) {
       setStatus(result.message);
     }
   }
 
   function updateSelectedOverride(next: CardOverride): void {
+    updateSelectedOverrideWith((currentOverride) => ({ ...currentOverride, ...next }));
+  }
+
+  function updateSelectedOverrideWith(updater: (currentOverride: CardOverride) => CardOverride): void {
     const key = String(selectedCardNumber);
     setOverrides((current) => {
-      const merged = { ...(current[key] ?? {}), ...next };
+      const merged = updater(current[key] ?? {});
       const updated = { ...current, [key]: merged };
       return removeEmptyOverrides(updated);
     });
@@ -945,14 +976,19 @@ export function App(): ReactElement {
 
   function addLayer(kind: CardLayer["kind"]): void {
     const layer = createLayer(kind);
-    updateSelectedLayers([...selectedLayers, layer]);
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      layers: [...(currentOverride.layers ?? []), layer]
+    }));
     setSelectedLayerId(layer.id);
     setEditMode(true);
-    setInspectorTab("design");
   }
 
   function updateLayer(layerId: string, updater: (layer: CardLayer) => CardLayer): void {
-    updateSelectedLayers(selectedLayers.map((layer) => (layer.id === layerId ? updater(layer) : layer)));
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      layers: (currentOverride.layers ?? []).map((layer) => (layer.id === layerId ? updater(layer) : layer))
+    }));
   }
 
   function updateSelectedLayer(updater: (layer: CardLayer) => CardLayer): void {
@@ -963,7 +999,10 @@ export function App(): ReactElement {
   }
 
   function removeLayer(layerId: string): void {
-    updateSelectedLayers(selectedLayers.filter((layer) => layer.id !== layerId));
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      layers: (currentOverride.layers ?? []).filter((layer) => layer.id !== layerId)
+    }));
     if (selectedLayerId === layerId) {
       setSelectedLayerId(null);
       setEditingLayerId(null);
@@ -975,7 +1014,6 @@ export function App(): ReactElement {
     setSelectedLayerId(layerId);
     if (layerId) {
       setEditMode(true);
-      setInspectorTab("design");
     } else {
       setEditingLayerId(null);
       setEditingLayerText("");
@@ -1071,7 +1109,8 @@ export function App(): ReactElement {
           height: 1,
           zIndex: 4,
           color: accentColor,
-          strokeWidth: 6
+          strokeWidth: 6,
+          rotation: 0
         };
       case "image":
         return {
@@ -1288,7 +1327,7 @@ export function App(): ReactElement {
       setHeaderLabel(parsed.headerLabel);
     }
     if (parsed.footerAccount) {
-      setFooterAccount(parsed.footerAccount);
+      setFooterAccount(normalizeFooterAccount(parsed.footerAccount));
     }
     if (parsed.styleId) {
       setStyleId(parsed.styleId);
@@ -1324,7 +1363,7 @@ export function App(): ReactElement {
     const deckPreset: DeckPreset = {
       name,
       headerLabel,
-      footerAccount,
+      footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
       styleId,
       aspectRatio: aspectRatioId,
       ...(customAccent ? { accentColor: customAccent } : {}),
@@ -1619,7 +1658,7 @@ export function App(): ReactElement {
   function buildDeckDraft(): DeckDraft {
     return {
       headerLabel,
-      footerAccount,
+      footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
       styleId,
       accentColor,
       backgroundDim,
@@ -1637,7 +1676,7 @@ export function App(): ReactElement {
   function buildWorkspaceState(): WorkspaceState {
     return {
       headerLabel,
-      footerAccount,
+      footerAccount: normalizeFooterAccount(footerAccount) || defaultFooterAccount,
       styleId,
       aspectRatio: aspectRatioId,
       ...(customAccent ? { accentColor: customAccent } : {}),
@@ -1689,11 +1728,30 @@ export function App(): ReactElement {
         </label>
         <label className="topbar-field">
           <span>멘션</span>
-          <input value={footerAccount} onChange={(event) => setFooterAccount(event.target.value)} />
+          <input
+            data-smoke-role="mention-input"
+            value={footerAccount}
+            onChange={(event) => setFooterAccount(event.target.value)}
+          />
         </label>
         <div className="topbar-actions">
-          <button type="button" className="credit-pill" onClick={() => void openCreatorLink()}>
-            @kkongdon_story
+          <button
+            type="button"
+            className="credit-pill threads-pill"
+            data-smoke-role="threads-link"
+            aria-label="Threads @kkongdon_story 열기"
+            title="Threads @kkongdon_story"
+            onClick={() => void openExternalLink(threadsUrl)}
+          >
+            @
+          </button>
+          <button
+            type="button"
+            className="ghost inquiry-link"
+            data-smoke-role="kakao-inquiry-link"
+            onClick={() => void openExternalLink(kakaoInquiryUrl)}
+          >
+            AX문의/강의 문의
           </button>
           <button type="button" className="ghost" data-smoke-action="reset-workspace" onClick={resetWorkspace}>
             초기화
@@ -1731,6 +1789,7 @@ export function App(): ReactElement {
               >
                 <iframe
                   title={`card-${index + 1}`}
+                  sandbox="allow-same-origin"
                   srcDoc={html}
                   scrolling="no"
                   tabIndex={-1}
@@ -2141,6 +2200,7 @@ export function App(): ReactElement {
                 <label className="dim-row">
                   <span>배지 간격</span>
                   <input
+                    data-smoke-role="badge-gap-slider"
                     type="range"
                     min={50}
                     max={200}
@@ -2177,10 +2237,10 @@ export function App(): ReactElement {
                     <button type="button" data-smoke-action="add-text-layer" onClick={() => addLayer("text")}>
                       텍스트 박스
                     </button>
-                    <button type="button" onClick={() => addLayer("shape")}>
+                    <button type="button" data-smoke-action="add-shape-layer" onClick={() => addLayer("shape")}>
                       모형
                     </button>
-                    <button type="button" onClick={() => addLayer("line")}>
+                    <button type="button" data-smoke-action="add-line-layer" onClick={() => addLayer("line")}>
                       선
                     </button>
                     <button type="button" onClick={() => addLayer("image")}>
@@ -2188,7 +2248,7 @@ export function App(): ReactElement {
                     </button>
                   </div>
                   {selectedLayer ? (
-                    <div className="selected-layer-panel">
+                    <div className="selected-layer-panel" data-smoke-role={`${selectedLayer.kind}-layer-panel`}>
                       <div className="layer-editor-header">
                         <strong>{layerLabel(selectedLayer)}</strong>
                         <div className="row">
@@ -2224,39 +2284,54 @@ export function App(): ReactElement {
                               )
                             }
                           />
-                          <div className="row">
-                            <input
-                              type="color"
-                              value={selectedLayer.color ?? preset.ink}
-                              onChange={(event) =>
-                                updateSelectedLayer((layer) =>
-                                  layer.kind === "text" ? { ...layer, color: event.target.value } : layer
-                                )
-                              }
-                            />
-                            <input
-                              type="number"
-                              min={10}
-                              max={144}
-                              value={selectedLayer.fontSize ?? 40}
-                              onChange={(event) =>
-                                updateSelectedLayer((layer) =>
-                                  layer.kind === "text" ? { ...layer, fontSize: Number(event.target.value) } : layer
-                                )
-                              }
-                            />
-                            <input
-                              type="number"
-                              min={100}
-                              max={950}
-                              step={50}
-                              value={selectedLayer.fontWeight ?? 700}
-                              onChange={(event) =>
-                                updateSelectedLayer((layer) =>
-                                  layer.kind === "text" ? { ...layer, fontWeight: Number(event.target.value) } : layer
-                                )
-                              }
-                            />
+                          <div className="layer-field-grid three">
+                            <label>
+                              <span>글자 색</span>
+                              <input
+                                type="color"
+                                value={selectedLayer.color ?? preset.ink}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "text" ? { ...layer, color: event.target.value } : layer
+                                  )
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>글자 크기</span>
+                              <input
+                                data-smoke-role="text-layer-font-size"
+                                type="number"
+                                min={10}
+                                max={144}
+                                value={selectedLayer.fontSize ?? 40}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "text"
+                                      ? { ...layer, fontSize: clampIntegerControl(Number(event.target.value), 10, 144) }
+                                      : layer
+                                  )
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>굵기</span>
+                              <input
+                                data-smoke-role="text-layer-font-weight"
+                                type="number"
+                                min={100}
+                                max={950}
+                                step={50}
+                                value={selectedLayer.fontWeight ?? 700}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "text"
+                                      ? { ...layer, fontWeight: clampLayerFontWeight(Number(event.target.value)) }
+                                      : layer
+                                  )
+                                }
+                              />
+                            </label>
                           </div>
                           <div className="row">
                             <label className="check-row compact">
@@ -2272,6 +2347,7 @@ export function App(): ReactElement {
                               <span>기울기</span>
                             </label>
                             <select
+                              data-smoke-role="text-layer-align"
                               value={selectedLayer.align ?? "left"}
                               onChange={(event) =>
                                 updateSelectedLayer((layer) =>
@@ -2297,53 +2373,87 @@ export function App(): ReactElement {
                         </div>
                       ) : null}
                       {selectedLayer.kind === "shape" ? (
-                        <div className="row">
-                          <input
-                            type="color"
-                            value={selectedLayer.fill}
-                            onChange={(event) =>
-                              updateSelectedLayer((layer) =>
-                                layer.kind === "shape" ? { ...layer, fill: event.target.value } : layer
-                              )
-                            }
-                          />
-                          <select
-                            value={selectedLayer.shape}
-                            onChange={(event) =>
-                              updateSelectedLayer((layer) =>
-                                layer.kind === "shape"
-                                  ? { ...layer, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
-                                  : layer
-                              )
-                            }
-                          >
-                            <option value="rect">사각형</option>
-                            <option value="ellipse">타원</option>
-                          </select>
+                        <div className="layer-field-grid two" data-smoke-role="shape-layer-controls">
+                          <label>
+                            <span>도형 색상</span>
+                            <input
+                              data-smoke-role="shape-fill-color"
+                              type="color"
+                              value={selectedLayer.fill}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "shape" ? { ...layer, fill: event.target.value } : layer
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>모양</span>
+                            <select
+                              value={selectedLayer.shape}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "shape"
+                                    ? { ...layer, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
+                                    : layer
+                                )
+                              }
+                            >
+                              <option value="rect">사각형</option>
+                              <option value="ellipse">타원</option>
+                            </select>
+                          </label>
                         </div>
                       ) : null}
                       {selectedLayer.kind === "line" ? (
-                        <div className="row">
-                          <input
-                            type="color"
-                            value={selectedLayer.color}
-                            onChange={(event) =>
-                              updateSelectedLayer((layer) =>
-                                layer.kind === "line" ? { ...layer, color: event.target.value } : layer
-                              )
-                            }
-                          />
-                          <input
-                            type="number"
-                            min={1}
-                            max={40}
-                            value={selectedLayer.strokeWidth ?? 4}
-                            onChange={(event) =>
-                              updateSelectedLayer((layer) =>
-                                layer.kind === "line" ? { ...layer, strokeWidth: Number(event.target.value) } : layer
-                              )
-                            }
-                          />
+                        <div className="layer-field-grid three" data-smoke-role="line-layer-controls">
+                          <label>
+                            <span>선 색상</span>
+                            <input
+                              data-smoke-role="line-color"
+                              type="color"
+                              value={selectedLayer.color}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "line" ? { ...layer, color: event.target.value } : layer
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>선 두께</span>
+                            <input
+                              data-smoke-role="line-stroke-width"
+                              type="number"
+                              min={1}
+                              max={40}
+                              value={selectedLayer.strokeWidth ?? 4}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "line"
+                                    ? { ...layer, strokeWidth: clampIntegerControl(Number(event.target.value), 1, 40) }
+                                    : layer
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>각도</span>
+                            <input
+                              data-smoke-role="line-rotation"
+                              type="number"
+                              min={-180}
+                              max={180}
+                              value={selectedLayer.rotation ?? 0}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "line"
+                                    ? { ...layer, rotation: clampLayerRotation(Number(event.target.value)) }
+                                    : layer
+                                )
+                              }
+                            />
+                          </label>
                         </div>
                       ) : null}
                     </div>
@@ -2418,55 +2528,83 @@ export function App(): ReactElement {
                         />
                       ) : null}
                       {layer.kind === "shape" ? (
-                        <div className="row">
-                          <input
-                            type="color"
-                            value={layer.fill}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) =>
-                                current.kind === "shape" ? { ...current, fill: event.target.value } : current
-                              )
-                            }
-                          />
-                          <select
-                            value={layer.shape}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) =>
-                                current.kind === "shape"
-                                  ? { ...current, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
-                                  : current
-                              )
-                            }
-                          >
-                            <option value="rect">사각형</option>
-                            <option value="ellipse">타원</option>
-                          </select>
+                        <div className="layer-field-grid two">
+                          <label>
+                            <span>도형 색상</span>
+                            <input
+                              type="color"
+                              value={layer.fill}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "shape" ? { ...current, fill: event.target.value } : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>모양</span>
+                            <select
+                              value={layer.shape}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "shape"
+                                    ? { ...current, shape: event.target.value === "ellipse" ? "ellipse" : "rect" }
+                                    : current
+                                )
+                              }
+                            >
+                              <option value="rect">사각형</option>
+                              <option value="ellipse">타원</option>
+                            </select>
+                          </label>
                         </div>
                       ) : null}
                       {layer.kind === "line" ? (
-                        <div className="row">
-                          <input
-                            type="color"
-                            value={layer.color}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) =>
-                                current.kind === "line" ? { ...current, color: event.target.value } : current
-                              )
-                            }
-                          />
-                          <input
-                            type="number"
-                            min={1}
-                            max={40}
-                            value={layer.strokeWidth ?? 4}
-                            onChange={(event) =>
-                              updateLayer(layer.id, (current) =>
-                                current.kind === "line"
-                                  ? { ...current, strokeWidth: Number(event.target.value) }
-                                  : current
-                              )
-                            }
-                          />
+                        <div className="layer-field-grid three">
+                          <label>
+                            <span>선 색상</span>
+                            <input
+                              type="color"
+                              value={layer.color}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line" ? { ...current, color: event.target.value } : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>선 두께</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={40}
+                              value={layer.strokeWidth ?? 4}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? { ...current, strokeWidth: clampIntegerControl(Number(event.target.value), 1, 40) }
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            <span>각도</span>
+                            <input
+                              type="number"
+                              min={-180}
+                              max={180}
+                              value={layer.rotation ?? 0}
+                              onChange={(event) =>
+                                updateLayer(layer.id, (current) =>
+                                  current.kind === "line"
+                                    ? { ...current, rotation: clampLayerRotation(Number(event.target.value)) }
+                                    : current
+                                )
+                              }
+                            />
+                          </label>
                         </div>
                       ) : null}
                       {layer.kind === "image" ? (
@@ -2646,8 +2784,11 @@ export function App(): ReactElement {
               </button>
             </div>
             <p>Creator credit</p>
-            <button type="button" className="credit-link" onClick={() => void openCreatorLink()}>
-              만든 사람 @kkongdon_story
+            <button type="button" className="credit-link" onClick={() => void openExternalLink(threadsUrl)}>
+              Threads @
+            </button>
+            <button type="button" className="ghost" onClick={() => void openExternalLink(kakaoInquiryUrl)}>
+              AX문의/강의 문의
             </button>
           </div>
         </div>

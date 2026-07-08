@@ -82,7 +82,7 @@ export function buildCardHtml(input: CardTemplateInput): string {
     </style>
   </head>
   <body data-card-index="${input.card.index}">
-    <article class="card ${preset.id} ${input.card.type}${hasPhoto ? " has-photo" : ""}${preset.usesPhoto ? " photo-preset" : " solid-preset"}" style="--title-scale: ${textFit.titleScale.toFixed(3)}; --body-scale: ${textFit.bodyScale.toFixed(3)}; --gap-scale: ${textFit.gapScale.toFixed(3)}; --chrome-scale: ${textFit.chromeScale.toFixed(3)};">
+    <article class="card ${preset.id} ${input.card.type}${hasPhoto ? " has-photo" : ""}${preset.usesPhoto ? " photo-preset" : " solid-preset"}" style="--title-scale: ${textFit.titleScale.toFixed(3)}; --body-scale: ${textFit.bodyScale.toFixed(3)}; --gap-scale: ${textFit.gapScale.toFixed(3)}; --chrome-scale: ${textFit.chromeScale.toFixed(3)}; --gap-badge-scale: ${theme.layout.gapBadge.toFixed(3)}; --gap-subtitle-scale: ${theme.layout.gapSubtitle.toFixed(3)};">
       ${photoLayer}
       ${renderLayers(theme, input.assetCssUrls ?? {})}
       <div class="chrome header">
@@ -183,6 +183,8 @@ function buildCss(theme: ResolvedTheme): string {
         --title-scale: 1;
         --body-scale: 1;
         --gap-scale: 1;
+        --gap-badge-scale: 1;
+        --gap-subtitle-scale: 1;
         --chrome-scale: 1;
         background: ${pageBackground};
         color: var(--ink-body);
@@ -250,12 +252,15 @@ function buildCss(theme: ResolvedTheme): string {
         border-left: ${badge.borderLeft};
         border-radius: ${badge.radius};
         color: ${badge.color};
+        display: block;
         font-size: calc(26px * var(--body-scale));
         font-weight: 800;
         letter-spacing: 0.14em;
-        margin-bottom: calc(${Math.round(40 * layout.gapBadge)}px * var(--gap-scale));
+        margin-bottom: calc(40px * var(--gap-scale) * var(--gap-badge-scale));
+        max-width: 100%;
         padding: ${badge.padding};
         text-transform: uppercase;
+        width: fit-content;
       }
       .big-number {
         color: ${preset.numberInk ?? accent};
@@ -288,7 +293,7 @@ function buildCss(theme: ResolvedTheme): string {
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 700};
         line-height: 1.35;
-        margin-top: calc(${Math.round(36 * layout.gapSubtitle)}px * var(--gap-scale));
+        margin-top: calc(36px * var(--gap-scale) * var(--gap-subtitle-scale));
         overflow-wrap: anywhere;
         word-break: keep-all;
       }
@@ -300,7 +305,7 @@ function buildCss(theme: ResolvedTheme): string {
         font-weight: ${theme.typography.weight ?? 600};
         gap: calc(24px * var(--gap-scale));
         line-height: 1.58;
-        margin-top: calc(${Math.round(44 * layout.gapSubtitle)}px * var(--gap-scale));
+        margin-top: calc(44px * var(--gap-scale) * var(--gap-subtitle-scale));
         overflow-wrap: anywhere;
         word-break: keep-all;
       }
@@ -309,7 +314,7 @@ function buildCss(theme: ResolvedTheme): string {
         display: grid;
         gap: calc(24px * var(--gap-scale));
         list-style: none;
-        margin: calc(${Math.round(44 * layout.gapSubtitle)}px * var(--gap-scale)) 0 0;
+        margin: calc(44px * var(--gap-scale) * var(--gap-subtitle-scale)) 0 0;
         padding: 0;
       }
       .bullets li {
@@ -402,7 +407,8 @@ function renderLayer(
       const align = layer.align ?? "left";
       const justify = align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start";
       const backdrop = background === "transparent" ? theme.preset.textBackdrop : background;
-      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${baseStyle} color: ${color}; background: ${background}; font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody}; font-size: ${fontSize}px; font-style: ${layer.italic === true ? "italic" : "normal"}; font-weight: ${fontWeight}; justify-content: ${justify}; text-align: ${align};">${escapeHtml(layer.text)}</div>`;
+      const style = `${baseStyle} color: ${color}; background: ${background}; font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody}; font-size: ${fontSize}px; font-style: ${layer.italic === true ? "italic" : "normal"}; font-weight: ${fontWeight}; justify-content: ${justify}; text-align: ${align};`;
+      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${escapeHtml(style)}">${escapeHtml(layer.text)}</div>`;
     }
     case "shape": {
       const fill = normalizeHexColor(layer.fill) ?? withAlpha(theme.accent, 0.28);
@@ -414,7 +420,10 @@ function renderLayer(
     case "line": {
       const color = normalizeHexColor(layer.color) ?? theme.accent;
       const strokeWidth = Math.round(clampRange(layer.strokeWidth ?? 4, 1, 40));
-      return `<div class="layer layer-line" style="${baseStyle} background: ${color}; height: ${strokeWidth}px;"></div>`;
+      const rotation = clampLayerRotation(layer.rotation ?? 0);
+      const rotationStyle =
+        rotation === 0 ? "" : ` transform: rotate(${rotation}deg); transform-origin: center;`;
+      return `<div class="layer layer-line" style="${baseStyle}${rotationStyle} background: ${color}; height: ${strokeWidth}px;"></div>`;
     }
     case "image": {
       const source = assetCssUrls[layer.backgroundId];
@@ -645,7 +654,8 @@ function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly Car
           ...base,
           kind: "line",
           color: layer.color,
-          ...(layer.strokeWidth !== undefined ? { strokeWidth: clampRange(layer.strokeWidth, 1, 40) } : {})
+          ...(layer.strokeWidth !== undefined ? { strokeWidth: clampRange(layer.strokeWidth, 1, 40) } : {}),
+          ...(layer.rotation !== undefined ? { rotation: clampLayerRotation(layer.rotation) } : {})
         };
       case "image":
         return {
@@ -781,6 +791,11 @@ function clampRange(value: number, minimum: number, maximum: number): number {
   }
 
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function clampLayerRotation(value: number): number {
+  const rotation = Math.round(clampRange(value, -180, 180));
+  return Object.is(rotation, -0) ? 0 : rotation;
 }
 
 function withAlpha(hexColor: string, alpha: number): string {

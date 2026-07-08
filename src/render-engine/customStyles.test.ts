@@ -78,6 +78,36 @@ describe("parseStyleJson", () => {
     expect(isCardnewsError(parseStyleJson("이건 JSON이 아님", []))).toBe(true);
   });
 
+  it("rejects style-block breakouts in custom CSS fields", () => {
+    const scriptBreakout = {
+      ...validStyle,
+      pageBackground: "#ffffff</style><script>window.evil=true</script>"
+    };
+    const fontBreakout = {
+      ...validStyle,
+      fontBody: '"Pretendard"; }</style><script>window.evil=true</script>'
+    };
+
+    expect(isCardnewsError(parseStyleJson(JSON.stringify(scriptBreakout), []))).toBe(true);
+    expect(isCardnewsError(parseStyleJson(JSON.stringify(fontBreakout), []))).toBe(true);
+    expect(isStylePresetShape({ ...scriptBreakout, id: "custom-evil" })).toBe(false);
+  });
+
+  it("rejects URL and import based CSS injection in custom style records", () => {
+    const externalCss = {
+      ...validStyle,
+      badgeBackground: 'url("https://example.com/track")'
+    };
+    const importedCss = {
+      ...validStyle,
+      pageBackground: "linear-gradient(180deg, #ffffff 0%, #000000 100%) @import test"
+    };
+
+    expect(isCardnewsError(parseStyleJson(JSON.stringify(externalCss), []))).toBe(true);
+    expect(isCardnewsError(parseStyleJson(JSON.stringify(importedCss), []))).toBe(true);
+    expect(isStylePresetShape({ ...externalCss, id: "custom-url" })).toBe(false);
+  });
+
   it("warns when ink contrast against textBackdrop is below 4.5:1", () => {
     const lowContrast = { ...validStyle, ink: "#9a4a62", inkSub: "#9a4a62" };
     const { warnings } = expectParsed(parseStyleJson(JSON.stringify(lowContrast), []));

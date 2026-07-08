@@ -31,6 +31,7 @@ import type {
 } from "../src/domain/types.js";
 import { buildFontFaceCss } from "../src/render-engine/cardTemplate.js";
 import { renderDeckOffscreen } from "../src/render-engine/offscreenRenderer.js";
+import { isSafeStylePresetRecord } from "../src/render-engine/styleSafety.js";
 import { stylePresets } from "../src/render-engine/stylePresets.js";
 import {
   addBackgroundToLibrary,
@@ -72,7 +73,7 @@ const devServerUrl = process.env["VITE_DEV_SERVER_URL"];
 const smokeScreenshotPath = process.env["CARDNEWS_SMOKE_SCREENSHOT"];
 const smokeTextPath = process.env["CARDNEWS_SMOKE_TEXT"];
 const smokeAction = process.env["CARDNEWS_SMOKE_ACTION"];
-const allowedCreatorUrl = "https://www.threads.com/@kkongdon_story";
+const allowedExternalUrls = new Set(["https://www.threads.com/@kkongdon_story", "https://open.kakao.com/me/kkongdon"]);
 let selectedStyleReferenceImages: readonly StoredLocalImage[] = [];
 let approvedStyleProfile: StyleProfile | undefined;
 
@@ -334,6 +335,8 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       return await runProjectRoundtripSmoke(mainWindow);
     case "edit-layer":
       return await runLayerEditSmoke(mainWindow);
+    case "layer-controls-regression":
+      return await runLayerControlsRegressionSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
@@ -453,7 +456,7 @@ async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeAction
           }
           await delay(80);
         }
-        throw new Error(description);
+        throw new Error(typeof description === "function" ? description() : description);
       };
 
       window.confirm = () => true;
@@ -541,6 +544,388 @@ async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeAction
   }
 
   await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  return await readRenderSmokeResult(mainWindow);
+}
+
+async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Layer controls smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Layer controls smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(150);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter for " + element.tagName);
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readIframeLayerStyle = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        const iframeDocument = iframe.contentDocument;
+        const textLayer = iframe.contentDocument.querySelector(".layer-text");
+        if (!textLayer || !("style" in textLayer)) {
+          return null;
+        }
+        const article = iframeDocument.querySelector("article.card");
+        if (!article || !("style" in article)) {
+          throw new Error("Preview article was not rendered.");
+        }
+        const badge = iframeDocument.querySelector(".badge");
+        const title = iframeDocument.querySelector("h1");
+        const footer = iframeDocument.querySelector('[data-slot="footer"]');
+        const badgeTitleGap =
+          badge && title
+            ? Math.round((title.getBoundingClientRect().top - badge.getBoundingClientRect().bottom) * 100) / 100
+            : null;
+        const lineLayer = iframeDocument.querySelector(".layer-line");
+        const computedStyle = iframe.contentWindow?.getComputedStyle(textLayer);
+        const lineStyle = lineLayer && iframe.contentWindow ? iframe.contentWindow.getComputedStyle(lineLayer) : null;
+        return {
+          badgeScale: article.style.getPropertyValue("--gap-badge-scale").trim(),
+          badgeTitleGap,
+          fontSize: computedStyle?.fontSize ?? "",
+          fontWeight: computedStyle?.fontWeight ?? "",
+          footerText: footer?.textContent?.trim() ?? "",
+          hasBadge: Boolean(badge),
+          iframeTitle: title?.textContent ?? "",
+          lineStyleAttribute: lineLayer?.getAttribute("style") ?? "",
+          lineLayerCount: iframeDocument.querySelectorAll(".layer-line").length,
+          lineTransform: lineStyle?.transform ?? "",
+          srcDocHasLine: iframe.srcdoc.includes("layer-line"),
+          styleAttribute: textLayer.getAttribute("style") ?? "",
+          textAlign: computedStyle?.textAlign ?? ""
+        };
+      };
+      const readIframeFooterText = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        return iframe.contentDocument.querySelector('[data-slot="footer"]')?.textContent?.trim() ?? "";
+      };
+      const layerDiagnostics = (lastTextStyle = null) => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        const iframeDocument = iframe instanceof HTMLIFrameElement ? iframe.contentDocument : null;
+        return {
+          iframeHasLayerInSrcDoc: iframe instanceof HTMLIFrameElement ? iframe.srcdoc.includes("layer-text") : false,
+          iframeTextLayerCount: iframeDocument ? iframeDocument.querySelectorAll(".layer-text").length : -1,
+          lastTextStyle,
+          overlayLayerCount: document.querySelectorAll('[data-smoke-role="layer-box"]').length,
+          selectedPanelText: document.querySelector('[data-smoke-role="text-layer-panel"]')?.textContent ?? ""
+        };
+      };
+
+      window.confirm = () => true;
+      await delay(1200);
+      const threadsLink = await waitFor('[data-smoke-role="threads-link"]');
+      const kakaoLink = await waitFor('[data-smoke-role="kakao-inquiry-link"]');
+      const threadsLinkText = threadsLink.textContent?.trim() ?? "";
+      const kakaoLinkText = kakaoLink.textContent?.trim() ?? "";
+      const mentionInput = Array.from(document.querySelectorAll(".topbar-field"))
+        .find((field) => (field.textContent ?? "").includes("멘션"))
+        ?.querySelector("input");
+      if (!(mentionInput instanceof HTMLInputElement)) {
+        throw new Error("Mention input was not found.");
+      }
+      const defaultMentionValue = mentionInput.value;
+      setNativeValue(mentionInput, "@");
+      await waitUntil(
+        () => readIframeFooterText() === "kkongdon_story",
+        () => "Preview footer did not normalize @ mention: " + readIframeFooterText()
+      );
+      const normalizedPreviewFooter = readIframeFooterText();
+      const styleSelect = await waitFor(".topbar-style-select");
+      if (!(styleSelect instanceof HTMLSelectElement)) {
+        throw new Error("Style select was not found.");
+      }
+      const expectedStyleNames = [
+        "웜 스튜디오 (사진)",
+        "볼드 옐로우 캐러셀 (사진)",
+        "오렌지 체크 카드",
+        "블루 체크 리스트",
+        "솔로프리너 블랙 (사진)"
+      ];
+      const styleOptionTexts = Array.from(styleSelect.options).map((option) => option.textContent?.trim() ?? "");
+      const missingStyleNames = expectedStyleNames.filter(
+        (name) => !styleOptionTexts.some((text) => text.includes(name))
+      );
+      const selectedThumb = await waitFor(".slide-thumb.active");
+      const selectedThumbCanvas = selectedThumb.querySelector(".thumb-canvas");
+      if (!(selectedThumb instanceof HTMLElement) || !(selectedThumbCanvas instanceof HTMLElement)) {
+        throw new Error("Selected thumbnail was not available.");
+      }
+      const thumbRect = selectedThumb.getBoundingClientRect();
+      const thumbCanvasRect = selectedThumbCanvas.getBoundingClientRect();
+      const thumbnailCenterDelta =
+        Math.round(
+          (((thumbCanvasRect.left + thumbCanvasRect.right) / 2 - (thumbRect.left + thumbRect.right) / 2) * 100)
+        ) / 100;
+      await clickAction("reset-workspace");
+      await delay(350);
+      if (!document.querySelector(".edit-overlay")) {
+        await clickAction("toggle-edit-mode");
+      }
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await clickAction("add-text-layer");
+
+      let box = await waitFor('[data-smoke-role="layer-box"]');
+      const overlay = await waitFor(".edit-overlay");
+      const overlayText = overlay.innerText;
+      const noOverlayTextDuplicate = !overlayText.includes("텍스트 입력");
+
+      const before = box.getBoundingClientRect();
+      const startX = before.left + Math.min(24, Math.max(8, before.width / 2));
+      const startY = before.top + Math.min(24, Math.max(8, before.height / 2));
+      box.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerId: 71,
+        clientX: startX,
+        clientY: startY,
+        buttons: 1
+      }));
+      const dragDeltaY = 150;
+      overlay.dispatchEvent(new PointerEvent("pointermove", {
+        bubbles: true,
+        pointerId: 71,
+        clientX: startX + 10,
+        clientY: startY + dragDeltaY,
+        buttons: 1,
+        shiftKey: true
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true,
+        pointerId: 71,
+        clientX: startX + 10,
+        clientY: startY + dragDeltaY,
+        buttons: 0
+      }));
+      await delay(250);
+
+      const fontSizeInput = await waitFor('[data-smoke-role="text-layer-font-size"]');
+      const fontWeightInput = await waitFor('[data-smoke-role="text-layer-font-weight"]');
+      const alignSelect = await waitFor('[data-smoke-role="text-layer-align"]');
+      if (
+        !(fontSizeInput instanceof HTMLInputElement) ||
+        !(fontWeightInput instanceof HTMLInputElement) ||
+        !(alignSelect instanceof HTMLSelectElement)
+      ) {
+        throw new Error("Text layer controls were not typed inputs/selects.");
+      }
+      setNativeValue(fontSizeInput, 80);
+      setNativeValue(fontWeightInput, 80000);
+      setNativeValue(alignSelect, "right");
+      await waitUntil(
+        () => fontSizeInput.value === "80" && fontWeightInput.value === "950" && alignSelect.value === "right",
+        "Text layer controls did not clamp/update."
+      );
+      let lastTextStyle = null;
+      await waitUntil(
+        () => {
+          lastTextStyle = readIframeLayerStyle();
+          return lastTextStyle?.fontSize === "80px" && lastTextStyle.fontWeight === "950" && lastTextStyle.textAlign === "right";
+        },
+        () => "Text layer preview style did not update: " + JSON.stringify(layerDiagnostics(lastTextStyle))
+      );
+      const textStyle = readIframeLayerStyle();
+      if (!textStyle) {
+        throw new Error("Text layer was not rendered inside preview iframe.");
+      }
+
+      await clickAction("inspector-content");
+      box = await waitFor('[data-smoke-role="layer-box"]');
+      const activeBefore = document.querySelector('[data-smoke-action="inspector-content"]')?.classList.contains("active") === true;
+      const clickPoint = box.getBoundingClientRect();
+      box.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerId: 72,
+        clientX: clickPoint.left + 10,
+        clientY: clickPoint.top + 10,
+        buttons: 1
+      }));
+      overlay.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true,
+        pointerId: 72,
+        clientX: clickPoint.left + 10,
+        clientY: clickPoint.top + 10,
+        buttons: 0
+      }));
+      await delay(150);
+      const contentTabStillActive =
+        activeBefore &&
+        document.querySelector('[data-smoke-action="inspector-content"]')?.classList.contains("active") === true;
+
+      await clickAction("card-design-tab");
+      await clickAction("add-shape-layer");
+      const shapeControls = await waitFor('[data-smoke-role="shape-layer-controls"]');
+      const shapeLabelText = shapeControls.textContent ?? "";
+      await clickAction("add-line-layer");
+      const lineControls = await waitFor('[data-smoke-role="line-layer-controls"]');
+      const lineLabelText = lineControls.textContent ?? "";
+      const noShapeControlsForLine = document.querySelector('[data-smoke-role="shape-layer-controls"]') === null;
+      const lineRotationInput = await waitFor('[data-smoke-role="line-rotation"]');
+      if (!(lineRotationInput instanceof HTMLInputElement)) {
+        throw new Error("Line rotation control was not an input.");
+      }
+      setNativeValue(lineRotationInput, 90);
+      await waitUntil(() => lineRotationInput.value === "90", "Line rotation input did not update.");
+      await waitUntil(
+        () => readIframeLayerStyle()?.lineStyleAttribute.includes("rotate(90deg)") === true,
+        () => "Line preview style did not rotate: " + JSON.stringify(readIframeLayerStyle())
+      );
+      const selectedLineOverlay = document.querySelector(".edit-layer-line.selected");
+      if (!(selectedLineOverlay instanceof HTMLElement)) {
+        throw new Error("Selected line overlay was not found.");
+      }
+      const lineOverlayTransform = window.getComputedStyle(selectedLineOverlay).transform;
+      const rotatedLineStyle = readIframeLayerStyle();
+
+      const badgeSlider = await waitFor('[data-smoke-role="badge-gap-slider"]');
+      if (!(badgeSlider instanceof HTMLInputElement)) {
+        throw new Error("Badge gap slider was not an input.");
+      }
+      setNativeValue(badgeSlider, 50);
+      await waitUntil(() => badgeSlider.value === "50", "Badge gap slider did not reach minimum test value.");
+      await waitUntil(() => readIframeLayerStyle()?.badgeScale === "0.500", "Badge gap minimum preview style did not update.");
+      const badgeGapBefore = readIframeLayerStyle()?.badgeTitleGap;
+      setNativeValue(badgeSlider, 180);
+      await waitUntil(() => badgeSlider.value === "180", "Badge gap slider did not update.");
+      await waitUntil(() => readIframeLayerStyle()?.badgeScale === "1.800", "Badge gap preview style did not update.");
+      const badgeStyle = readIframeLayerStyle();
+      if (!badgeStyle) {
+        throw new Error("Text layer disappeared from preview iframe.");
+      }
+      const badgeGapAfter = badgeStyle.badgeTitleGap;
+
+      const evidence = {
+        badgeScale: badgeStyle.badgeScale,
+        badgeTitleGapAfter: badgeGapAfter,
+        badgeTitleGapBefore: badgeGapBefore,
+        badgeTitleGapDelta:
+          typeof badgeGapBefore === "number" && typeof badgeGapAfter === "number"
+            ? Math.round((badgeGapAfter - badgeGapBefore) * 100) / 100
+            : null,
+        contentTabStillActive,
+        defaultMentionValue,
+        fontWeightInputValue: fontWeightInput.value,
+        kakaoLinkText,
+        lineLabelText,
+        lineOverlayTransform,
+        lineRotationInputValue: lineRotationInput.value,
+        lineStyleAttribute: rotatedLineStyle?.lineStyleAttribute ?? "",
+        missingStyleNames,
+        noOverlayTextDuplicate,
+        noShapeControlsForLine,
+        shapeLabelText,
+        styleOptionTexts,
+        thumbnailCenterDelta,
+        threadsLinkText,
+        normalizedPreviewFooter,
+        textStyle
+      };
+      const pre = document.createElement("pre");
+      pre.id = "layer-controls-regression-result";
+      pre.textContent = "LAYER_CONTROLS_REGRESSION_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+
+      const generate = await waitFor('[data-smoke-action="generate"]');
+      if (!(generate instanceof HTMLButtonElement)) {
+        throw new Error("Layer controls render button was not available.");
+      }
+      generate.click();
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Layer controls smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const textStyle = record["textStyle"] as Record<string, unknown> | undefined;
+  const lineLabelText = typeof record["lineLabelText"] === "string" ? record["lineLabelText"] : "";
+  const shapeLabelText = typeof record["shapeLabelText"] === "string" ? record["shapeLabelText"] : "";
+  const badgeTitleGapBefore = typeof record["badgeTitleGapBefore"] === "number" ? record["badgeTitleGapBefore"] : null;
+  const badgeTitleGapAfter = typeof record["badgeTitleGapAfter"] === "number" ? record["badgeTitleGapAfter"] : null;
+  const lineStyleAttribute = typeof record["lineStyleAttribute"] === "string" ? record["lineStyleAttribute"] : "";
+  const missingStyleNames = Array.isArray(record["missingStyleNames"])
+    ? record["missingStyleNames"]
+    : ["style smoke result missing"];
+  const thumbnailCenterDelta =
+    typeof record["thumbnailCenterDelta"] === "number" ? record["thumbnailCenterDelta"] : Number.POSITIVE_INFINITY;
+  const lineOverlayTransform =
+    typeof record["lineOverlayTransform"] === "string" ? record["lineOverlayTransform"] : "";
+  const failed =
+    record["noOverlayTextDuplicate"] !== true ||
+    record["contentTabStillActive"] !== true ||
+    record["defaultMentionValue"] !== "kkongdon_story" ||
+    record["normalizedPreviewFooter"] !== "kkongdon_story" ||
+    missingStyleNames.length > 0 ||
+    Math.abs(thumbnailCenterDelta) > 2 ||
+    (lineOverlayTransform !== "" && lineOverlayTransform !== "none") ||
+    record["fontWeightInputValue"] !== "950" ||
+    textStyle?.["fontSize"] !== "80px" ||
+    textStyle?.["fontWeight"] !== "950" ||
+    textStyle?.["textAlign"] !== "right" ||
+    record["noShapeControlsForLine"] !== true ||
+    !shapeLabelText.includes("도형 색상") ||
+    !lineLabelText.includes("선 색상") ||
+    !lineLabelText.includes("선 두께") ||
+    !lineLabelText.includes("각도") ||
+    record["lineRotationInputValue"] !== "90" ||
+    !lineStyleAttribute.includes("rotate(90deg)") ||
+    record["badgeScale"] !== "1.800";
+  const badgeGapFailed =
+    badgeTitleGapBefore === null || badgeTitleGapAfter === null || badgeTitleGapAfter <= badgeTitleGapBefore + 30;
+  const linkFailed = record["threadsLinkText"] !== "@" || record["kakaoLinkText"] !== "AX문의/강의 문의";
+
+  if (failed || badgeGapFailed || linkFailed) {
+    return { ok: false, message: `Layer controls smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  const savedDeck = await loadDeck(storageRoot(), currentDeckId);
+  if (isCardnewsError(savedDeck)) {
+    return savedDeck;
+  }
+  if (savedDeck.footerAccount !== "kkongdon_story") {
+    return { ok: false, message: `Saved deck footer was not normalized: ${savedDeck.footerAccount}` };
+  }
   return await readRenderSmokeResult(mainWindow);
 }
 
@@ -955,7 +1340,8 @@ function isCardLayer(input: unknown): boolean {
     case "line":
       return (
         typeof record["color"] === "string" &&
-        (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number")
+        (record["strokeWidth"] === undefined || typeof record["strokeWidth"] === "number") &&
+        (record["rotation"] === undefined || typeof record["rotation"] === "number")
       );
     case "image":
       return (
@@ -991,34 +1377,7 @@ function isStyleProfile(input: unknown): input is StyleProfile {
 }
 
 function isStylePresetRecord(input: unknown): input is StylePresetRecord {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return false;
-  }
-
-  const record = input as Record<string, unknown>;
-  const stringFields = [
-    "id",
-    "name",
-    "pageBackground",
-    "textBackdrop",
-    "chromeBackdrop",
-    "ink",
-    "inkSub",
-    "inkMuted",
-    "accentDefault",
-    "badgeBackground",
-    "badgeInk",
-    "fontTitle",
-    "fontBody"
-  ];
-
-  return (
-    stringFields.every((field) => typeof record[field] === "string") &&
-    typeof record["usesPhoto"] === "boolean" &&
-    typeof record["usesSurface"] === "boolean" &&
-    typeof record["defaultDim"] === "number" &&
-    (record["numberInk"] === undefined || typeof record["numberInk"] === "string")
-  );
+  return isSafeStylePresetRecord(input);
 }
 
 function isAppSettings(input: unknown): input is AppSettings {
@@ -1818,11 +2177,11 @@ app.whenReady().then(() => {
     return error.length > 0 ? invalidInput(error) : undefined;
   });
   ipcMain.handle("cardnews:openExternalLink", async (_event, url: unknown) => {
-    if (url !== allowedCreatorUrl) {
+    if (typeof url !== "string" || !allowedExternalUrls.has(url)) {
       return invalidInput("허용되지 않은 외부 링크입니다.");
     }
 
-    await shell.openExternal(allowedCreatorUrl);
+    await shell.openExternal(url);
     return undefined;
   });
 

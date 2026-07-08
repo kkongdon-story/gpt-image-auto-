@@ -251,6 +251,36 @@ describe("buildCardHtml (aspect ratio + font)", () => {
     expect(html).toContain("font-size: 40px");
     expect(html).toContain('data-font-size="40"');
     expect(html).toContain(`data-background-color="${backdrop}"`);
+    const styleAttribute = html.match(/class="layer layer-text"[^>]*style="([^"]*)"/)?.[1] ?? "";
+    expect(styleAttribute).toContain("&quot;Pretendard&quot;");
+    expect(styleAttribute).toContain("font-size: 40px");
+  });
+
+  it("renders line layers with rotation for vertical guides", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({ styleId: "minimal" }),
+      override: {
+        layers: [
+          {
+            id: "vertical-line",
+            kind: "line",
+            x: 40,
+            y: 20,
+            width: 30,
+            height: 1,
+            color: "#111111",
+            strokeWidth: 5,
+            rotation: 90
+          }
+        ]
+      }
+    });
+
+    expect(html).toContain('class="layer layer-line"');
+    expect(html).toContain("transform: rotate(90deg)");
+    expect(html).toContain("transform-origin: center");
   });
 
   it("applies per-card image and layout overrides deterministically", () => {
@@ -268,8 +298,12 @@ describe("buildCardHtml (aspect ratio + font)", () => {
     expect(html).toContain("brightness(1.25) contrast(0.90) saturate(1.40)");
     expect(html).toContain("text-align: center");
     expect(html).toContain("transform: translateY(-8.00%)");
-    expect(html).toContain("margin-bottom: calc(60px * var(--gap-scale))");
-    expect(html).toContain("margin-top: calc(27px * var(--gap-scale))");
+    expect(html).toContain("--gap-badge-scale: 1.500");
+    expect(html).toContain("--gap-subtitle-scale: 0.750");
+    expect(html).toContain("display: block;");
+    expect(html).toContain("margin-bottom: calc(40px * var(--gap-scale) * var(--gap-badge-scale))");
+    expect(html).toContain("width: fit-content;");
+    expect(html).toContain("margin-top: calc(36px * var(--gap-scale) * var(--gap-subtitle-scale))");
   });
 
   it("resolves custom styles by id before falling back to built-ins", () => {

@@ -23,6 +23,7 @@ import type {
   StyleProfile,
   WorkspaceState
 } from "../domain/types.js";
+import { isSafeStylePresetRecord } from "../render-engine/styleSafety.js";
 
 export type StoredLocalImage = {
   readonly absolutePath: string;
@@ -76,7 +77,7 @@ export function buildDeckFromDraft(
   const deck: Deck = {
     id: deckId,
     headerLabel: normalizeRequiredText(input.headerLabel, "MONEY NOTE"),
-    footerAccount: normalizeRequiredText(input.footerAccount, "@kkongdon_story"),
+    footerAccount: normalizeFooterAccount(input.footerAccount),
     cards,
     ...(styleProfile ? { styleProfile } : {}),
     ...(input.styleId ? { styleId: input.styleId } : {}),
@@ -262,7 +263,7 @@ function parseStoredDeck(deckText: string): CardnewsResult<Deck> {
   return {
     id: parsed.id,
     headerLabel: parsed.headerLabel,
-    footerAccount: parsed.footerAccount,
+    footerAccount: normalizeFooterAccount(parsed.footerAccount),
     cards,
     ...("styleProfile" in parsed && isStyleProfile(parsed.styleProfile)
       ? { styleProfile: parsed.styleProfile }
@@ -516,6 +517,11 @@ async function pathExists(candidatePath: string): Promise<boolean> {
 function normalizeRequiredText(value: string, fallback: string): string {
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : fallback;
+}
+
+function normalizeFooterAccount(value: string): string {
+  const normalized = normalizeRequiredText(value, "kkongdon_story").replace(/^@+/, "").trim();
+  return normalized.length > 0 ? normalized : "kkongdon_story";
 }
 
 // ── 배경 라이브러리 ────────────────────────────────────────────────
@@ -829,34 +835,7 @@ async function writeCustomStyles(
 }
 
 function isStylePresetRecord(candidate: unknown): candidate is StylePresetRecord {
-  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
-    return false;
-  }
-
-  const record = candidate as Record<string, unknown>;
-  const stringFields = [
-    "id",
-    "name",
-    "pageBackground",
-    "textBackdrop",
-    "chromeBackdrop",
-    "ink",
-    "inkSub",
-    "inkMuted",
-    "accentDefault",
-    "badgeBackground",
-    "badgeInk",
-    "fontTitle",
-    "fontBody"
-  ];
-
-  return (
-    stringFields.every((field) => typeof record[field] === "string") &&
-    typeof record["usesPhoto"] === "boolean" &&
-    typeof record["usesSurface"] === "boolean" &&
-    typeof record["defaultDim"] === "number" &&
-    (record["numberInk"] === undefined || typeof record["numberInk"] === "string")
-  );
+  return isSafeStylePresetRecord(candidate);
 }
 
 // ── 양식 프리셋 ────────────────────────────────────────────────────

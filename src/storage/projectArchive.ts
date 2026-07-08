@@ -13,6 +13,7 @@ import type {
   StylePresetRecord,
   WorkspaceState
 } from "../domain/types.js";
+import { isSafeStylePresetRecord } from "../render-engine/styleSafety.js";
 import { isDeckPreset, isWorkspaceState } from "./deckStore.js";
 
 export type ProjectBackgroundAsset = {
@@ -593,33 +594,7 @@ function isStoredFontEntry(candidate: unknown): candidate is StoredFontEntry {
 }
 
 function isStylePresetRecord(candidate: unknown): candidate is StylePresetRecord {
-  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
-    return false;
-  }
-
-  const record = candidate as Record<string, unknown>;
-  const stringFields = [
-    "id",
-    "name",
-    "pageBackground",
-    "textBackdrop",
-    "chromeBackdrop",
-    "ink",
-    "inkSub",
-    "inkMuted",
-    "accentDefault",
-    "badgeBackground",
-    "badgeInk",
-    "fontTitle",
-    "fontBody"
-  ];
-
-  return (
-    stringFields.every((field) => typeof record[field] === "string") &&
-    typeof record["usesPhoto"] === "boolean" &&
-    typeof record["usesSurface"] === "boolean" &&
-    typeof record["defaultDim"] === "number"
-  );
+  return isSafeStylePresetRecord(candidate);
 }
 
 function isImageExtension(value: unknown): boolean {

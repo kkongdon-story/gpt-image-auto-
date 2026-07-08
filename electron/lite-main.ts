@@ -165,6 +165,8 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
   switch (smokeAction) {
     case "edition-lite-regression":
       return await runEditionLiteRegressionSmoke(mainWindow);
+    case "edition-lite-basic-flow":
+      return await runEditionLiteBasicFlowSmoke(mainWindow);
     default:
       return { ok: false, message: `Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction ?? ""}` };
   }
@@ -173,8 +175,51 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
 async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
   const result = await mainWindow.webContents.executeJavaScript(`
     (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (selector) => {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          const node = document.querySelector(selector);
+          if (node) {
+            return node;
+          }
+          await wait(50);
+        }
+        throw new Error("Missing selector: " + selector);
+      };
+
       const editionResult = await window.cardnews.getEdition();
       const lockedResult = await window.cardnews.requestLockedFeature("bulk_csv");
+      const root = await waitFor('[data-smoke-edition="lite"]');
+      const contentTab = await waitFor('[data-smoke-action="inspector-content"]');
+      contentTab.click();
+      await wait(80);
+      const designTab = await waitFor('[data-smoke-action="card-design-tab"]');
+      designTab.click();
+      await wait(80);
+      const exportTab = await waitFor('[data-smoke-action="inspector-export"]');
+      exportTab.click();
+      await wait(80);
+
+      const requiredLocks = [
+        "card_design",
+        "chrome_style",
+        "overlay_edit",
+        "badge_image",
+        "next_hint_image",
+        "project_file",
+        "bulk_csv",
+        "ai_panel"
+      ];
+      const renderedLocks = Array.from(document.querySelectorAll('[data-smoke-role="edition-lock"]'))
+        .map((node) => node.getAttribute("data-smoke-feature"))
+        .filter(Boolean);
+      const missingLocks = requiredLocks.filter((featureCode) => !renderedLocks.includes(featureCode));
+      const lockButton = document.querySelector('[data-smoke-action="locked-bulk_csv"]');
+      if (lockButton instanceof HTMLButtonElement) {
+        lockButton.click();
+        await wait(80);
+      }
+
       const proKeys = [
         "render" + "Bulk" + "Csv",
         "remove" + "Image" + "Background",
@@ -182,8 +227,17 @@ async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise
       ];
       return {
         editionResult,
+        rootEdition: root.getAttribute("data-smoke-edition"),
         lockedResult,
-        hasLock: Boolean(document.querySelector('[data-smoke-role="edition-lock"]')),
+        hasRail: Boolean(document.querySelector(".slide-rail .slide-thumb")),
+        hasStagePreview: Boolean(document.querySelector(".stage iframe[sandbox='allow-same-origin']")),
+        hasInspectorTabs: ["design", "content", "export"].every((tab) =>
+          Boolean(document.querySelector('[data-smoke-action="inspector-' + tab + '"]'))
+        ),
+        hasLock: renderedLocks.length > 0,
+        renderedLocks,
+        missingLocks,
+        statusText: document.querySelector(".stage-status")?.textContent ?? "",
         hasProApi: proKeys.some((key) => key in window.cardnews)
       };
     })()
@@ -191,7 +245,12 @@ async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise
   const evidence = typeof result === "object" && result !== null ? result : {};
   const editionResult = "editionResult" in evidence ? evidence.editionResult : undefined;
   const lockedResult = "lockedResult" in evidence ? evidence.lockedResult : undefined;
+  const rootEdition = "rootEdition" in evidence ? evidence.rootEdition : undefined;
   const hasLock = "hasLock" in evidence && evidence.hasLock === true;
+  const hasRail = "hasRail" in evidence && evidence.hasRail === true;
+  const hasStagePreview = "hasStagePreview" in evidence && evidence.hasStagePreview === true;
+  const hasInspectorTabs = "hasInspectorTabs" in evidence && evidence.hasInspectorTabs === true;
+  const missingLocks = Array.isArray(evidence.missingLocks) ? evidence.missingLocks : ["missing lock evidence"];
   const hasProApi = "hasProApi" in evidence && evidence.hasProApi === true;
 
   if (
@@ -201,6 +260,10 @@ async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise
     editionResult.edition !== "lite"
   ) {
     return { ok: false, message: "Lite edition info was not exposed." };
+  }
+
+  if (rootEdition !== "lite") {
+    return { ok: false, message: "Shared Lite App root did not expose data-smoke-edition=lite." };
   }
 
   if (
@@ -214,12 +277,105 @@ async function runEditionLiteRegressionSmoke(mainWindow: BrowserWindow): Promise
     return { ok: false, message: "Locked feature did not return an unsupported result." };
   }
 
+  if (!hasRail) {
+    return { ok: false, message: "Lite shared shell did not render the slide rail thumbnails." };
+  }
+
+  if (!hasStagePreview) {
+    return { ok: false, message: "Lite shared shell did not render the stage preview iframe." };
+  }
+
+  if (!hasInspectorTabs) {
+    return { ok: false, message: "Lite shared shell did not render the inspector tab structure." };
+  }
+
   if (!hasLock) {
     return { ok: false, message: "Lite lock panel was not rendered." };
   }
 
+  if (missingLocks.length > 0) {
+    return { ok: false, message: `Lite lock stubs missing: ${missingLocks.join(", ")}` };
+  }
+
   if (hasProApi) {
     return { ok: false, message: "Lite bridge exposed a locked API." };
+  }
+
+  return { ok: true };
+}
+
+async function runEditionLiteBasicFlowSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, message) => {
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          if (predicate()) {
+            return;
+          }
+          await wait(100);
+        }
+        throw new Error(message());
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+        descriptor?.set?.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const styleSelect = document.querySelector(".topbar-style-select");
+      if (!(styleSelect instanceof HTMLSelectElement)) {
+        throw new Error("Style select missing.");
+      }
+      styleSelect.value = styleSelect.options[1]?.value ?? styleSelect.value;
+      styleSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+      const contentTab = document.querySelector('[data-smoke-action="inspector-content"]');
+      if (!(contentTab instanceof HTMLButtonElement)) {
+        throw new Error("Content tab missing.");
+      }
+      contentTab.click();
+      await waitUntil(
+        () => document.querySelector('[data-smoke-role="content-title"]') instanceof HTMLTextAreaElement,
+        () => "Content title field missing."
+      );
+
+      const titleInput = document.querySelector('[data-smoke-role="content-title"]');
+      if (!(titleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content title field missing after wait.");
+      }
+      setNativeValue(titleInput, "Lite 기본 플로우 검증");
+
+      const generate = document.querySelector('[data-smoke-action="generate"]');
+      if (!(generate instanceof HTMLButtonElement)) {
+        throw new Error("Generate button missing.");
+      }
+      generate.click();
+      await waitUntil(
+        () => {
+          const text = document.querySelector(".stage-status")?.textContent ?? "";
+          return text.includes("렌더 완료:") || text.includes("게이트 실패") || text.includes("렌더 실패");
+        },
+        () => "Lite render did not finish: " + (document.querySelector(".stage-status")?.textContent ?? "")
+      );
+
+      return {
+        styleValue: styleSelect.value,
+        titleValue: titleInput.value,
+        statusText: document.querySelector(".stage-status")?.textContent ?? ""
+      };
+    })()
+  `);
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Lite basic flow smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const statusText = typeof record["statusText"] === "string" ? record["statusText"] : "";
+  if (record["titleValue"] !== "Lite 기본 플로우 검증" || !statusText.includes("렌더 완료:")) {
+    return { ok: false, message: `Lite basic flow failed: ${JSON.stringify(record)}` };
   }
 
   return { ok: true };

@@ -542,6 +542,39 @@
 2. 기존 v1 산출물은 사용자가 비교할 수 있도록 삭제하지 않았다. 최종 실행 대상은 위의 `2.0.0` Pro/Lite 산출물이다.
 3. Lite/Pro 매트릭스는 PRD §1 확정안 그대로 유지했다. 애매한 신규 AI 기능은 Pro 전용으로 두었다.
 
+## 6-15. V6 M6 Lite UI 공용 셸 재구성 완료 (2026-07-08 Codex)
+
+**기준 문서**: `.omc/plans/v6-m6-lite-ui-spec.md`, `.omc/plans/v6-lite-pro-prd.md` §0·§1
+
+**구현 완료**:
+- 이전 partial stash `stalled-m6-partial-1832`의 방향이 spec과 맞아 `src/edition/lite`, `src/edition/pro`, `src/ui/App.tsx`, `src/ui/main.tsx` 변경을 재사용했다.
+- `src/ui/main.tsx`는 공용 `src/ui/App.tsx`를 직접 mount한다. `src/ui/LiteApp.tsx` 별도 축소 UI는 제거했다.
+- `src/edition/pro/index.tsx`는 Pro IPC/API wrapper와 AI prompt helper를 제공하고, `src/edition/lite/index.tsx`는 동일 시그니처의 잠금/`not_implemented` stub을 제공한다.
+- Lite도 Pro와 같은 slide rail, stage preview, inspector tab/topbar/content form/export flow를 사용한다. Pro 전용 자리(카드 디자인, 크롬 스타일, 편집 오버레이, 이미지 배지/배경 제거, 넘김기호 이미지, 프로젝트, CSV, AI)는 `data-smoke-role="edition-lock"` stub으로 렌더된다.
+- Lite stage는 preview-only `PreviewCanvas`를 타고, Pro는 기존 `StageCanvas` overlay를 유지한다.
+- `edition-lite-regression` smoke가 Lite shell 구조, lock stub 8종, 잠금 IPC `not_implemented`, Lite preload의 Pro API 미노출을 검증하도록 보강했다.
+- `edition-lite-basic-flow` smoke를 추가해 Lite에서 스타일 변경 -> 콘텐츠 제목 편집 -> PNG 생성까지 확인한다.
+
+**증거** (`.omc/evidence/v6/m6-lite-ui/`):
+- 표준 gate:
+  - `typecheck-final-before-smokes.log` — `npm run typecheck` exit 0
+  - `test-final.log` — `npm test` exit 0
+  - `build-pro-final.log` — `npm run build` exit 0
+  - `build-lite-final.log` — `npm run build:lite` exit 0
+- Lite 스트리핑:
+  - `verify-edition-lite-final.log` — final Lite `dist`/`dist-electron` scan exit 0
+- Pro 회귀 smoke:
+  - `smoke-pro-layer-controls-regression.log` — `layer-controls-regression` exit 0
+  - `smoke-pro-chrome-style-regression.log` — `chrome-style-regression` exit 0
+  - `smoke-pro-content-form-regression.log` — `content-form-regression` exit 0
+- Lite smoke:
+  - `smoke-edition-lite-regression-final.log` — `edition-lite-regression` exit 0
+  - `smoke-edition-lite-basic-flow-final.log` — `edition-lite-basic-flow` exit 0
+
+**주의 / 잔여 리스크**:
+1. 이번 M6는 설치 파일 재패키징 범위가 아니다. 최종 배포 산출물 갱신이 필요하면 M5의 `%LOCALAPPDATA%` 우회 절차를 다시 사용한다.
+2. stash는 안전하게 `apply`로 재사용했다. 최종 diff에 반영되어 있으므로 이후 필요 없으면 별도 정리해도 된다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

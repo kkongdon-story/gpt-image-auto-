@@ -12,15 +12,29 @@ import {
 import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
 import { parseCardText, serializeCard } from "../domain/cardParser";
 import { defaultChromeConfig, normalizeChromeConfig } from "../domain/chromeConfig";
-import { buildBulkCsvTemplate } from "../domain/csvBulk";
 import { buildTemplateDocument, parseDeckDocument, type DeckDocument } from "../domain/deckImporter";
 import {
   buildDraftPrompt,
   buildMockDraftDocument,
   buildResearchPrompt,
   buildTopicPrompt,
-  extractTemplateDocument
-} from "../edition/pro/ai/aiPrompts";
+  extractTemplateDocument,
+  FeatureLock,
+  addEditionImage,
+  editionKind,
+  editionProductName,
+  getEditionImagePreview,
+  hasProTools,
+  listEditionAiProviders,
+  listEditionImages,
+  loadEditionBulkInput,
+  loadEditionProject,
+  removeEditionImageBackdrop,
+  runEditionAi,
+  runEditionBulkRender,
+  saveEditionBulkTemplate,
+  saveEditionProject
+} from "@edition";
 import {
   getLineLayerAngle,
   getLineLayerRenderGeometry,
@@ -400,6 +414,58 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   }, [value, delayMs]);
 
   return debounced;
+}
+
+function PreviewCanvas({
+  html,
+  cardWidth,
+  cardHeight
+}: {
+  readonly html: string;
+  readonly cardWidth: number;
+  readonly cardHeight: number;
+}): ReactElement {
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(0.4);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width > 0) {
+        setScale(width / cardWidth);
+      }
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [cardWidth]);
+
+  return (
+    <div
+      className="stage-canvas"
+      ref={canvasRef}
+      style={{
+        aspectRatio: `${cardWidth} / ${cardHeight}`,
+        height: `min(calc(100vh - 170px), calc((100vw - 560px) * ${(cardHeight / cardWidth).toFixed(4)}))`
+      }}
+    >
+      <iframe
+        title="selected-card"
+        sandbox="allow-same-origin"
+        srcDoc={html}
+        scrolling="no"
+        style={{
+          width: cardWidth,
+          height: cardHeight,
+          transform: `scale(${scale})`
+        }}
+      />
+    </div>
+  );
 }
 
 function StageCanvas({
@@ -1016,9 +1082,9 @@ export function App(): ReactElement {
         window.cardnews.loadWorkspace(),
         window.cardnews.listCustomStyles(),
         window.cardnews.loadSettings(),
-        window.cardnews.listImageLibrary(),
+        listEditionImages(),
         window.cardnews.listFontLibrary(),
-        window.cardnews.listAiProviders()
+        listEditionAiProviders()
       ]);
 
       if (!isCardnewsError(libraryResult)) {
@@ -1233,7 +1299,7 @@ export function App(): ReactElement {
   }
 
   async function loadImagePreview(imageId: string): Promise<void> {
-    const preview = await window.cardnews.getImagePreview(imageId);
+    const preview = await getEditionImagePreview(imageId);
     if (isCardnewsError(preview)) {
       setStatus(preview.message);
       return;
@@ -1327,13 +1393,13 @@ export function App(): ReactElement {
   }
 
   async function addImage(): Promise<void> {
-    const added = await window.cardnews.addImageToLibrary();
+    const added = await addEditionImage();
     if (isCardnewsError(added)) {
       setStatus(added.message);
       return;
     }
 
-    const library = await window.cardnews.listImageLibrary();
+    const library = await listEditionImages();
     if (!isCardnewsError(library)) {
       setImageLibrary(library);
     }
@@ -1343,13 +1409,13 @@ export function App(): ReactElement {
   }
 
   async function addNextHintImage(): Promise<void> {
-    const added = await window.cardnews.addImageToLibrary();
+    const added = await addEditionImage();
     if (isCardnewsError(added)) {
       setStatus(added.message);
       return;
     }
 
-    const library = await window.cardnews.listImageLibrary();
+    const library = await listEditionImages();
     if (!isCardnewsError(library)) {
       setImageLibrary(library);
     }
@@ -1365,13 +1431,13 @@ export function App(): ReactElement {
       return;
     }
 
-    const processed = await window.cardnews.removeImageBackground(imageId, backgroundRemovalTolerance);
+    const processed = await removeEditionImageBackdrop(imageId, backgroundRemovalTolerance);
     if (isCardnewsError(processed)) {
       setStatus(processed.message);
       return;
     }
 
-    const library = await window.cardnews.listImageLibrary();
+    const library = await listEditionImages();
     if (!isCardnewsError(library)) {
       setImageLibrary(library);
     }
@@ -1385,6 +1451,25 @@ export function App(): ReactElement {
     if (isCardnewsError(result)) {
       setStatus(result.message);
     }
+  }
+
+  async function requestLockedFeature(featureCode: string): Promise<void> {
+    const result = await window.cardnews.requestLockedFeature(featureCode);
+    setStatus(isCardnewsError(result) ? result.message : "Pro에서 사용 가능한 기능입니다.");
+  }
+
+  function renderEditionLock(featureCode: string, title: string, message: string): ReactElement {
+    return (
+      <FeatureLock
+        featureCode={featureCode}
+        title={title}
+        onRequest={(lockedFeatureCode) => void requestLockedFeature(lockedFeatureCode)}
+        onOpenThreads={() => void openExternalLink(threadsUrl)}
+        onOpenKakao={() => void openExternalLink(kakaoInquiryUrl)}
+      >
+        {message}
+      </FeatureLock>
+    );
   }
 
   function updateSelectedOverride(next: CardOverride): void {
@@ -1804,7 +1889,7 @@ export function App(): ReactElement {
   }
 
   async function refreshAiProviders(): Promise<void> {
-    const result = await window.cardnews.listAiProviders();
+    const result = await listEditionAiProviders();
     if (isCardnewsError(result)) {
       setAiStatus(result.message);
       setStatus(result.message);
@@ -1868,7 +1953,7 @@ export function App(): ReactElement {
     try {
       setAiBusy(true);
       setAiStatus("AI 응답 대기 중...");
-      const result = await window.cardnews.runAiChat(aiProviderId, nextMessages);
+      const result = await runEditionAi(aiProviderId, nextMessages);
       if (isCardnewsError(result)) {
         setAiStatus(result.message);
         setStatus(`AI 오류: ${result.message}`);
@@ -2315,19 +2400,19 @@ export function App(): ReactElement {
     setStatus(isCardnewsError(saved) ? saved.message : `ZIP 저장: ${saved}`);
   }
 
-  async function exportProjectFile(): Promise<void> {
+  async function saveProjectArchiveFile(): Promise<void> {
     const savedWorkspace = await window.cardnews.saveWorkspace(buildWorkspaceState());
     if (isCardnewsError(savedWorkspace)) {
       setStatus(savedWorkspace.message);
       return;
     }
 
-    const saved = await window.cardnews.exportProject();
+    const saved = await saveEditionProject();
     setStatus(isCardnewsError(saved) ? saved.message : `프로젝트 저장: ${saved.filePath}`);
   }
 
-  async function importProjectFile(): Promise<void> {
-    const imported = await window.cardnews.importProject();
+  async function loadProjectArchiveFile(): Promise<void> {
+    const imported = await loadEditionProject();
     if (isCardnewsError(imported)) {
       setStatus(imported.message);
       return;
@@ -2361,12 +2446,12 @@ export function App(): ReactElement {
   }
 
   async function exportBulkTemplate(): Promise<void> {
-    const saved = await window.cardnews.exportBulkCsvTemplate(buildBulkCsvTemplate(styleId, aspectRatioId));
+    const saved = await saveEditionBulkTemplate(styleId, aspectRatioId);
     setStatus(isCardnewsError(saved) ? saved.message : `CSV 템플릿 저장: ${saved}`);
   }
 
   async function importBulkCsv(): Promise<void> {
-    const imported = await window.cardnews.importBulkCsvFile();
+    const imported = await loadEditionBulkInput();
     if (isCardnewsError(imported)) {
       setStatus(imported.message);
       return;
@@ -2385,7 +2470,7 @@ export function App(): ReactElement {
     try {
       setIsRendering(true);
       setStatus("CSV 대량 생성 중...");
-      const result = await window.cardnews.renderBulkCsv(bulkCsvText);
+      const result = await runEditionBulkRender(bulkCsvText);
       if (isCardnewsError(result)) {
         setStatus(`CSV 대량 생성 실패: ${result.message}`);
         return;
@@ -2447,11 +2532,11 @@ export function App(): ReactElement {
   }
 
   return (
-    <main className="studio">
+    <main className="studio" data-smoke-edition={editionKind}>
       {fontCss ? <style>{fontCss}</style> : null}
       <header className="topbar">
         <button type="button" className="brand brand-button" onClick={() => setInfoOpen(true)}>
-          <strong>Cardnews Studio</strong>
+          <strong>{editionProductName}</strong>
           <span>정보형 카드뉴스 제작기</span>
         </button>
         <label className="topbar-field">
@@ -2513,7 +2598,12 @@ export function App(): ReactElement {
             type="button"
             className="ghost"
             data-smoke-action="open-ai-panel"
-            onClick={() => setInspectorTab("export")}
+            onClick={() => {
+              setInspectorTab("export");
+              if (!hasProTools) {
+                void requestLockedFeature("ai_panel");
+              }
+            }}
           >
             AI
           </button>
@@ -2582,32 +2672,46 @@ export function App(): ReactElement {
           <div className="stage-toolbar">
             <button
               type="button"
-              className={editMode ? "active" : ""}
+              className={hasProTools && editMode ? "active" : ""}
               data-smoke-action="toggle-edit-mode"
-              onClick={() => setEditMode((current) => !current)}
+              onClick={() => {
+                if (hasProTools) {
+                  setEditMode((current) => !current);
+                  return;
+                }
+                void requestLockedFeature("overlay_edit");
+              }}
             >
               편집 모드
             </button>
           </div>
-          <StageCanvas
-            html={previewHtmls[selectedIndex] ?? ""}
-            cardWidth={cardRatio.width}
-            cardHeight={cardRatio.height}
-            editMode={editMode}
-            layers={selectedLayers}
-            selectedLayerId={selectedLayerId}
-            editingLayerId={editingLayerId}
-            editingText={editingLayerText}
-            onSelectLayer={selectLayer}
-            onTransformLayer={transformLayer}
-            onTransformLineLayer={transformLineLayer}
-            onNudgeLayer={nudgeLayer}
-            onDeleteLayer={removeLayer}
-            onStartTextEdit={startLayerTextEdit}
-            onEditingTextChange={setEditingLayerText}
-            onCommitTextEdit={commitLayerTextEdit}
-            onCancelTextEdit={cancelLayerTextEdit}
-          />
+          {hasProTools ? (
+            <StageCanvas
+              html={previewHtmls[selectedIndex] ?? ""}
+              cardWidth={cardRatio.width}
+              cardHeight={cardRatio.height}
+              editMode={editMode}
+              layers={selectedLayers}
+              selectedLayerId={selectedLayerId}
+              editingLayerId={editingLayerId}
+              editingText={editingLayerText}
+              onSelectLayer={selectLayer}
+              onTransformLayer={transformLayer}
+              onTransformLineLayer={transformLineLayer}
+              onNudgeLayer={nudgeLayer}
+              onDeleteLayer={removeLayer}
+              onStartTextEdit={startLayerTextEdit}
+              onEditingTextChange={setEditingLayerText}
+              onCommitTextEdit={commitLayerTextEdit}
+              onCancelTextEdit={cancelLayerTextEdit}
+            />
+          ) : (
+            <PreviewCanvas
+              html={previewHtmls[selectedIndex] ?? ""}
+              cardWidth={cardRatio.width}
+              cardHeight={cardRatio.height}
+            />
+          )}
           <p className="stage-status">{status}</p>
         </section>
 
@@ -2946,7 +3050,7 @@ export function App(): ReactElement {
                   <span>*단어* → 포인트색 강조</span>
                 </div>
               </>
-            ) : (
+            ) : hasProTools ? (
               <div className="card-design-controls">
                 <div className="chrome-controls">
                   <p className="panel-title">상단/하단 바</p>
@@ -3893,6 +3997,14 @@ export function App(): ReactElement {
                   전역 설정으로 초기화
                 </button>
               </div>
+            ) : (
+              <div className="card-design-controls">
+                {renderEditionLock("card_design", "카드 디자인", "레이어, 카드별 색감/레이아웃, 타이포 미세 조정은 Pro에서 열립니다.")}
+                {renderEditionLock("chrome_style", "상단/하단 바 스타일", "헤더, 멘션, 페이지 번호의 색상·위치·표시 설정은 Pro에서 열립니다.")}
+                {renderEditionLock("overlay_edit", "편집 오버레이", "스테이지 위 직접 선택, 이동, 끝점 편집은 Pro에서 열립니다.")}
+                {renderEditionLock("badge_image", "이미지 배지", "이미지 배지, 배지 모양, 배경 제거는 Pro에서 열립니다.")}
+                {renderEditionLock("next_hint_image", "넘김 기호 이미지", "넘김 기호 이미지 선택과 높이 조정은 Pro에서 열립니다.")}
+              </div>
             )}
             <div className="row">
               <button type="button" onClick={addCard}>
@@ -3948,17 +4060,22 @@ export function App(): ReactElement {
             ) : (
               <span className="hint">PNG 생성 버튼을 누르면 전체 카드를 렌더링합니다.</span>
             )}
+            {hasProTools ? (
             <div className="project-panel">
               <p className="panel-title">프로젝트</p>
               <div className="row">
-                <button type="button" onClick={exportProjectFile}>
+                <button type="button" onClick={saveProjectArchiveFile}>
                   프로젝트 저장(.cardnews)
                 </button>
-                <button type="button" onClick={importProjectFile}>
+                <button type="button" onClick={loadProjectArchiveFile}>
                   프로젝트 열기
                 </button>
               </div>
             </div>
+            ) : (
+              renderEditionLock("project_file", "프로젝트", ".cardnews 프로젝트 저장과 열기는 Pro에서 열립니다.")
+            )}
+            {hasProTools ? (
             <div className="bulk-panel">
               <p className="panel-title">CSV 대량 생성</p>
               <div className="row">
@@ -3995,6 +4112,10 @@ export function App(): ReactElement {
                 </div>
               ) : null}
             </div>
+            ) : (
+              renderEditionLock("bulk_csv", "CSV 대량 생성", "CSV 템플릿과 대량 PNG 생성은 Pro에서 열립니다.")
+            )}
+            {hasProTools ? (
             <div className="ai-panel" data-smoke-role="ai-panel">
               <p className="panel-title">AI 설정/대본</p>
               <div className="row ai-provider-row">
@@ -4088,6 +4209,11 @@ export function App(): ReactElement {
                 </ol>
               ) : null}
             </div>
+            ) : (
+              <div className="ai-panel" data-smoke-role="ai-panel">
+                {renderEditionLock("ai_panel", "AI 설정/대본", "프로그램 내 AI 대본 생성과 자동 적용은 Pro에서 열립니다.")}
+              </div>
+            )}
           </section>
         </aside>
       </div>

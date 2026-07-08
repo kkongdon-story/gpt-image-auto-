@@ -2,6 +2,8 @@ import electron = require("electron");
 import type { CardnewsApi } from "../src/domain/cardnews-api.js";
 import type {
   AppSettings,
+  AiChatMessage,
+  AiProviderId,
   DeckDraft,
   DeckPreset,
   LocalImageRef,
@@ -42,6 +44,9 @@ const api: CardnewsApi = {
   getImagePreview: (imageId: string) => ipcRenderer.invoke("cardnews:getImagePreview", imageId),
   removeImageBackground: (imageId: string, tolerance: number) =>
     ipcRenderer.invoke("cardnews:removeImageBackground", imageId, tolerance),
+  listAiProviders: () => ipcRenderer.invoke("cardnews:ai:listProviders"),
+  runAiChat: (providerId: AiProviderId, messages: readonly AiChatMessage[]) =>
+    ipcRenderer.invoke("cardnews:ai:chat", providerId, messages),
   searchStockImages: (query: string, page: number) =>
     ipcRenderer.invoke("cardnews:searchStockImages", query, page),
   downloadStockImage: (input: StockImageDownloadInput) =>

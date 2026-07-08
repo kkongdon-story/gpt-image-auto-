@@ -19,10 +19,12 @@
   },
   "include": [
     "electron/main.ts",
+    "electron/ai/**/*.ts",
     "electron/preload.cts",
     "electron/preload-lite.cts",
     "electron/lite-main.ts",
     "src/domain/**/*.ts",
+    "src/edition/pro/ai/aiPrompts.ts",
     "src/render-engine/**/*.ts",
     "src/storage/**/*.ts"
   ],

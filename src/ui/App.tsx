@@ -13,7 +13,14 @@ import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/a
 import { parseCardText, serializeCard } from "../domain/cardParser";
 import { defaultChromeConfig, normalizeChromeConfig } from "../domain/chromeConfig";
 import { buildBulkCsvTemplate } from "../domain/csvBulk";
-import { buildTemplateDocument, parseDeckDocument } from "../domain/deckImporter";
+import { buildTemplateDocument, parseDeckDocument, type DeckDocument } from "../domain/deckImporter";
+import {
+  buildDraftPrompt,
+  buildMockDraftDocument,
+  buildResearchPrompt,
+  buildTopicPrompt,
+  extractTemplateDocument
+} from "../edition/pro/ai/aiPrompts";
 import {
   getLineLayerAngle,
   getLineLayerRenderGeometry,
@@ -24,6 +31,9 @@ import {
 } from "../domain/lineLayer";
 import type {
   AppSettings,
+  AiChatMessage,
+  AiProviderId,
+  AiProviderStatus,
   BackgroundLibraryItem,
   BulkRenderResult,
   Card,
@@ -69,6 +79,30 @@ function normalizeFooterAccount(value: string): string {
   const trimmed = value.trim();
   const withoutAt = trimmed.replace(/^@+/, "").trim();
   return withoutAt.length > 0 ? withoutAt : defaultFooterAccount;
+}
+
+const aiProviderOrder: readonly AiProviderId[] = ["claude", "codex", "gemini"];
+
+function chooseDefaultAiProvider(
+  providers: readonly AiProviderStatus[],
+  preferred?: AiProviderId
+): AiProviderId {
+  if (preferred && providers.some((provider) => provider.id === preferred)) {
+    return preferred;
+  }
+
+  const installed = aiProviderOrder.find((providerId) =>
+    providers.some((provider) => provider.id === providerId && provider.installed)
+  );
+  return installed ?? preferred ?? "claude";
+}
+
+function buildImagePrompt(seed: string): string {
+  return [
+    "꽁돈/kkongdon_story 카드뉴스에 쓸 배경 또는 배지 이미지 프롬프트를 작성합니다.",
+    "스타일: 깔끔한 한국형 비즈니스 카드뉴스, 실제 사용 가능한 소재, 과한 장식 없음.",
+    `주제: ${seed.trim() || "AI 자동화로 카드뉴스 제작 시간을 줄이는 장면"}`
+  ].join("\n");
 }
 
 type InspectorTab = "design" | "content" | "export";
@@ -831,6 +865,13 @@ export function App(): ReactElement {
   const [styleWarnings, setStyleWarnings] = useState<readonly string[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
   const [pixabayApiKeyDraft, setPixabayApiKeyDraft] = useState("");
+  const [aiProviders, setAiProviders] = useState<readonly AiProviderStatus[]>([]);
+  const [aiProviderId, setAiProviderId] = useState<AiProviderId>("claude");
+  const [aiInput, setAiInput] = useState("Codex로 카드뉴스 제작 시간을 줄이는 방법");
+  const [aiTranscript, setAiTranscript] = useState<readonly AiChatMessage[]>([]);
+  const [aiDraftText, setAiDraftText] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiStatus, setAiStatus] = useState("CLI 상태를 확인하세요.");
   const [stockSearchOpen, setStockSearchOpen] = useState(false);
   const [stockQuery, setStockQuery] = useState("money background");
   const [stockImages, setStockImages] = useState<readonly StockImage[]>([]);
@@ -967,7 +1008,8 @@ export function App(): ReactElement {
         customStylesResult,
         settingsResult,
         imageLibraryResult,
-        fontLibraryResult
+        fontLibraryResult,
+        aiProvidersResult
       ] = await Promise.all([
         window.cardnews.listBackgroundLibrary(),
         window.cardnews.listDeckPresets(),
@@ -975,7 +1017,8 @@ export function App(): ReactElement {
         window.cardnews.listCustomStyles(),
         window.cardnews.loadSettings(),
         window.cardnews.listImageLibrary(),
-        window.cardnews.listFontLibrary()
+        window.cardnews.listFontLibrary(),
+        window.cardnews.listAiProviders()
       ]);
 
       if (!isCardnewsError(libraryResult)) {
@@ -996,6 +1039,18 @@ export function App(): ReactElement {
       if (!isCardnewsError(settingsResult)) {
         setSettings(settingsResult);
         setPixabayApiKeyDraft(settingsResult.pixabayApiKey ?? "");
+      }
+      if (!isCardnewsError(aiProvidersResult)) {
+        setAiProviders(aiProvidersResult);
+        const restoredProvider = !isCardnewsError(settingsResult)
+          ? settingsResult.aiDefaultProviderId
+          : undefined;
+        setAiProviderId(chooseDefaultAiProvider(aiProvidersResult, restoredProvider));
+        setAiStatus(
+          aiProvidersResult.some((provider) => provider.installed)
+            ? "AI CLI를 감지했습니다."
+            : "감지된 AI CLI가 없습니다. 설치 후 새로고침하세요."
+        );
       }
 
       if (!isCardnewsError(workspaceResult) && workspaceResult) {
@@ -1735,7 +1790,8 @@ export function App(): ReactElement {
 
   async function savePixabayKey(): Promise<void> {
     const nextSettings: AppSettings = {
-      ...(pixabayApiKeyDraft.trim() ? { pixabayApiKey: pixabayApiKeyDraft.trim() } : {})
+      ...(pixabayApiKeyDraft.trim() ? { pixabayApiKey: pixabayApiKeyDraft.trim() } : {}),
+      ...(settings.aiDefaultProviderId ? { aiDefaultProviderId: settings.aiDefaultProviderId } : {})
     };
     const saved = await window.cardnews.saveSettings(nextSettings);
     if (isCardnewsError(saved)) {
@@ -1745,6 +1801,124 @@ export function App(): ReactElement {
 
     setSettings(nextSettings);
     setStatus(nextSettings.pixabayApiKey ? "Pixabay API 키를 저장했습니다." : "Pixabay API 키를 비웠습니다.");
+  }
+
+  async function refreshAiProviders(): Promise<void> {
+    const result = await window.cardnews.listAiProviders();
+    if (isCardnewsError(result)) {
+      setAiStatus(result.message);
+      setStatus(result.message);
+      return;
+    }
+
+    setAiProviders(result);
+    setAiProviderId((current) => chooseDefaultAiProvider(result, current));
+    setAiStatus(
+      result.some((provider) => provider.installed)
+        ? "AI CLI 상태를 새로고침했습니다."
+        : "감지된 AI CLI가 없습니다. 설치 후 새로고침하세요."
+    );
+  }
+
+  async function selectAiProvider(nextProviderId: AiProviderId): Promise<void> {
+    setAiProviderId(nextProviderId);
+    const nextSettings: AppSettings = {
+      ...(settings.pixabayApiKey ? { pixabayApiKey: settings.pixabayApiKey } : {}),
+      aiDefaultProviderId: nextProviderId
+    };
+    const saved = await window.cardnews.saveSettings(nextSettings);
+    if (isCardnewsError(saved)) {
+      setAiStatus(saved.message);
+      setStatus(saved.message);
+      return;
+    }
+
+    setSettings(nextSettings);
+    setAiStatus(`기본 AI provider: ${nextProviderId}`);
+  }
+
+  async function runAiPreset(kind: "topic" | "research" | "draft"): Promise<void> {
+    const prompt =
+      kind === "topic"
+        ? buildTopicPrompt(aiInput)
+        : kind === "research"
+          ? buildResearchPrompt(aiInput)
+          : buildDraftPrompt(aiInput, styleNameEntries);
+    await runAiPrompt(prompt, kind);
+  }
+
+  async function runAiFreeChat(): Promise<void> {
+    const prompt = aiInput.trim();
+    if (!prompt) {
+      setAiStatus("AI에 보낼 내용을 입력하세요.");
+      return;
+    }
+    await runAiPrompt(prompt, "chat");
+  }
+
+  async function runAiPrompt(
+    prompt: string,
+    mode: "topic" | "research" | "draft" | "chat"
+  ): Promise<void> {
+    if (aiBusy) {
+      return;
+    }
+
+    const nextMessages: readonly AiChatMessage[] = [{ role: "user", content: prompt }];
+    try {
+      setAiBusy(true);
+      setAiStatus("AI 응답 대기 중...");
+      const result = await window.cardnews.runAiChat(aiProviderId, nextMessages);
+      if (isCardnewsError(result)) {
+        setAiStatus(result.message);
+        setStatus(`AI 오류: ${result.message}`);
+        return;
+      }
+
+      const assistantMessage: AiChatMessage = { role: "assistant", content: result.content };
+      setAiTranscript((current) => [...current.slice(-5), { role: "user", content: prompt }, assistantMessage]);
+      if (mode === "draft") {
+        applyAiDraft(result.content);
+      } else {
+        setAiStatus(`${result.providerId} 응답 완료`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "알 수 없는 AI 오류";
+      setAiStatus(`AI 오류: ${message}`);
+      setStatus(`AI 오류: ${message}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  function applyAiDraft(rawText: string): void {
+    const templateText = extractTemplateDocument(rawText);
+    const parsed = parseDeckDocument(templateText, styleNameEntries);
+    if (isCardnewsError(parsed)) {
+      setAiDraftText(templateText);
+      setAiStatus(`대본 파싱 실패: ${parsed.message}`);
+      setStatus(`AI 대본 파싱 실패: ${parsed.message}`);
+      return;
+    }
+
+    setAiDraftText(templateText);
+    applyParsedDeckDocument(parsed, "AI 대본");
+    setAiStatus(`AI 대본 적용: 카드 ${parsed.cards.length}장`);
+    setStatus(`AI 대본 적용: 카드 ${parsed.cards.length}장`);
+  }
+
+  function applyMockAiDraft(): void {
+    applyAiDraft(buildMockDraftDocument());
+  }
+
+  async function copyAiImagePrompt(): Promise<void> {
+    const prompt = buildImagePrompt(aiInput);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setAiStatus("이미지 프롬프트를 클립보드에 복사했습니다. 생성 후 이미지 파일 추가로 등록하세요.");
+    } catch {
+      setAiStatus(prompt);
+    }
   }
 
   async function searchStockImages(): Promise<void> {
@@ -1812,19 +1986,7 @@ export function App(): ReactElement {
     setStatus(isCardnewsError(saved) ? saved.message : `양식 파일 저장: ${saved}`);
   }
 
-  async function importFromFile(): Promise<void> {
-    const document = await window.cardnews.importDeckDocument();
-    if (isCardnewsError(document)) {
-      setStatus(document.message);
-      return;
-    }
-
-    const parsed = parseDeckDocument(document.text, styleNameEntries);
-    if (isCardnewsError(parsed)) {
-      setStatus(`${document.fileName}: ${parsed.message}`);
-      return;
-    }
-
+  function applyParsedDeckDocument(parsed: DeckDocument, sourceLabel: string): void {
     if (parsed.headerLabel) {
       setHeaderLabel(parsed.headerLabel);
     }
@@ -1849,9 +2011,25 @@ export function App(): ReactElement {
     setApprovedJobId(null);
     setStatus(
       parsed.warnings.length > 0
-        ? `${document.fileName} → 카드 ${parsed.cards.length}장 · 경고: ${parsed.warnings[0]}`
-        : `${document.fileName} → 카드 ${parsed.cards.length}장을 불러왔습니다.`
+        ? `${sourceLabel} → 카드 ${parsed.cards.length}장 · 경고: ${parsed.warnings[0]}`
+        : `${sourceLabel} → 카드 ${parsed.cards.length}장을 불러왔습니다.`
     );
+  }
+
+  async function importFromFile(): Promise<void> {
+    const document = await window.cardnews.importDeckDocument();
+    if (isCardnewsError(document)) {
+      setStatus(document.message);
+      return;
+    }
+
+    const parsed = parseDeckDocument(document.text, styleNameEntries);
+    if (isCardnewsError(parsed)) {
+      setStatus(`${document.fileName}: ${parsed.message}`);
+      return;
+    }
+
+    applyParsedDeckDocument(parsed, document.fileName);
   }
 
   // ── 양식 프리셋 ──
@@ -2330,6 +2508,14 @@ export function App(): ReactElement {
             onClick={() => void openExternalLink(kakaoInquiryUrl)}
           >
             AX문의/강의 문의
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            data-smoke-action="open-ai-panel"
+            onClick={() => setInspectorTab("export")}
+          >
+            AI
           </button>
           <button type="button" className="ghost" data-smoke-action="reset-workspace" onClick={resetWorkspace}>
             초기화
@@ -3807,6 +3993,99 @@ export function App(): ReactElement {
                     ))}
                   </ol>
                 </div>
+              ) : null}
+            </div>
+            <div className="ai-panel" data-smoke-role="ai-panel">
+              <p className="panel-title">AI 설정/대본</p>
+              <div className="row ai-provider-row">
+                <select
+                  value={aiProviderId}
+                  onChange={(event) => {
+                    const nextProviderId = event.target.value;
+                    if (nextProviderId === "claude" || nextProviderId === "codex" || nextProviderId === "gemini") {
+                      void selectAiProvider(nextProviderId);
+                    }
+                  }}
+                >
+                  {aiProviderOrder.map((providerId) => {
+                    const provider = aiProviders.find((entry) => entry.id === providerId);
+                    return (
+                      <option key={providerId} value={providerId}>
+                        {provider?.label ?? providerId} · {provider?.installed ? provider.version ?? "감지됨" : "미설치"}
+                      </option>
+                    );
+                  })}
+                </select>
+                <button type="button" data-smoke-action="ai-refresh" onClick={refreshAiProviders}>
+                  새로고침
+                </button>
+              </div>
+              <small className="hint">
+                {aiStatus}
+                {aiProviders.length > 0
+                  ? ` · 설치 안내: ${
+                      aiProviders.find((provider) => provider.id === aiProviderId)?.installHint ?? "CLI 설치 후 새로고침"
+                    }`
+                  : ""}
+              </small>
+              <textarea
+                className="ai-input"
+                value={aiInput}
+                onChange={(event) => setAiInput(event.target.value)}
+                placeholder="주제, 자료, 대본 요청을 입력하세요."
+                spellCheck={false}
+              />
+              <div className="row">
+                <button type="button" onClick={() => void runAiPreset("topic")} disabled={aiBusy}>
+                  주제 탐색
+                </button>
+                <button type="button" onClick={() => void runAiPreset("research")} disabled={aiBusy}>
+                  자료 검색
+                </button>
+                <button
+                  type="button"
+                  data-smoke-action="ai-draft"
+                  onClick={() => void runAiPreset("draft")}
+                  disabled={aiBusy}
+                >
+                  대본 작성
+                </button>
+                <button type="button" className="ghost" onClick={runAiFreeChat} disabled={aiBusy}>
+                  보내기
+                </button>
+              </div>
+              <div className="row">
+                <button type="button" className="ghost" onClick={copyAiImagePrompt}>
+                  이미지 프롬프트 복사
+                </button>
+                <button type="button" className="ghost" onClick={applyMockAiDraft}>
+                  샘플 대본 적용
+                </button>
+              </div>
+              <textarea
+                className="ai-draft-input"
+                value={aiDraftText}
+                onChange={(event) => setAiDraftText(event.target.value)}
+                placeholder="AI가 만든 양식.md가 여기에 표시됩니다. 필요하면 수정 후 카드에 적용하세요."
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                data-smoke-action="ai-apply-draft"
+                onClick={() => applyAiDraft(aiDraftText)}
+                disabled={!aiDraftText.trim()}
+              >
+                카드에 적용
+              </button>
+              {aiTranscript.length > 0 ? (
+                <ol className="ai-transcript">
+                  {aiTranscript.slice(-4).map((message, index) => (
+                    <li key={`${message.role}-${index}`}>
+                      <strong>{message.role === "assistant" ? "AI" : "나"}</strong>
+                      <span>{message.content.slice(0, 160)}</span>
+                    </li>
+                  ))}
+                </ol>
               ) : null}
             </div>
           </section>

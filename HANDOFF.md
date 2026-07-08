@@ -450,6 +450,44 @@
 2. M3의 Lite 스트리핑은 packaged `app.asar` 기준으로 Pro 실행 심볼 부재를 자동 검증했다. 후속 M4 AI는 반드시 `ProCardnewsApi`/Pro main 쪽에만 추가하고, Lite verify forbidden list에 `ai:*`/AI handler 심볼을 유지해야 한다.
 3. 다음 구현은 V6 M4 R7 프로그램 내 AI(Pro 전용)이다. CLI 실행은 stdin 전달/allowlist provider/AI 출력 parse-only 원칙을 지켜야 한다.
 
+## 6-13. V6 M4 Pro 전용 AI 초안 생성 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-lite-pro-prd.md`
+
+**구현 완료**:
+- Pro API에만 `listAiProviders()`와 `runAiChat()`을 추가했다. Lite API/preload/main에는 AI IPC를 추가하지 않았다.
+- Pro 전용 AI 어댑터 `electron/ai/cliAdapters.ts`를 추가했다. provider allowlist는 `claude`, `codex`, `gemini`이며, 프롬프트는 stdin으로만 전달한다. AI 결과는 실행하지 않고 `parseDeckDocument()`로만 해석한다.
+- provider status는 버전 명령으로 감지하고, 미설치 시 install hint를 UI에 보여준다. `CARDNEWS_MOCK_AI=1`에서는 네트워크/로그인 없이 결정적 10장 `양식.md` 초안을 반환한다.
+- 내보내기 탭에 Pro AI 패널을 추가했다. 주제/리서치/대본 프리셋, 자유 채팅, AI 초안 textarea, 초안 적용, 이미지 생성 프롬프트 복사 버튼을 제공한다.
+- `src/edition/pro/ai/aiPrompts.ts`에 프롬프트 빌더, fenced template 추출, mock draft 생성을 분리하고 단위 테스트로 고정했다.
+- `scripts/verify-edition.mjs`의 Lite 금지 심볼 목록에 AI IPC/handler/API 명칭을 추가했다.
+- `CARDNEWS_SMOKE_ACTION=ai-draft-regression` smoke를 추가해 AI 패널 열기 -> mock 초안 생성 -> 10장 파싱/적용 -> PNG 렌더 완료를 검증한다.
+
+**증거**:
+- 표준 gate:
+  - `.omc/evidence/v6/m4/final-typecheck.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/m4/final-test.log` — `npm test` exit 0, 14 files / 87 tests pass
+  - `.omc/evidence/v6/m4/final-build.log` — `npm run build` exit 0
+- Pro regression smoke:
+  - `.omc/evidence/v6/m4/smoke-style-matrix-pro.log` — style matrix exit 0, 모든 hardGate pass
+  - `.omc/evidence/v6/m4/smoke-layer-controls-regression-pro.log` — `layer-controls-regression` exit 0
+  - `.omc/evidence/v6/m4/smoke-ai-draft-regression-pro.log` — `ai-draft-regression` + `CARDNEWS_MOCK_AI=1` exit 0
+- Lite stripping:
+  - `.omc/evidence/v6/m4/build-lite.log` — `npm run build:lite` exit 0
+  - `.omc/evidence/v6/m4/verify-edition-lite-dist.log` — `dist`/`dist-electron` Lite 금지 심볼 스캔 exit 0
+  - `.omc/evidence/v6/m4/smoke-edition-lite-regression.log` — `edition-lite-regression` exit 0
+- Diff safety:
+  - `.omc/evidence/v6/m4/git-diff-check.log` — `git diff --check` exit 0
+
+**디버깅 감사**:
+1. H1 NodeNext 포함/확장자 문제: AI 프롬프트 모듈과 Electron AI 어댑터가 `tsconfig.node.json` 범위 밖이라 typecheck가 실패했다. node tsconfig include에 Pro AI/Electron AI 파일을 추가하고 NodeNext 요구에 맞춰 `.js` import를 사용해 해소했다.
+2. H2 AI smoke 클릭 타이밍 문제: smoke가 AI 패널이 실제로 열린 뒤 버튼을 누르지 않아 첫 실행이 timeout 됐다. `ai-draft-regression`에서 export panel/AI panel visibility를 기다린 뒤 클릭하도록 수정해 통과했다.
+3. H3 Node shell 경고 문제: `shell: true`와 args 배열 조합이 Node `DEP0190` 경고를 냈다. provider별 고정 command string과 stdin prompt 전달로 바꿔 경고 없는 smoke를 확보했다.
+
+**주의 / 다음 단계**:
+1. M4는 실제 로그인된 Claude/Codex/Gemini 응답까지 검증하지 않았다. UI-파서-렌더 경로는 `CARDNEWS_MOCK_AI=1`로 결정적으로 검증했다.
+2. 다음 단계는 V6 M5 보안 점검/버전 2.0.0/최종 설치 파일 생성이다. M5에서 `release/` 산출물을 최종 갱신하고, packaged Lite `app.asar`까지 `verify-edition.mjs`로 다시 검사해야 한다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

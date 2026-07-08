@@ -17,6 +17,13 @@ const forbiddenLiteSymbols = [
   "registerProHandlers",
   "aiChat",
   "ai:chat",
+  "cardnews:ai:listProviders",
+  "cardnews:ai:chat",
+  "runAiChat",
+  "runAiProviderChat",
+  "listAiProviders",
+  "listAiProviderStatuses",
+  "ai-draft-regression",
   "ProPanels"
 ];
 

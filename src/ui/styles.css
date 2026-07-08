@@ -1123,6 +1123,7 @@ textarea:focus {
 
 .project-panel,
 .bulk-panel,
+.ai-panel,
 .bulk-result {
   border-top: 1px solid var(--border);
   display: flex;
@@ -1133,6 +1134,38 @@ textarea:focus {
 
 .bulk-csv-input {
   min-height: 140px;
+}
+
+.ai-input,
+.ai-draft-input {
+  min-height: 92px;
+}
+
+.ai-draft-input {
+  font-family: "Pretendard", "Apple SD Gothic Neo", sans-serif;
+  min-height: 150px;
+}
+
+.ai-provider-row select {
+  min-width: 0;
+}
+
+.ai-transcript {
+  color: var(--muted);
+  display: grid;
+  font-size: 11px;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ai-transcript li {
+  overflow-wrap: anywhere;
+}
+
+.ai-transcript strong {
+  color: var(--ink);
+  margin-right: 6px;
 }
 
 .bulk-result strong {

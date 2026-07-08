@@ -1302,7 +1302,14 @@ function isAppSettings(candidate: unknown): candidate is AppSettings {
   }
 
   const record = candidate as Record<string, unknown>;
-  return record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string";
+  return (
+    (record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string") &&
+    (record["aiDefaultProviderId"] === undefined || isAiProviderIdSetting(record["aiDefaultProviderId"]))
+  );
+}
+
+function isAiProviderIdSetting(input: unknown): boolean {
+  return input === "claude" || input === "codex" || input === "gemini";
 }
 
 async function readJsonFile(filePath: string): Promise<unknown> {

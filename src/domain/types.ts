@@ -400,8 +400,31 @@ export type BulkRenderResult = {
   readonly zipPath: string;
 };
 
+export type AiProviderId = "claude" | "codex" | "gemini";
+
+export type AiProviderStatus = {
+  readonly id: AiProviderId;
+  readonly label: string;
+  readonly installed: boolean;
+  readonly installHint: string;
+  readonly version?: string;
+};
+
+export type AiChatRole = "system" | "user" | "assistant";
+
+export type AiChatMessage = {
+  readonly role: AiChatRole;
+  readonly content: string;
+};
+
+export type AiChatResult = {
+  readonly providerId: AiProviderId;
+  readonly content: string;
+};
+
 export type AppSettings = {
   readonly pixabayApiKey?: string;
+  readonly aiDefaultProviderId?: AiProviderId;
 };
 
 export type ProjectArchiveResult = {

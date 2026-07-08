@@ -14,6 +14,8 @@ import {
 } from "../src/domain/imageProviders.js";
 import type {
   AppSettings,
+  AiChatMessage,
+  AiProviderId,
   BackgroundLibraryItem,
   BulkRenderResult,
   BulkRenderRowResult,
@@ -72,6 +74,11 @@ import {
   exportProjectArchive,
   importProjectArchive
 } from "../src/storage/projectArchive.js";
+import {
+  isAiProviderId,
+  listAiProviderStatuses,
+  runAiProviderChat
+} from "./ai/cliAdapters.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const devServerUrl = process.env["VITE_DEV_SERVER_URL"];
@@ -352,6 +359,8 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       return await runBadgeBackgroundRemovalRegressionSmoke(mainWindow);
     case "next-hint-image-regression":
       return await runNextHintImageRegressionSmoke(mainWindow);
+    case "ai-draft-regression":
+      return await runAiDraftRegressionSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
@@ -1071,6 +1080,80 @@ async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promi
   }
 
   return { ok: true };
+}
+
+async function runAiDraftRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  if (process.env["CARDNEWS_MOCK_AI"] !== "1" && !listAiProviderStatuses().some((provider) => provider.installed)) {
+    return { ok: true };
+  }
+
+  await mainWindow.webContents.executeJavaScript(`
+    new Promise((resolve, reject) => {
+      const openButton = document.querySelector('[data-smoke-action="open-ai-panel"]');
+      if (!(openButton instanceof HTMLButtonElement)) {
+        reject(new Error("AI panel button was not found."));
+        return;
+      }
+      openButton.click();
+      const started = Date.now();
+      const tick = () => {
+        const panel = document.querySelector('[data-smoke-role="ai-panel"]');
+        const draftButton = document.querySelector('[data-smoke-action="ai-draft"]');
+        const panelSection = panel instanceof HTMLElement ? panel.closest("section") : null;
+        if (
+          panel instanceof HTMLElement &&
+          draftButton instanceof HTMLButtonElement &&
+          panelSection instanceof HTMLElement &&
+          panelSection.hidden === false &&
+          draftButton.disabled === false
+        ) {
+          draftButton.click();
+          resolve(true);
+          return;
+        }
+        if (Date.now() - started > 8000) {
+          reject(new Error("AI panel did not become ready."));
+          return;
+        }
+        setTimeout(tick, 100);
+      };
+      tick();
+    })
+  `);
+  await waitForSmokeText(mainWindow, ["AI 대본 적용: 카드 10장", "AI 대본 파싱 실패", "AI 오류"]);
+
+  const applied = await mainWindow.webContents.executeJavaScript(`
+    (() => {
+      const text = document.body.innerText;
+      return {
+        applied: text.includes("AI 대본 적용: 카드 10장"),
+        thumbCount: document.querySelectorAll(".slide-thumb").length
+      };
+    })()
+  `) as unknown;
+  if (!isAiSmokeUiRecord(applied) || !applied.applied || applied.thumbCount !== 10) {
+    return { ok: false, message: `AI draft did not apply ten cards: ${JSON.stringify(applied)}` };
+  }
+
+  await clickSmokeButton(mainWindow, "generate");
+  await waitForSmokeText(mainWindow, ["렌더 완료: 10장", "렌더 실패", "게이트 실패"]);
+  const renderResult = await readRenderSmokeResult(mainWindow);
+  if (!renderResult.ok) {
+    return renderResult;
+  }
+
+  const rendered = await mainWindow.webContents.executeJavaScript(`
+    (() => document.body.innerText.includes("렌더 완료: 10장"))()
+  `) as unknown;
+  return rendered === true ? { ok: true } : { ok: false, message: "AI draft did not render ten cards." };
+}
+
+function isAiSmokeUiRecord(input: unknown): input is { readonly applied: boolean; readonly thumbCount: number } {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+  const record = input as Record<string, unknown>;
+  return typeof record["applied"] === "boolean" && typeof record["thumbCount"] === "number";
 }
 
 function createSmokeBadgeBitmap(): Buffer {
@@ -2127,7 +2210,33 @@ function isAppSettings(input: unknown): input is AppSettings {
   }
 
   const record = input as Record<string, unknown>;
-  return record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string";
+  return (
+    (record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string") &&
+    (record["aiDefaultProviderId"] === undefined || isAiProviderId(record["aiDefaultProviderId"]))
+  );
+}
+
+function isAiChatMessages(input: unknown): input is readonly AiChatMessage[] {
+  if (!Array.isArray(input) || input.length === 0 || input.length > 16) {
+    return false;
+  }
+
+  return input.every((message) => {
+    if (typeof message !== "object" || message === null || Array.isArray(message)) {
+      return false;
+    }
+    const record = message as Record<string, unknown>;
+    return (
+      isAiChatRole(record["role"]) &&
+      typeof record["content"] === "string" &&
+      record["content"].trim().length > 0 &&
+      record["content"].length <= 20_000
+    );
+  });
+}
+
+function isAiChatRole(input: unknown): input is AiChatMessage["role"] {
+  return input === "system" || input === "user" || input === "assistant";
 }
 
 function isStockImageDownloadInput(input: unknown): input is StockImageDownloadInput {
@@ -2782,6 +2891,17 @@ app.whenReady().then(() => {
 
     await saveAppSettings(storageRoot(), settings);
     return undefined;
+  });
+  ipcMain.handle("cardnews:ai:listProviders", () => listAiProviderStatuses());
+  ipcMain.handle("cardnews:ai:chat", async (_event, providerId: unknown, messages: unknown) => {
+    if (!isAiProviderId(providerId)) {
+      return invalidInput("AI provider는 claude, codex, gemini 중 하나여야 합니다.");
+    }
+    if (!isAiChatMessages(messages)) {
+      return invalidInput("AI 대화 메시지 형식이 올바르지 않습니다.");
+    }
+
+    return runAiProviderChat(providerId, messages, { cwd: storageRoot() });
   });
   ipcMain.handle("cardnews:listCustomStyles", () => listCustomStyles(storageRoot()));
   ipcMain.handle("cardnews:saveCustomStyle", (_event, style: unknown) => {

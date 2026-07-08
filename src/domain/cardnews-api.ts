@@ -1,5 +1,9 @@
 import type {
   AppSettings,
+  AiChatMessage,
+  AiChatResult,
+  AiProviderId,
+  AiProviderStatus,
   BackgroundLibraryItem,
   BulkRenderResult,
   Card,
@@ -77,6 +81,11 @@ export type ProCardnewsApi = LiteCardnewsApi & {
   readonly removeImageBackground: (imageId: string, tolerance: number) => Promise<CardnewsResult<ImageLibraryItem>>;
   readonly exportProject: () => Promise<CardnewsResult<ProjectArchiveResult>>;
   readonly importProject: () => Promise<CardnewsResult<ProjectImportResult>>;
+  readonly listAiProviders: () => Promise<CardnewsResult<readonly AiProviderStatus[]>>;
+  readonly runAiChat: (
+    providerId: AiProviderId,
+    messages: readonly AiChatMessage[]
+  ) => Promise<CardnewsResult<AiChatResult>>;
 };
 
 export type CardnewsApi = ProCardnewsApi;

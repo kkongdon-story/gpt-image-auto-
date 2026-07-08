@@ -254,7 +254,14 @@ function isAppSettings(input: unknown): input is AppSettings {
   }
 
   const record = input as Record<string, unknown>;
-  return record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string";
+  return (
+    (record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string") &&
+    (record["aiDefaultProviderId"] === undefined || isAiProviderIdSetting(record["aiDefaultProviderId"]))
+  );
+}
+
+function isAiProviderIdSetting(input: unknown): boolean {
+  return input === "claude" || input === "codex" || input === "gemini";
 }
 
 function isStylePresetRecord(input: unknown): input is StylePresetRecord {

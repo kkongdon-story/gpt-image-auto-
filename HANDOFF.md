@@ -368,6 +368,40 @@
 
 **다음 단계**: V6 M2를 PRD 순서대로 진행한다. 먼저 R4 콘텐츠 폼+명시적 줄바꿈을 TDD로 구현하고, 이어 R3 배지/배경제거, R5 넘김기호 커스텀 이미지까지 완료한 뒤 표준 gate와 milestone smoke를 통과시키고 커밋한다.
 
+## 6-11. V6 M2 콘텐츠 폼·배지 확장·넘김기호 완료 (2026-07-08 Codex/ULW)
+
+**기준 문서**: `.omc/plans/v6-lite-pro-prd.md`
+
+**구현 완료**:
+- R4 콘텐츠 탭을 구조화 폼으로 승격했다. 유형/배지/제목/소제목/본문 문단/불릿/출처/강조를 필드로 편집하고, 원문 편집은 고급 토글로 유지한다.
+- 라벨 값의 명시적 줄바꿈 문법을 추가했다. 필드 내부 줄바꿈은 원문에서 `|`로 직렬화되고, `\|`는 literal pipe로 보존되며, 미리보기/PNG는 같은 `buildCardHtml()`에서 `<br/>`로 렌더한다.
+- 카드별 typography override에 `letterSpacing`, `lineHeight`, `scope`를 추가했다. UI 슬라이더와 저장/복원, 렌더 CSS가 연결되어 있다.
+- R3 배지 override를 확장했다. 배지 모양(`pill`/`rect`/`none`), 이미지 배지, 이미지 높이, 이미지 라이브러리(`library/images`)를 지원한다.
+- 색상 기반 배경 제거(`removeBackground`) 순수 모듈과 IPC를 추가했다. 모서리 배경색 flood-fill로 단색 배경을 제거하고 원본 이미지는 보존한다.
+- 품질 게이트는 이미지 슬롯(`badge-image`, `next-hint-image`, `*-image`)에 대해 텍스트 대비/폰트 검사만 제외하고 safezone/overlap 검사는 유지한다.
+- R5 deck-level `nextHint`를 추가했다. 기본 화살표, 이미지 선택, 없음 모드를 지원하며 마지막 카드는 모든 모드에서 넘김 기호를 렌더하지 않는다. 기존 마지막 카드 `■`도 제거했다.
+- Electron smoke에 `content-form-regression`, `badge-background-removal-regression`, `next-hint-image-regression`을 추가했다.
+
+**증거**:
+- RED 기록:
+  - `.omc/evidence/v6/m2/red-r4-content-form.log` — R4 구현 전 실패
+  - `.omc/evidence/v6/m2/red-r3-badge-bgremoval.log` — R3 구현 전 실패
+  - `.omc/evidence/v6/m2/red-r5-next-hint.log` — R5 구현 전 실패
+- 최종 표준 gate:
+  - `.omc/evidence/v6/m2/final-typecheck.log` — `npm run typecheck` exit 0
+  - `.omc/evidence/v6/m2/final-test.log` — `npm test` exit 0, 13 files / 84 tests pass
+  - `.omc/evidence/v6/m2/final-build.log` — `npm run build` exit 0
+- 최종 smoke:
+  - `.omc/evidence/v6/m2/final-smoke-style-matrix.log` — style matrix exit 0, 모든 hardGate pass
+  - `.omc/evidence/v6/m2/final-smoke-layer-controls.log` — `layer-controls-regression` exit 0
+  - `.omc/evidence/v6/m2/final-smoke-line-endpoint.log` — `line-endpoint-regression` exit 0
+  - `.omc/evidence/v6/m2/final-smoke-chrome-style.log` — `chrome-style-regression` exit 0
+  - `.omc/evidence/v6/m2/final-smoke-content-form.log` — `content-form-regression` exit 0
+  - `.omc/evidence/v6/m2/final-smoke-badge-bgremoval.log` — `badge-background-removal-regression` exit 0
+  - `.omc/evidence/v6/m2/final-smoke-next-hint.log` — `next-hint-image-regression` exit 0
+
+**다음 단계**: V6 M3 R6 에디션 시스템을 시작한다. PRD §7의 Lite/Pro 매트릭스는 사용자 확정이므로 변경하지 말고, 빌드 타임 스트리핑 구조를 도입한 뒤 `scripts/verify-edition.mjs`와 `edition-lite-regression` smoke가 통과해야 M3 완료로 본다.
+
 ## 7. 참고 리소스
 
 - cardprinter 클론 위치(스크래치패드, 임시): `C:\Users\js480\AppData\Local\Temp\claude\...\scratchpad\cardprinter` — 세션 종료 시 사라질 수 있음. 재클론: `git clone https://github.com/kimsh-1/cardprinter`

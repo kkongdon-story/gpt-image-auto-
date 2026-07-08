@@ -10,7 +10,7 @@ import {
   type ReactElement
 } from "react";
 import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
-import { parseCardText } from "../domain/cardParser";
+import { parseCardText, serializeCard } from "../domain/cardParser";
 import { defaultChromeConfig, normalizeChromeConfig } from "../domain/chromeConfig";
 import { buildBulkCsvTemplate } from "../domain/csvBulk";
 import { buildTemplateDocument, parseDeckDocument } from "../domain/deckImporter";
@@ -27,10 +27,12 @@ import type {
   BackgroundLibraryItem,
   BulkRenderResult,
   Card,
+  CardBadgeOverride,
   CardLayer,
   CardLineLayer,
   CardOverride,
   CardOverrideMap,
+  CardType,
   CardnewsError,
   CardnewsResult,
   ChromeSlotStyle,
@@ -40,6 +42,8 @@ import type {
   DeckPreset,
   FontData,
   FontLibraryItem,
+  ImageLibraryItem,
+  NextHintConfig,
   RenderJobResult,
   StockImage,
   StockImageDownloadInput,
@@ -118,6 +122,11 @@ type DragState =
     };
 
 const resizeHandles: readonly ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+const cardTypeOptions: readonly { readonly value: CardType; readonly label: string }[] = [
+  { value: "cover", label: "표지" },
+  { value: "body", label: "본문" },
+  { value: "cta", label: "마무리" }
+];
 
 function layerRect(layer: CardLayer): LayerRect {
   if (layer.kind === "line") {
@@ -257,6 +266,82 @@ function layerLabel(layer: CardLayer): string {
 
 function isCardnewsError<T>(result: CardnewsResult<T>): result is CardnewsError {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
+}
+
+function parseEditorCardType(value: string): CardType {
+  if (value === "cover" || value === "body" || value === "cta") {
+    return value;
+  }
+
+  return "body";
+}
+
+function parseTypographyScope(value: string): "all" | "title" | "body" {
+  if (value === "title" || value === "body" || value === "all") {
+    return value;
+  }
+
+  return "all";
+}
+
+function parseBadgeShape(value: string): "pill" | "rect" | "none" {
+  if (value === "pill" || value === "rect" || value === "none") {
+    return value;
+  }
+
+  return "pill";
+}
+
+function parseNextHintKind(value: string): NextHintConfig["kind"] {
+  if (value === "image" || value === "none" || value === "arrows") {
+    return value;
+  }
+
+  return "arrows";
+}
+
+function normalizeNextHintForUi(nextHint: NextHintConfig | undefined): NextHintConfig {
+  if (!nextHint || nextHint.kind === "arrows") {
+    return { kind: "arrows" };
+  }
+
+  if (nextHint.kind === "none") {
+    return { kind: "none" };
+  }
+
+  const imageId = nextHint.imageId?.trim();
+  return {
+    kind: "image",
+    ...(imageId ? { imageId } : {}),
+    height: clampIntegerControl(nextHint.height ?? 40, 24, 72)
+  };
+}
+
+function setOptionalCardField(
+  card: Card,
+  field: "badge" | "subtitle" | "source" | "emphasis",
+  value: string
+): Card {
+  const cleaned = value.trim();
+
+  switch (field) {
+    case "badge": {
+      const { badge: _badge, ...rest } = card;
+      return cleaned ? { ...rest, badge: value } : rest;
+    }
+    case "subtitle": {
+      const { subtitle: _subtitle, ...rest } = card;
+      return cleaned ? { ...rest, subtitle: value } : rest;
+    }
+    case "source": {
+      const { source: _source, ...rest } = card;
+      return cleaned ? { ...rest, source: value } : rest;
+    }
+    case "emphasis": {
+      const { emphasis: _emphasis, ...rest } = card;
+      return cleaned ? { ...rest, emphasis: value } : rest;
+    }
+  }
 }
 
 const initialCards = Array.from({ length: 10 }, (_, index) => {
@@ -735,6 +820,10 @@ export function App(): ReactElement {
   const [backgroundPreviews, setBackgroundPreviews] = useState<Readonly<Record<string, string>>>({});
   const [backgroundLibrary, setBackgroundLibrary] = useState<readonly BackgroundLibraryItem[]>([]);
   const [backgroundPreview, setBackgroundPreview] = useState<string | null>(null);
+  const [imagePreviews, setImagePreviews] = useState<Readonly<Record<string, string>>>({});
+  const [imageLibrary, setImageLibrary] = useState<readonly ImageLibraryItem[]>([]);
+  const [backgroundRemovalTolerance, setBackgroundRemovalTolerance] = useState(28);
+  const [nextHintConfig, setNextHintConfig] = useState<NextHintConfig>({ kind: "arrows" });
   const [fontLibrary, setFontLibrary] = useState<readonly FontLibraryItem[]>([]);
   const [selectedFontId, setSelectedFontId] = useState<string | null>(null);
   const [customStyles, setCustomStyles] = useState<readonly StylePresetRecord[]>([]);
@@ -812,6 +901,7 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatio: aspectRatioId,
+      nextHint: nextHintConfig,
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
       ...(Object.keys(overrides).length > 0 ? { overrides } : {})
@@ -825,6 +915,7 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatioId,
+      nextHintConfig,
       backgroundId,
       selectedFontId,
       overrides
@@ -836,8 +927,9 @@ export function App(): ReactElement {
       previewDeck.cards.map((card) => {
         const override = overrides[String(card.index)];
         const cardBackgroundId = override?.backgroundId === null ? null : override?.backgroundId ?? backgroundId;
+        const assetCssUrls = { ...backgroundPreviews, ...imagePreviews };
         return buildCardHtml({
-          assetCssUrls: backgroundPreviews,
+          assetCssUrls,
           backgroundCssUrl: cardBackgroundId ? backgroundPreviews[cardBackgroundId] : undefined,
           card,
           customStyles,
@@ -846,11 +938,20 @@ export function App(): ReactElement {
           ...(override ? { override } : {})
         });
       }),
-    [previewDeck, backgroundId, backgroundPreviews, customStyles, overrides, fontCss]
+    [previewDeck, backgroundId, backgroundPreviews, customStyles, imagePreviews, overrides, fontCss]
   );
 
   const parseErrorCount = parsedEntries.filter((entry) => entry.error).length;
   const selectedEntry = parsedEntries[selectedIndex];
+  const selectedEditorEntry = useMemo<ParsedCardEntry>(() => {
+    const parsed = parseCardText(cards[selectedIndex] ?? "", selectedIndex + 1);
+    if (isCardnewsError(parsed)) {
+      return { card: fallbackCard(selectedIndex + 1, parsed), error: parsed };
+    }
+
+    return { card: parsed, error: undefined };
+  }, [cards, selectedIndex]);
+  const selectedEditorCard = selectedEditorEntry.error ? undefined : selectedEditorEntry.card;
   const selectedCardNumber = selectedIndex + 1;
   const selectedOverride = overrides[String(selectedCardNumber)];
   const selectedLayers = useMemo(() => selectedOverride?.layers ?? [], [selectedOverride]);
@@ -865,6 +966,7 @@ export function App(): ReactElement {
         workspaceResult,
         customStylesResult,
         settingsResult,
+        imageLibraryResult,
         fontLibraryResult
       ] = await Promise.all([
         window.cardnews.listBackgroundLibrary(),
@@ -872,6 +974,7 @@ export function App(): ReactElement {
         window.cardnews.loadWorkspace(),
         window.cardnews.listCustomStyles(),
         window.cardnews.loadSettings(),
+        window.cardnews.listImageLibrary(),
         window.cardnews.listFontLibrary()
       ]);
 
@@ -886,6 +989,9 @@ export function App(): ReactElement {
       }
       if (!isCardnewsError(fontLibraryResult)) {
         setFontLibrary(fontLibraryResult);
+      }
+      if (!isCardnewsError(imageLibraryResult)) {
+        setImageLibrary(imageLibraryResult);
       }
       if (!isCardnewsError(settingsResult)) {
         setSettings(settingsResult);
@@ -927,6 +1033,7 @@ export function App(): ReactElement {
     backgroundId,
     selectedFontId,
     overrides,
+    nextHintConfig,
     railWidth,
     selectedIndex
   ]);
@@ -941,7 +1048,7 @@ export function App(): ReactElement {
         ids.add(override.backgroundId);
       }
       for (const layer of override.layers ?? []) {
-        if (layer.kind === "image") {
+        if (layer.kind === "image" && backgroundLibrary.some((item) => item.id === layer.backgroundId)) {
           ids.add(layer.backgroundId);
         }
       }
@@ -952,7 +1059,30 @@ export function App(): ReactElement {
         void loadBackgroundPreview(id);
       }
     }
-  }, [backgroundId, backgroundPreviews, overrides]);
+  }, [backgroundId, backgroundLibrary, backgroundPreviews, overrides]);
+
+  useEffect(() => {
+    const ids = new Set<string>();
+    for (const override of Object.values(overrides)) {
+      if (override.badge?.imageId) {
+        ids.add(override.badge.imageId);
+      }
+      for (const layer of override.layers ?? []) {
+        if (layer.kind === "image" && imageLibrary.some((item) => item.id === layer.backgroundId)) {
+          ids.add(layer.backgroundId);
+        }
+      }
+    }
+    if (nextHintConfig.kind === "image" && nextHintConfig.imageId) {
+      ids.add(nextHintConfig.imageId);
+    }
+
+    for (const id of ids) {
+      if (!imagePreviews[id]) {
+        void loadImagePreview(id);
+      }
+    }
+  }, [imageLibrary, imagePreviews, nextHintConfig, overrides]);
 
   useEffect(() => () => clearFontBlobUrl(), []);
 
@@ -980,6 +1110,7 @@ export function App(): ReactElement {
     readonly backgroundId?: string;
     readonly aspectRatio?: string;
     readonly fontId?: string;
+    readonly nextHint?: NextHintConfig;
     readonly overrides?: CardOverrideMap;
     readonly railWidth?: number;
     readonly cards: readonly string[];
@@ -997,6 +1128,7 @@ export function App(): ReactElement {
       setAspectRatioId(snapshot.aspectRatio);
     }
     setSelectedFontId(snapshot.fontId ?? null);
+    setNextHintConfig(normalizeNextHintForUi(snapshot.nextHint));
 
     const nextCards = snapshot.cards.slice(0, maxCards);
     if (nextCards.length > 0) {
@@ -1043,6 +1175,16 @@ export function App(): ReactElement {
     }
 
     setBackgroundPreviews((current) => ({ ...current, [nextBackgroundId]: preview }));
+  }
+
+  async function loadImagePreview(imageId: string): Promise<void> {
+    const preview = await window.cardnews.getImagePreview(imageId);
+    if (isCardnewsError(preview)) {
+      setStatus(preview.message);
+      return;
+    }
+
+    setImagePreviews((current) => ({ ...current, [imageId]: preview }));
   }
 
   async function applyBackgroundSelection(nextBackgroundId: string | null): Promise<void> {
@@ -1129,6 +1271,60 @@ export function App(): ReactElement {
     setStatus(`배경 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
   }
 
+  async function addImage(): Promise<void> {
+    const added = await window.cardnews.addImageToLibrary();
+    if (isCardnewsError(added)) {
+      setStatus(added.message);
+      return;
+    }
+
+    const library = await window.cardnews.listImageLibrary();
+    if (!isCardnewsError(library)) {
+      setImageLibrary(library);
+    }
+    await loadImagePreview(added.id);
+    updateSelectedBadge({ imageId: added.id });
+    setStatus(`이미지 추가: ${added.displayName} · 현재 카드 배지로 적용했습니다.`);
+  }
+
+  async function addNextHintImage(): Promise<void> {
+    const added = await window.cardnews.addImageToLibrary();
+    if (isCardnewsError(added)) {
+      setStatus(added.message);
+      return;
+    }
+
+    const library = await window.cardnews.listImageLibrary();
+    if (!isCardnewsError(library)) {
+      setImageLibrary(library);
+    }
+    await loadImagePreview(added.id);
+    setNextHintConfig(normalizeNextHintForUi({ kind: "image", imageId: added.id, height: nextHintConfig.height ?? 40 }));
+    setStatus(`이미지 추가: ${added.displayName} · 넘김 기호로 적용했습니다.`);
+  }
+
+  async function removeSelectedBadgeBackground(): Promise<void> {
+    const imageId = selectedOverride?.badge?.imageId;
+    if (!imageId) {
+      setStatus("배경을 제거할 배지 이미지를 먼저 선택하세요.");
+      return;
+    }
+
+    const processed = await window.cardnews.removeImageBackground(imageId, backgroundRemovalTolerance);
+    if (isCardnewsError(processed)) {
+      setStatus(processed.message);
+      return;
+    }
+
+    const library = await window.cardnews.listImageLibrary();
+    if (!isCardnewsError(library)) {
+      setImageLibrary(library);
+    }
+    await loadImagePreview(processed.id);
+    updateSelectedBadge({ imageId: processed.id });
+    setStatus(`배경 제거 완료: ${processed.displayName}`);
+  }
+
   async function openExternalLink(url: string): Promise<void> {
     const result = await window.cardnews.openExternalLink(url);
     if (isCardnewsError(result)) {
@@ -1176,8 +1372,8 @@ export function App(): ReactElement {
   }
 
   function updateSelectedTypography(
-    field: "sizeScale" | "weight" | "italic",
-    value: number | boolean | undefined
+    field: "sizeScale" | "weight" | "italic" | "letterSpacing" | "lineHeight" | "scope",
+    value: number | boolean | "all" | "title" | "body" | undefined
   ): void {
     updateSelectedOverride({
       typography: {
@@ -1185,6 +1381,81 @@ export function App(): ReactElement {
         ...(value === undefined ? {} : { [field]: value })
       }
     });
+  }
+
+  function updateSelectedBadge(patch: CardBadgeOverride): void {
+    updateSelectedOverride({
+      badge: {
+        ...(selectedOverride?.badge ?? {}),
+        ...patch
+      }
+    });
+  }
+
+  function setSelectedBadgeShape(shape: "pill" | "rect" | "none" | null): void {
+    updateSelectedOverrideWith((currentOverride) => {
+      const currentBadge = currentOverride.badge ?? {};
+      if (shape === null) {
+        const { shape: _removed, ...restBadge } = currentBadge;
+        return { ...currentOverride, badge: restBadge };
+      }
+
+      return { ...currentOverride, badge: { ...currentBadge, shape } };
+    });
+  }
+
+  function setSelectedBadgeImage(imageId: string | null): void {
+    updateSelectedOverrideWith((currentOverride) => {
+      const currentBadge = currentOverride.badge ?? {};
+      if (imageId === null) {
+        const { imageId: _removed, ...restBadge } = currentBadge;
+        return { ...currentOverride, badge: restBadge };
+      }
+
+      return { ...currentOverride, badge: { ...currentBadge, imageId } };
+    });
+  }
+
+  function setNextHintKind(kind: NextHintConfig["kind"]): void {
+    if (kind === "image") {
+      const fallbackImageId = nextHintConfig.imageId ?? imageLibrary[0]?.id;
+      setNextHintConfig(
+        normalizeNextHintForUi({
+          kind: "image",
+          ...(fallbackImageId ? { imageId: fallbackImageId } : {}),
+          height: nextHintConfig.height ?? 40
+        })
+      );
+      if (fallbackImageId) {
+        void loadImagePreview(fallbackImageId);
+      }
+      return;
+    }
+
+    setNextHintConfig({ kind });
+  }
+
+  function setNextHintImage(imageId: string | null): void {
+    setNextHintConfig(
+      normalizeNextHintForUi({
+        kind: "image",
+        ...(imageId ? { imageId } : {}),
+        height: nextHintConfig.height ?? 40
+      })
+    );
+    if (imageId) {
+      void loadImagePreview(imageId);
+    }
+  }
+
+  function setNextHintHeight(height: number): void {
+    setNextHintConfig(
+      normalizeNextHintForUi({
+        kind: "image",
+        ...(nextHintConfig.imageId ? { imageId: nextHintConfig.imageId } : {}),
+        height
+      })
+    );
   }
 
   function updateSelectedLayers(layers: readonly CardLayer[]): void {
@@ -1347,7 +1618,7 @@ export function App(): ReactElement {
           width: 32,
           height: 24,
           zIndex: 1,
-          backgroundId: backgroundLibrary[0]?.id ?? backgroundId ?? "",
+          backgroundId: imageLibrary[0]?.id ?? backgroundLibrary[0]?.id ?? backgroundId ?? "",
           objectFit: "cover"
         };
     }
@@ -1386,11 +1657,16 @@ export function App(): ReactElement {
             override.adjust !== undefined ||
             override.layout !== undefined ||
             override.dim !== undefined ||
+            (override.badge !== undefined && !isEmptyBadgeOverride(override.badge)) ||
             override.typography !== undefined ||
             (override.layers !== undefined && override.layers.length > 0)
         )
       )
     );
+  }
+
+  function isEmptyBadgeOverride(badge: CardBadgeOverride): boolean {
+    return badge.shape === undefined && !badge.imageId && badge.imageHeight === undefined;
   }
 
   async function exportDesignContract(): Promise<void> {
@@ -1593,6 +1869,7 @@ export function App(): ReactElement {
       chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
+      nextHint: nextHintConfig,
       ...(customAccent ? { accentColor: customAccent } : {}),
       ...(customDim !== null ? { backgroundDim: customDim } : {}),
       ...(backgroundId ? { backgroundId } : {}),
@@ -1653,6 +1930,74 @@ export function App(): ReactElement {
     setCards((current) => current.map((card, cardIndex) => (cardIndex === index ? value : card)));
   }
 
+  function updateStructuredCard(updater: (card: Card) => Card): void {
+    if (!selectedEditorCard) {
+      return;
+    }
+
+    updateCard(selectedIndex, serializeCard(updater(selectedEditorCard)));
+  }
+
+  function updateStructuredCardType(value: string): void {
+    const type = parseEditorCardType(value);
+    updateStructuredCard((card) => ({ ...card, type }));
+  }
+
+  function updateStructuredTitle(value: string): void {
+    updateStructuredCard((card) => ({ ...card, title: value }));
+  }
+
+  function updateStructuredOptionalField(
+    field: "badge" | "subtitle" | "source" | "emphasis",
+    value: string
+  ): void {
+    updateStructuredCard((card) => setOptionalCardField(card, field, value));
+  }
+
+  function updateStructuredParagraph(index: number, value: string): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      paragraphs: card.paragraphs.map((paragraph, paragraphIndex) =>
+        paragraphIndex === index ? value : paragraph
+      )
+    }));
+  }
+
+  function addStructuredParagraph(): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      paragraphs: [...card.paragraphs, "새 문단"]
+    }));
+  }
+
+  function removeStructuredParagraph(index: number): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      paragraphs: card.paragraphs.filter((_, paragraphIndex) => paragraphIndex !== index)
+    }));
+  }
+
+  function updateStructuredBullet(index: number, value: string): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      bullets: card.bullets.map((bullet, bulletIndex) => (bulletIndex === index ? value : bullet))
+    }));
+  }
+
+  function addStructuredBullet(): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      bullets: [...card.bullets, "새 불릿"]
+    }));
+  }
+
+  function removeStructuredBullet(index: number): void {
+    updateStructuredCard((card) => ({
+      ...card,
+      bullets: card.bullets.filter((_, bulletIndex) => bulletIndex !== index)
+    }));
+  }
+
   function addCard(): void {
     if (cards.length >= maxCards) {
       setStatus(`카드는 최대 ${maxCards}장까지 만들 수 있습니다.`);
@@ -1691,6 +2036,7 @@ export function App(): ReactElement {
     setCustomAccent(null);
     setCustomDim(null);
     setSelectedFontId(null);
+    setNextHintConfig({ kind: "arrows" });
     void loadFontCss(null);
     setOverrides({});
     setEditMode(false);
@@ -1892,6 +2238,7 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatio: aspectRatioId,
+      nextHint: nextHintConfig,
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
       ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
@@ -1909,6 +2256,7 @@ export function App(): ReactElement {
       chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
+      nextHint: nextHintConfig,
       ...(customAccent ? { accentColor: customAccent } : {}),
       ...(customDim !== null ? { backgroundDim: customDim } : {}),
       ...(backgroundId ? { backgroundId } : {}),
@@ -2294,20 +2642,121 @@ export function App(): ReactElement {
             </div>
             {cardEditorTab === "content" ? (
               <>
-                <textarea
-                  className="card-input"
-                  value={cards[selectedIndex] ?? ""}
-                  onChange={(event) => updateCard(selectedIndex, event.target.value)}
-                  spellCheck={false}
-                />
-                {selectedEntry?.error ? (
-                  <p className="parse-error-text">{selectedEntry.error.message}</p>
+                {selectedEditorCard ? (
+                  <div className="content-form" data-smoke-role="content-form">
+                    <label className="stack-field">
+                      <span>유형</span>
+                      <select
+                        value={selectedEditorCard.type}
+                        onChange={(event) => updateStructuredCardType(event.target.value)}
+                      >
+                        {cardTypeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="stack-field">
+                      <span>배지</span>
+                      <input
+                        value={selectedEditorCard.badge ?? ""}
+                        onChange={(event) => updateStructuredOptionalField("badge", event.target.value)}
+                      />
+                    </label>
+                    <label className="stack-field">
+                      <span>제목</span>
+                      <textarea
+                        rows={2}
+                        data-smoke-role="content-title"
+                        value={selectedEditorCard.title}
+                        onChange={(event) => updateStructuredTitle(event.target.value)}
+                      />
+                    </label>
+                    <label className="stack-field">
+                      <span>소제목</span>
+                      <textarea
+                        rows={2}
+                        value={selectedEditorCard.subtitle ?? ""}
+                        onChange={(event) => updateStructuredOptionalField("subtitle", event.target.value)}
+                      />
+                    </label>
+                    <div className="content-form-section">
+                      <div className="section-row">
+                        <span>본문 문단</span>
+                        <button type="button" onClick={addStructuredParagraph}>
+                          추가
+                        </button>
+                      </div>
+                      {selectedEditorCard.paragraphs.map((paragraph, paragraphIndex) => (
+                        <div className="item-row" key={`paragraph-${paragraphIndex}`}>
+                          <textarea
+                            rows={2}
+                            value={paragraph}
+                            onChange={(event) => updateStructuredParagraph(paragraphIndex, event.target.value)}
+                          />
+                          <button type="button" onClick={() => removeStructuredParagraph(paragraphIndex)}>
+                            삭제
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="content-form-section">
+                      <div className="section-row">
+                        <span>불릿</span>
+                        <button type="button" onClick={addStructuredBullet}>
+                          추가
+                        </button>
+                      </div>
+                      {selectedEditorCard.bullets.map((bullet, bulletIndex) => (
+                        <div className="item-row" key={`bullet-${bulletIndex}`}>
+                          <textarea
+                            rows={2}
+                            value={bullet}
+                            onChange={(event) => updateStructuredBullet(bulletIndex, event.target.value)}
+                          />
+                          <button type="button" onClick={() => removeStructuredBullet(bulletIndex)}>
+                            삭제
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <label className="stack-field">
+                      <span>출처</span>
+                      <input
+                        value={selectedEditorCard.source ?? ""}
+                        onChange={(event) => updateStructuredOptionalField("source", event.target.value)}
+                      />
+                    </label>
+                    <label className="stack-field">
+                      <span>강조</span>
+                      <textarea
+                        rows={2}
+                        value={selectedEditorCard.emphasis ?? ""}
+                        onChange={(event) => updateStructuredOptionalField("emphasis", event.target.value)}
+                      />
+                    </label>
+                  </div>
                 ) : null}
+                {selectedEditorEntry.error ? (
+                  <p className="parse-error-text">{selectedEditorEntry.error.message}</p>
+                ) : null}
+                <details className="raw-editor" open={selectedEditorCard === undefined}>
+                  <summary>원문 편집</summary>
+                  <textarea
+                    className="card-input raw-card-input"
+                    data-smoke-role="raw-card-input"
+                    value={cards[selectedIndex] ?? ""}
+                    onChange={(event) => updateCard(selectedIndex, event.target.value)}
+                    spellCheck={false}
+                  />
+                </details>
                 <div className="grammar-hint">
                   <span>유형: 표지|본문|마무리</span>
                   <span>제목: / 소제목: / 배지:</span>
                   <span>본문: 문단, "- "는 불릿</span>
                   <span>출처: / 강조:</span>
+                  <span>필드 줄바꿈 → 원문에서는 | 로 저장</span>
                   <span>*단어* → 포인트색 강조</span>
                 </div>
               </>
@@ -2478,6 +2927,141 @@ export function App(): ReactElement {
                     ))}
                   </select>
                 </label>
+                <div className="badge-controls" data-smoke-role="badge-controls">
+                  <p className="panel-title">배지</p>
+                  <label className="stack-field">
+                    <span>배지 모양</span>
+                    <select
+                      data-smoke-role="badge-shape-select"
+                      value={selectedOverride?.badge?.shape ?? "__preset__"}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setSelectedBadgeShape(value === "__preset__" ? null : parseBadgeShape(value));
+                      }}
+                    >
+                      <option value="__preset__">스타일 프리셋 따름</option>
+                      <option value="pill">타원</option>
+                      <option value="rect">사각</option>
+                      <option value="none">텍스트만</option>
+                    </select>
+                  </label>
+                  <label className="stack-field">
+                    <span>이미지 배지</span>
+                    <select
+                      data-smoke-role="badge-image-select"
+                      value={selectedOverride?.badge?.imageId ?? "__none__"}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setSelectedBadgeImage(value === "__none__" ? null : value);
+                        if (value !== "__none__") {
+                          void loadImagePreview(value);
+                        }
+                      }}
+                    >
+                      <option value="__none__">텍스트 배지 사용</option>
+                      {imageLibrary.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="row">
+                    <button type="button" data-smoke-action="add-badge-image" onClick={addImage}>
+                      이미지 추가
+                    </button>
+                    <button type="button" onClick={removeSelectedBadgeBackground}>
+                      배경 제거
+                    </button>
+                  </div>
+                  {selectedOverride?.badge?.imageId && imagePreviews[selectedOverride.badge.imageId] ? (
+                    <div className="image-badge-preview">
+                      <img src={imagePreviews[selectedOverride.badge.imageId]} alt="" />
+                    </div>
+                  ) : null}
+                  <label className="dim-row">
+                    <span>이미지 높이</span>
+                    <input
+                      data-smoke-role="badge-image-height"
+                      type="range"
+                      min={40}
+                      max={200}
+                      value={selectedOverride?.badge?.imageHeight ?? 96}
+                      onChange={(event) => updateSelectedBadge({ imageHeight: Number(event.target.value) })}
+                    />
+                    <small>{selectedOverride?.badge?.imageHeight ?? 96}px</small>
+                  </label>
+                  <label className="dim-row">
+                    <span>누끼 허용치</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={96}
+                      value={backgroundRemovalTolerance}
+                      onChange={(event) => setBackgroundRemovalTolerance(Number(event.target.value))}
+                    />
+                    <small>{backgroundRemovalTolerance}</small>
+                  </label>
+                </div>
+                <div className="next-hint-controls" data-smoke-role="next-hint-controls">
+                  <p className="panel-title">넘김 기호</p>
+                  <label className="stack-field">
+                    <span>표시 방식</span>
+                    <select
+                      data-smoke-role="next-hint-kind"
+                      value={nextHintConfig.kind}
+                      onChange={(event) => setNextHintKind(parseNextHintKind(event.target.value))}
+                    >
+                      <option value="arrows">기본 화살표</option>
+                      <option value="image">이미지 선택</option>
+                      <option value="none">없음</option>
+                    </select>
+                  </label>
+                  {nextHintConfig.kind === "image" ? (
+                    <>
+                      <label className="stack-field">
+                        <span>이미지</span>
+                        <select
+                          data-smoke-role="next-hint-image-select"
+                          value={nextHintConfig.imageId ?? "__none__"}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setNextHintImage(value === "__none__" ? null : value);
+                          }}
+                        >
+                          <option value="__none__">이미지 선택</option>
+                          {imageLibrary.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="row">
+                        <button type="button" data-smoke-action="add-next-hint-image" onClick={addNextHintImage}>
+                          이미지 추가
+                        </button>
+                      </div>
+                      {nextHintConfig.imageId && imagePreviews[nextHintConfig.imageId] ? (
+                        <div className="image-badge-preview">
+                          <img src={imagePreviews[nextHintConfig.imageId]} alt="" />
+                        </div>
+                      ) : null}
+                      <label className="dim-row">
+                        <span>이미지 높이</span>
+                        <input
+                          data-smoke-role="next-hint-height"
+                          type="range"
+                          min={24}
+                          max={72}
+                          value={nextHintConfig.height ?? 40}
+                          onChange={(event) => setNextHintHeight(Number(event.target.value))}
+                        />
+                        <small>{nextHintConfig.height ?? 40}px</small>
+                      </label>
+                    </>
+                  ) : null}
+                </div>
                 <label className="dim-row">
                   <span>텍스트 크기</span>
                   <input
@@ -2508,6 +3092,41 @@ export function App(): ReactElement {
                     onChange={(event) => updateSelectedTypography("italic", event.target.checked)}
                   />
                   <span>기울임</span>
+                </label>
+                <label className="stack-field">
+                  <span>타이포 적용 범위</span>
+                  <select
+                    value={selectedOverride?.typography?.scope ?? "all"}
+                    onChange={(event) => updateSelectedTypography("scope", parseTypographyScope(event.target.value))}
+                  >
+                    <option value="all">전체</option>
+                    <option value="title">제목</option>
+                    <option value="body">본문</option>
+                  </select>
+                </label>
+                <label className="dim-row">
+                  <span>자간</span>
+                  <input
+                    data-smoke-role="typography-letter-spacing"
+                    type="range"
+                    min={-5}
+                    max={10}
+                    value={Math.round((selectedOverride?.typography?.letterSpacing ?? 0) * 100)}
+                    onChange={(event) => updateSelectedTypography("letterSpacing", Number(event.target.value) / 100)}
+                  />
+                  <small>{(selectedOverride?.typography?.letterSpacing ?? 0).toFixed(2)}em</small>
+                </label>
+                <label className="dim-row">
+                  <span>행간</span>
+                  <input
+                    data-smoke-role="typography-line-height"
+                    type="range"
+                    min={110}
+                    max={200}
+                    value={Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}
+                    onChange={(event) => updateSelectedTypography("lineHeight", Number(event.target.value) / 100)}
+                  />
+                  <small>{Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}%</small>
                 </label>
                 <label className="dim-row">
                   <span>밝기</span>

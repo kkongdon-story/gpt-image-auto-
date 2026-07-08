@@ -32,27 +32,29 @@ export function evaluateQualityGates(
   const issues: QualityGateIssue[] = [];
 
   for (const metric of metrics) {
-    const contrastRatio = calculateContrastRatio(metric.color, metric.backgroundColor);
-    if (contrastRatio < minimumContrastRatio) {
-      issues.push({
-        cardIndex: metric.cardIndex,
-        gate: "contrast",
-        measured: roundMeasurement(contrastRatio),
-        message: `${metric.slot} contrast is ${roundMeasurement(contrastRatio)}:1; ${minimumContrastRatio}:1 is required.`,
-        required: minimumContrastRatio,
-        severity: "fail",
-        slot: metric.slot
-      });
-    } else if (contrastRatio < warningContrastRatio) {
-      issues.push({
-        cardIndex: metric.cardIndex,
-        gate: "filter_contrast",
-        measured: roundMeasurement(contrastRatio),
-        message: `${metric.slot} contrast is close to the minimum after color adjustment.`,
-        required: warningContrastRatio,
-        severity: "warn",
-        slot: metric.slot
-      });
+    if (!isImageSlot(metric.slot)) {
+      const contrastRatio = calculateContrastRatio(metric.color, metric.backgroundColor);
+      if (contrastRatio < minimumContrastRatio) {
+        issues.push({
+          cardIndex: metric.cardIndex,
+          gate: "contrast",
+          measured: roundMeasurement(contrastRatio),
+          message: `${metric.slot} contrast is ${roundMeasurement(contrastRatio)}:1; ${minimumContrastRatio}:1 is required.`,
+          required: minimumContrastRatio,
+          severity: "fail",
+          slot: metric.slot
+        });
+      } else if (contrastRatio < warningContrastRatio) {
+        issues.push({
+          cardIndex: metric.cardIndex,
+          gate: "filter_contrast",
+          measured: roundMeasurement(contrastRatio),
+          message: `${metric.slot} contrast is close to the minimum after color adjustment.`,
+          required: warningContrastRatio,
+          severity: "warn",
+          slot: metric.slot
+        });
+      }
     }
 
     if (!isInsideSafeZone(metric, dimensions)) {
@@ -67,7 +69,7 @@ export function evaluateQualityGates(
       });
     }
 
-    if (metric.fontSize < minimumFontSize) {
+    if (!isImageSlot(metric.slot) && metric.fontSize < minimumFontSize) {
       issues.push({
         cardIndex: metric.cardIndex,
         gate: "font_floor",
@@ -102,6 +104,10 @@ export function evaluateQualityGates(
     status: reportStatus(issues),
     issues
   };
+}
+
+function isImageSlot(slot: string): boolean {
+  return slot === "badge-image" || slot.endsWith("-image");
 }
 
 function evaluateSlotOverlapFailures(metrics: readonly RenderSlotMetric[]): readonly QualityGateIssue[] {

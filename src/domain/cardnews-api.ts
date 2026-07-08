@@ -10,6 +10,7 @@ import type {
   FontData,
   FontLibraryItem,
   ImportedDocument,
+  ImageLibraryItem,
   LocalImageRef,
   ProjectArchiveResult,
   ProjectImportResult,
@@ -43,6 +44,10 @@ export type CardnewsApi = {
   readonly exportTemplateFile: (content: string) => Promise<CardnewsResult<string>>;
   readonly listBackgroundLibrary: () => Promise<CardnewsResult<readonly BackgroundLibraryItem[]>>;
   readonly addBackgroundToLibrary: () => Promise<CardnewsResult<BackgroundLibraryItem>>;
+  readonly listImageLibrary: () => Promise<CardnewsResult<readonly ImageLibraryItem[]>>;
+  readonly addImageToLibrary: () => Promise<CardnewsResult<ImageLibraryItem>>;
+  readonly getImagePreview: (imageId: string) => Promise<CardnewsResult<string>>;
+  readonly removeImageBackground: (imageId: string, tolerance: number) => Promise<CardnewsResult<ImageLibraryItem>>;
   readonly searchStockImages: (query: string, page: number) => Promise<CardnewsResult<StockImageSearchResult>>;
   readonly downloadStockImage: (input: StockImageDownloadInput) => Promise<CardnewsResult<BackgroundLibraryItem>>;
   readonly loadSettings: () => Promise<CardnewsResult<AppSettings>>;

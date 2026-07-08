@@ -2,6 +2,7 @@
 import { findAspectRatio } from "../domain/aspectRatios.js";
 import type {
   Card,
+  CardBadgeOverride,
   CardImageAdjust,
   CardLayer,
   CardLineLayer,
@@ -10,7 +11,8 @@ import type {
   CardTypographyOverride,
   ChromeConfig,
   ChromeSlotStyle,
-  Deck
+  Deck,
+  NextHintConfig
 } from "../domain/types.js";
 import { defaultChromeConfig, normalizeChromeConfig, renderPageNumber } from "../domain/chromeConfig.js";
 import { getLineLayerRenderGeometry, normalizeLineLayer } from "../domain/lineLayer.js";
@@ -34,16 +36,33 @@ type ResolvedTheme = {
   readonly cardWidth: number;
   readonly cardHeight: number;
   readonly adjust: CardImageAdjust;
+  readonly badge: ResolvedBadge;
   readonly layout: CardLayoutOverride;
   readonly layers: readonly CardLayer[];
+  readonly nextHint: ResolvedNextHint;
   readonly typography: ResolvedTypography;
   readonly chrome: ChromeConfig;
+};
+
+type ResolvedBadge = {
+  readonly shape: "pill" | "rect" | "none" | undefined;
+  readonly imageId: string | undefined;
+  readonly imageHeight: number;
+};
+
+type ResolvedNextHint = {
+  readonly kind: "arrows" | "image" | "none";
+  readonly imageId: string | undefined;
+  readonly height: number;
 };
 
 type ResolvedTypography = {
   readonly fontFamily: string | undefined;
   readonly italic: boolean | undefined;
+  readonly letterSpacing: number;
+  readonly lineHeight: number;
   readonly sizeScale: number;
+  readonly scope: "all" | "title" | "body";
   readonly weight: number | undefined;
 };
 
@@ -93,9 +112,9 @@ export function buildCardHtml(input: CardTemplateInput): string {
       ${renderLayers(theme, input.assetCssUrls ?? {})}
       ${renderHeaderChrome(input.deck, input.card, totalCards, theme)}
       <section class="content">
-        ${renderCardBody(input.card, theme, bodyNumber)}
+        ${renderCardBody(input.card, theme, bodyNumber, input.assetCssUrls ?? {})}
       </section>
-      ${renderFooterChrome(input.deck, input.card, totalCards, theme)}
+      ${renderFooterChrome(input.deck, input.card, totalCards, theme, input.assetCssUrls ?? {})}
     </article>
     <script>
       window.__CARDNEWS_COLLECT_METRICS__ = function () {
@@ -149,8 +168,10 @@ function resolveTheme(
     cardWidth: ratio.width,
     cardHeight: ratio.height,
     adjust: normalizeAdjust(override?.adjust),
+    badge: normalizeBadge(override?.badge),
     layout: normalizeLayout(override?.layout),
     layers: normalizeLayers(override?.layers),
+    nextHint: normalizeNextHint(deck.nextHint),
     typography: normalizeTypography(override?.typography, Boolean(deck.fontId)),
     chrome: deck.chrome ? normalizeChromeConfig(deck.chrome) : defaultChromeForPreset(preset)
   };
@@ -179,15 +200,41 @@ function renderHeaderChrome(deck: Deck, card: Card, totalCards: number, theme: R
   return parts.length > 0 ? `<div class="chrome header">${parts}</div>` : "";
 }
 
-function renderFooterChrome(deck: Deck, card: Card, totalCards: number, theme: ResolvedTheme): string {
+function renderFooterChrome(
+  deck: Deck,
+  card: Card,
+  totalCards: number,
+  theme: ResolvedTheme,
+  assetCssUrls: Readonly<Record<string, string>>
+): string {
   const footer = theme.chrome.footer.visible
     ? `<span data-slot="footer" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.footer, theme))}">${escapeHtml(deck.footerAccount)}</span>`
     : "";
-  const nextHint =
-    card.index < totalCards ? `<span class="next-hint">&gt;&gt;&gt;&gt;</span>` : `<span class="next-hint">■</span>`;
+  const nextHint = renderNextHint(card, totalCards, theme, assetCssUrls);
   return footer.length > 0 || nextHint.length > 0
     ? `<div class="chrome footer">${footer}${nextHint}</div>`
     : "";
+}
+
+function renderNextHint(
+  card: Card,
+  totalCards: number,
+  theme: ResolvedTheme,
+  assetCssUrls: Readonly<Record<string, string>>
+): string {
+  const nextHint = theme.nextHint;
+  if (card.index >= totalCards || nextHint.kind === "none") {
+    return "";
+  }
+
+  if (nextHint.kind === "image") {
+    const imageSource = nextHint.imageId ? assetCssUrls[nextHint.imageId] : undefined;
+    return imageSource
+      ? `<img class="next-hint-image" data-slot="next-hint-image" src="${escapeAttribute(imageSource)}" alt="" style="display: block; height: ${nextHint.height}px; max-width: 96px; object-fit: contain; width: auto;" />`
+      : "";
+  }
+
+  return `<span class="next-hint" style="color: ${theme.accent}; font-weight: 900; letter-spacing: 0.2em;">&gt;&gt;&gt;&gt;</span>`;
 }
 
 function buildChromeSlotStyle(slot: ChromeSlotStyle, theme: ResolvedTheme): string {
@@ -207,6 +254,11 @@ function buildCss(theme: ResolvedTheme): string {
   const faintInk = preset.inkScale?.faint ?? preset.inkMuted;
   const surface = preset.surfaceLadder ?? [preset.textBackdrop, preset.chromeBackdrop, preset.textBackdrop];
   const badge = resolveEyebrowStyle(preset, accent, mutedInk);
+  const titleLetterSpacing =
+    theme.typography.scope === "body" ? Math.max(0, preset.titleTracking ?? 0) : theme.typography.letterSpacing;
+  const bodyLetterSpacing = theme.typography.scope === "title" ? 0 : theme.typography.letterSpacing;
+  const titleLineHeight = theme.typography.scope === "body" ? 1 : theme.typography.lineHeight;
+  const bodyLineHeight = theme.typography.scope === "title" ? 1 : theme.typography.lineHeight;
 
   return `
       :root {
@@ -261,7 +313,6 @@ function buildCss(theme: ResolvedTheme): string {
       .footer { bottom: 80px; }
       .chrome-label { text-transform: uppercase; }
       .page-no { color: var(--ink-title); font-weight: 700; opacity: 0.92; }
-      .next-hint { color: ${accent}; font-weight: 900; letter-spacing: 0.2em; }
       .content {
         display: flex;
         flex-direction: column;
@@ -290,9 +341,9 @@ function buildCss(theme: ResolvedTheme): string {
       }
       .badge {
         align-self: ${layout.align === "center" ? "center" : "flex-start"};
-        background: ${badge.background};
-        border-left: ${badge.borderLeft};
-        border-radius: ${badge.radius};
+        background: ${theme.badge.shape === "none" ? "transparent" : badge.background};
+        border-left: ${theme.badge.shape === "none" ? "0" : badge.borderLeft};
+        border-radius: ${badgeRadius(theme.badge, badge.radius)};
         color: ${badge.color};
         display: block;
         font-size: calc(26px * var(--body-scale));
@@ -300,9 +351,18 @@ function buildCss(theme: ResolvedTheme): string {
         letter-spacing: 0.14em;
         margin-bottom: calc(40px * var(--gap-scale) * var(--gap-badge-scale));
         max-width: 100%;
-        padding: ${badge.padding};
+        padding: ${theme.badge.shape === "none" ? "0" : badge.padding};
         text-transform: uppercase;
         width: fit-content;
+      }
+      .badge-image {
+        align-self: ${layout.align === "center" ? "center" : "flex-start"};
+        display: block;
+        height: ${theme.badge.imageHeight}px;
+        margin-bottom: calc(40px * var(--gap-scale) * var(--gap-badge-scale));
+        max-width: 100%;
+        object-fit: contain;
+        width: auto;
       }
       .big-number {
         color: ${preset.numberInk ?? accent};
@@ -316,14 +376,14 @@ function buildCss(theme: ResolvedTheme): string {
         font-family: ${theme.typography.fontFamily ?? preset.fontTitle};
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 900};
-        letter-spacing: ${Math.max(0, preset.titleTracking ?? 0).toFixed(3)}em;
+        letter-spacing: ${titleLetterSpacing.toFixed(3)}em;
         margin: 0;
         overflow-wrap: anywhere;
         word-break: keep-all;
       }
-      .cover h1 { font-size: calc(88px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: 1.16; }
-      .body h1 { font-size: calc(58px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: 1.2; }
-      .cta h1 { font-size: calc(72px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: 1.18; }
+      .cover h1 { font-size: calc(88px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: ${(1.16 * titleLineHeight).toFixed(3)}; }
+      .body h1 { font-size: calc(58px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: ${(1.2 * titleLineHeight).toFixed(3)}; }
+      .cta h1 { font-size: calc(72px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: ${(1.18 * titleLineHeight).toFixed(3)}; }
       h1 .hl {
         background: linear-gradient(transparent 58%, ${withAlpha(accent, 0.45)} 58%);
         color: ${preset.usesSurface ? titleInk : accent};
@@ -334,7 +394,8 @@ function buildCss(theme: ResolvedTheme): string {
         font-size: calc(40px * var(--body-scale) * ${theme.typography.sizeScale.toFixed(3)});
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 700};
-        line-height: 1.35;
+        letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
+        line-height: ${(1.35 * bodyLineHeight).toFixed(3)};
         margin-top: calc(36px * var(--gap-scale) * var(--gap-subtitle-scale));
         overflow-wrap: anywhere;
         word-break: keep-all;
@@ -346,7 +407,8 @@ function buildCss(theme: ResolvedTheme): string {
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 600};
         gap: calc(24px * var(--gap-scale));
-        line-height: 1.58;
+        letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
+        line-height: ${(1.58 * bodyLineHeight).toFixed(3)};
         margin-top: calc(44px * var(--gap-scale) * var(--gap-subtitle-scale));
         overflow-wrap: anywhere;
         word-break: keep-all;
@@ -364,7 +426,8 @@ function buildCss(theme: ResolvedTheme): string {
         font-size: calc(34px * var(--body-scale) * ${theme.typography.sizeScale.toFixed(3)});
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 700};
-        line-height: 1.42;
+        letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
+        line-height: ${(1.42 * bodyLineHeight).toFixed(3)};
         padding-left: 46px;
         position: relative;
         overflow-wrap: anywhere;
@@ -388,7 +451,8 @@ function buildCss(theme: ResolvedTheme): string {
         display: inline-block;
         font-size: calc(44px * var(--body-scale));
         font-weight: 900;
-        line-height: 1.25;
+        letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
+        line-height: ${(1.25 * bodyLineHeight).toFixed(3)};
         margin-top: calc(52px * var(--gap-scale));
         padding: 22px 34px;
         overflow-wrap: anywhere;
@@ -397,7 +461,8 @@ function buildCss(theme: ResolvedTheme): string {
         color: var(--ink-muted);
         font-size: max(18px, calc(25px * var(--body-scale)));
         font-weight: 600;
-        line-height: 1.3;
+        letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
+        line-height: ${(1.3 * bodyLineHeight).toFixed(3)};
         margin-top: calc(42px * var(--gap-scale));
         overflow-wrap: anywhere;
       }
@@ -505,24 +570,25 @@ function defaultLayerZIndex(layer: CardLayer): number {
 function renderCardBody(
   card: Card,
   theme: ResolvedTheme,
-  bodyNumber: number | undefined
+  bodyNumber: number | undefined,
+  assetCssUrls: Readonly<Record<string, string>>
 ): string {
   const backdrop = theme.preset.usesSurface ? theme.preset.textBackdrop : textBackdrop(theme);
   const emphasisBackdrop = theme.accent;
 
   const parts = [
-    card.badge ? `<span class="badge">${escapeHtml(card.badge)}</span>` : "",
+    renderBadge(card, theme, assetCssUrls),
     card.type === "body" && bodyNumber !== undefined
       ? `<div class="big-number">${String(bodyNumber).padStart(2, "0")}</div>`
       : "",
-    `<h1 data-slot="title" data-background-color="${backdrop}">${renderEmphasisText(card.title)}</h1>`,
+    `<h1 data-slot="title" data-background-color="${backdrop}">${renderRichText(card.title)}</h1>`,
     card.subtitle
-      ? `<div class="subtitle" data-slot="subtitle" data-background-color="${backdrop}">${renderEmphasisText(card.subtitle)}</div>`
+      ? `<div class="subtitle" data-slot="subtitle" data-background-color="${backdrop}">${renderRichText(card.subtitle)}</div>`
       : "",
     renderParagraphs(card, backdrop),
     renderBullets(card, backdrop),
     card.emphasis
-      ? `<div class="emphasis" data-slot="emphasis" data-background-color="${emphasisBackdrop}">${escapeHtml(card.emphasis)}</div>`
+      ? `<div class="emphasis" data-slot="emphasis" data-background-color="${emphasisBackdrop}">${renderPlainText(card.emphasis)}</div>`
       : "",
     card.source
       ? `<div class="source" data-slot="source" data-background-color="${backdrop}">출처: ${escapeHtml(card.source)}</div>`
@@ -530,6 +596,24 @@ function renderCardBody(
   ].join("");
 
   return `<div class="content-inner">${parts}</div>`;
+}
+
+function renderBadge(
+  card: Card,
+  theme: ResolvedTheme,
+  assetCssUrls: Readonly<Record<string, string>>
+): string {
+  const imageId = theme.badge.imageId;
+  const imageSource = imageId ? assetCssUrls[imageId] : undefined;
+  if (imageId && imageSource) {
+    return `<img class="badge-image" data-slot="badge-image" src="${escapeAttribute(imageSource)}" alt="" style="height: ${theme.badge.imageHeight}px;" />`;
+  }
+
+  if (!card.badge) {
+    return "";
+  }
+
+  return `<span class="badge">${escapeHtml(card.badge)}</span>`;
 }
 
 function computeBodyNumber(deck: Deck, card: Card): number | undefined {
@@ -559,7 +643,7 @@ function renderParagraphs(card: Card, backdrop: string): string {
   return `<div class="paragraphs">${card.paragraphs
     .map(
       (paragraph) =>
-        `<p data-slot="paragraph" data-background-color="${backdrop}">${renderEmphasisText(paragraph)}</p>`
+        `<p data-slot="paragraph" data-background-color="${backdrop}">${renderRichText(paragraph)}</p>`
     )
     .join("")}</div>`;
 }
@@ -572,7 +656,7 @@ function renderBullets(card: Card, backdrop: string): string {
   return `<ul class="bullets">${card.bullets
     .map(
       (bullet) =>
-        `<li data-slot="bullet" data-background-color="${backdrop}">${renderEmphasisText(bullet)}</li>`
+        `<li data-slot="bullet" data-background-color="${backdrop}">${renderRichText(bullet)}</li>`
     )
     .join("")}</ul>`;
 }
@@ -631,8 +715,16 @@ function visualTextLength(value: string): number {
 }
 
 /** `*단어*` 문법을 강조 하이라이트로 변환한다. escape 이후에 치환하므로 안전하다. */
-function renderEmphasisText(value: string): string {
-  return escapeHtml(value).replace(/\*([^*]+)\*/g, '<em class="hl">$1</em>');
+function renderRichText(value: string): string {
+  return renderLineBreaks(escapeHtml(value).replace(/\*([^*]+)\*/g, '<em class="hl">$1</em>'));
+}
+
+function renderPlainText(value: string): string {
+  return renderLineBreaks(escapeHtml(value));
+}
+
+function renderLineBreaks(value: string): string {
+  return value.replace(/\n/g, "<br/>");
 }
 
 function normalizeAdjust(adjust: CardImageAdjust | undefined): CardImageAdjust {
@@ -641,6 +733,45 @@ function normalizeAdjust(adjust: CardImageAdjust | undefined): CardImageAdjust {
     contrast: clampRange(adjust?.contrast ?? 1, 0.5, 1.5),
     saturation: clampRange(adjust?.saturation ?? 1, 0.5, 1.5)
   };
+}
+
+function normalizeBadge(badge: CardBadgeOverride | undefined): ResolvedBadge {
+  const imageId = badge?.imageId?.trim();
+  return {
+    shape: badge?.shape === "pill" || badge?.shape === "rect" || badge?.shape === "none" ? badge.shape : undefined,
+    imageId: imageId && imageId.length > 0 ? imageId : undefined,
+    imageHeight: Math.round(clampRange(badge?.imageHeight ?? 96, 40, 200))
+  };
+}
+
+function normalizeNextHint(nextHint: NextHintConfig | undefined): ResolvedNextHint {
+  if (!nextHint || nextHint.kind === "arrows") {
+    return { kind: "arrows", imageId: undefined, height: 40 };
+  }
+
+  if (nextHint.kind === "none") {
+    return { kind: "none", imageId: undefined, height: 40 };
+  }
+
+  const imageId = nextHint.imageId?.trim();
+  return {
+    kind: "image",
+    imageId: imageId && imageId.length > 0 ? imageId : undefined,
+    height: Math.round(clampRange(nextHint.height ?? 40, 24, 72))
+  };
+}
+
+function badgeRadius(badge: ResolvedBadge, presetRadius: string): string {
+  switch (badge.shape) {
+    case "pill":
+      return "999px";
+    case "rect":
+      return "8px";
+    case "none":
+      return "0";
+    case undefined:
+      return presetRadius;
+  }
 }
 
 function normalizeTypography(
@@ -652,7 +783,13 @@ function normalizeTypography(
       ? "\"Cardnews User Font\", \"Pretendard\", \"Malgun Gothic\", sans-serif"
       : undefined,
     italic: typography?.italic,
+    letterSpacing: clampRange(typography?.letterSpacing ?? 0, -0.05, 0.1),
+    lineHeight: typography?.lineHeight === undefined ? 1 : clampRange(typography.lineHeight, 1.1, 2),
     sizeScale: clampRange(typography?.sizeScale ?? 1, 0.65, 1.35),
+    scope:
+      typography?.scope === "title" || typography?.scope === "body" || typography?.scope === "all"
+        ? typography.scope
+        : "all",
     weight:
       typography?.weight === undefined
         ? undefined

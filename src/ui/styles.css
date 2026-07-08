@@ -969,6 +969,99 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.content-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.content-form textarea,
+.content-form input,
+.content-form select,
+.raw-editor textarea {
+  width: 100%;
+}
+
+.content-form-section {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.badge-controls,
+.next-hint-controls {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.image-badge-preview {
+  align-items: center;
+  background-color: #f8fafc;
+  background-image:
+    linear-gradient(45deg, rgba(100, 116, 139, 0.18) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(100, 116, 139, 0.18) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(100, 116, 139, 0.18) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(100, 116, 139, 0.18) 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  min-height: 92px;
+  padding: 10px;
+}
+
+.image-badge-preview img {
+  max-height: 96px;
+  max-width: 100%;
+}
+
+.section-row,
+.item-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.section-row {
+  justify-content: space-between;
+}
+
+.section-row span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.item-row textarea {
+  flex: 1;
+  min-height: 62px;
+}
+
+.item-row button,
+.section-row button {
+  flex: 0 0 auto;
+}
+
+.raw-editor {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.raw-editor summary {
+  color: var(--text-sub);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
 .modal-backdrop {
   align-items: center;
   background: rgba(24, 25, 27, 0.32);

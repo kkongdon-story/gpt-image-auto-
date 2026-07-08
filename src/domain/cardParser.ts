@@ -72,6 +72,46 @@ export function parseCardText(rawText: string, index = 1): CardnewsResult<Card> 
   });
 }
 
+export function serializeCard(card: Card): string {
+  const lines: string[] = [`유형: ${serializeCardType(card.type)}`];
+
+  if (card.badge) {
+    lines.push(`배지: ${encodeLabelValue(card.badge)}`);
+  }
+
+  lines.push(`제목: ${encodeLabelValue(card.title)}`);
+
+  if (card.subtitle) {
+    lines.push(`소제목: ${encodeLabelValue(card.subtitle)}`);
+  }
+
+  if (card.paragraphs.length > 0 || card.bullets.length > 0) {
+    const firstParagraph = card.paragraphs[0];
+    if (firstParagraph !== undefined) {
+      lines.push(`본문: ${encodeLabelValue(firstParagraph)}`);
+      for (const paragraph of card.paragraphs.slice(1)) {
+        lines.push(encodeLabelValue(paragraph));
+      }
+    } else {
+      lines.push("본문:");
+    }
+
+    for (const bullet of card.bullets) {
+      lines.push(`- ${encodeLabelValue(bullet)}`);
+    }
+  }
+
+  if (card.source) {
+    lines.push(`출처: ${encodeLabelValue(card.source)}`);
+  }
+
+  if (card.emphasis) {
+    lines.push(`강조: ${encodeLabelValue(card.emphasis)}`);
+  }
+
+  return lines.join("\n");
+}
+
 function collectCardParts(lines: readonly string[]): CardDraftParts {
   const parts: CardDraftParts = { bodyLines: [] };
 
@@ -93,7 +133,7 @@ function parseLabel(line: string): ParsedLabel | undefined {
     if (line.startsWith(definition.prefix)) {
       return {
         label: definition.label,
-        value: line.slice(definition.prefix.length).trim()
+        value: decodeLabelValue(line.slice(definition.prefix.length).trim())
       };
     }
   }
@@ -134,26 +174,26 @@ function applyLabel(parts: CardDraftParts, parsedLabel: ParsedLabel): void {
 function appendContinuation(parts: CardDraftParts, line: string): void {
   switch (parts.currentLabel) {
     case "body":
-      parts.bodyLines.push(line);
+      parts.bodyLines.push(decodeLabelValue(line));
       return;
     case "title":
-      parts.title = appendText(parts.title, line);
+      parts.title = appendText(parts.title, decodeLabelValue(line));
       return;
     case "subtitle":
-      parts.subtitle = appendText(parts.subtitle, line);
+      parts.subtitle = appendText(parts.subtitle, decodeLabelValue(line));
       return;
     case "badge":
-      parts.badge = appendText(parts.badge, line);
+      parts.badge = appendText(parts.badge, decodeLabelValue(line));
       return;
     case "source":
-      parts.source = appendText(parts.source, line);
+      parts.source = appendText(parts.source, decodeLabelValue(line));
       return;
     case "emphasis":
-      parts.emphasis = appendText(parts.emphasis, line);
+      parts.emphasis = appendText(parts.emphasis, decodeLabelValue(line));
       return;
     case "type":
     case undefined:
-      parts.bodyLines.push(line);
+      parts.bodyLines.push(decodeLabelValue(line));
       return;
   }
 }
@@ -265,6 +305,36 @@ function appendText(current: string | undefined, next: string): string {
 function cleanText(value: string | undefined): string | undefined {
   const cleaned = value?.trim();
   return cleaned && cleaned.length > 0 ? cleaned : undefined;
+}
+
+function decodeLabelValue(value: string): string {
+  let decoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    const nextCharacter = value[index + 1];
+    if (character === "\\" && nextCharacter === "|") {
+      decoded += "|";
+      index += 1;
+      continue;
+    }
+    decoded += character === "|" ? "\n" : character;
+  }
+  return decoded;
+}
+
+function encodeLabelValue(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r\n/g, "\n").replace(/\n/g, "|");
+}
+
+function serializeCardType(type: CardType): string {
+  switch (type) {
+    case "cover":
+      return "표지";
+    case "body":
+      return "본문";
+    case "cta":
+      return "마무리";
+  }
 }
 
 function invalidInput(message: string): CardnewsError {

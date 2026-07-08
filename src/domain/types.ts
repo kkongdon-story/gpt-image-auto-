@@ -51,6 +51,7 @@ export type DeckDraft = {
   readonly aspectRatio?: string;
   readonly backgroundId?: string;
   readonly fontId?: string;
+  readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
 };
 
@@ -84,6 +85,9 @@ export type CardTypographyOverride = {
   readonly sizeScale?: number;
   readonly weight?: number;
   readonly italic?: boolean;
+  readonly letterSpacing?: number;
+  readonly lineHeight?: number;
+  readonly scope?: "all" | "title" | "body";
 };
 
 export type ChromeSlotStyle = {
@@ -157,9 +161,22 @@ export type CardImageLayer = CardLayerBase & {
 
 export type CardLayer = CardTextBoxLayer | CardShapeLayer | CardLineLayer | CardImageLayer;
 
+export type CardBadgeOverride = {
+  readonly shape?: "pill" | "rect" | "none";
+  readonly imageId?: string;
+  readonly imageHeight?: number;
+};
+
+export type NextHintConfig = {
+  readonly kind: "arrows" | "image" | "none";
+  readonly imageId?: string;
+  readonly height?: number;
+};
+
 export type CardOverride = {
   readonly backgroundId?: string | null;
   readonly adjust?: CardImageAdjust;
+  readonly badge?: CardBadgeOverride;
   readonly layout?: CardLayoutOverride;
   readonly dim?: number;
   readonly typography?: CardTypographyOverride;
@@ -182,6 +199,7 @@ export type Deck = {
   readonly aspectRatio?: string;
   readonly backgroundId?: string;
   readonly fontId?: string;
+  readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
 };
 
@@ -292,6 +310,12 @@ export type BackgroundLibraryItem = {
   readonly attribution?: string;
 };
 
+export type ImageLibraryItem = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly attribution?: string;
+};
+
 /** 이름 붙여 저장하는 양식 프리셋 — 설정 + 카드 스켈레톤 전체 스냅샷 */
 export type DeckPreset = {
   readonly name: string;
@@ -304,6 +328,7 @@ export type DeckPreset = {
   readonly backgroundId?: string;
   readonly aspectRatio?: string;
   readonly fontId?: string;
+  readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
   readonly cards: readonly string[];
 };
@@ -319,6 +344,7 @@ export type WorkspaceState = {
   readonly backgroundId?: string;
   readonly aspectRatio?: string;
   readonly fontId?: string;
+  readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
   readonly railWidth?: number;
   readonly cards: readonly string[];

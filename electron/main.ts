@@ -30,11 +30,13 @@ import type {
   WorkspaceState
 } from "../src/domain/types.js";
 import { buildFontFaceCss } from "../src/render-engine/cardTemplate.js";
+import { removeBackground } from "../src/render-engine/backgroundRemoval.js";
 import { renderDeckOffscreen } from "../src/render-engine/offscreenRenderer.js";
 import { isSafeStylePresetRecord } from "../src/render-engine/styleSafety.js";
 import { stylePresets } from "../src/render-engine/stylePresets.js";
 import {
   addBackgroundToLibrary,
+  addImageToLibrary,
   buildDeckFromDraft,
   copyImageToDeckAssets,
   currentDeckId,
@@ -42,6 +44,7 @@ import {
   deleteDeckPresetFromStore,
   findLibraryBackground,
   findLibraryFont,
+  findLibraryImage,
   fontCssFormatForExtension,
   fontMimeTypeForExtension,
   getCardnewsStorageRoot,
@@ -53,6 +56,7 @@ import {
   listBackgroundLibrary,
   listDeckPresets,
   listFontLibrary,
+  listImageLibrary,
   loadAppSettings,
   loadDeck,
   loadWorkspaceState,
@@ -60,6 +64,7 @@ import {
   saveCustomStyle,
   saveDeckDraft,
   saveDeckPresetToStore,
+  saveImageBufferToLibrary,
   saveWorkspaceState,
   type StoredLocalImage
 } from "../src/storage/deckStore.js";
@@ -341,6 +346,12 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       return await runLineEndpointRegressionSmoke(mainWindow);
     case "chrome-style-regression":
       return await runChromeStyleRegressionSmoke(mainWindow);
+    case "content-form-regression":
+      return await runContentFormRegressionSmoke(mainWindow);
+    case "badge-background-removal-regression":
+      return await runBadgeBackgroundRemovalRegressionSmoke(mainWindow);
+    case "next-hint-image-regression":
+      return await runNextHintImageRegressionSmoke(mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
@@ -707,6 +718,380 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
     return { ok: false, message: `Saved deck chrome was not updated: ${JSON.stringify(savedChrome)}` };
   }
   return await readRenderSmokeResult(mainWindow);
+}
+
+async function runContentFormRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Content form smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Content form smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLTextAreaElement
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readPreview = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        const title = iframe.contentDocument.querySelector('[data-slot="title"]');
+        const styleText = iframe.contentDocument.querySelector("style")?.textContent ?? "";
+        const raw = document.querySelector('[data-smoke-role="raw-card-input"]');
+        return {
+          rawValue: raw instanceof HTMLTextAreaElement ? raw.value : "",
+          styleText,
+          titleHtml: title?.innerHTML ?? "",
+          titleText: title?.textContent ?? ""
+        };
+      };
+
+      window.confirm = () => true;
+      await delay(1200);
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+
+      const titleInput = await waitFor('[data-smoke-role="content-title"]');
+      if (!(titleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content title field was not a textarea.");
+      }
+      setNativeValue(titleInput, "첫 줄\\n둘째 줄");
+
+      const rawDetails = document.querySelector(".raw-editor");
+      if (rawDetails instanceof HTMLDetailsElement) {
+        rawDetails.open = true;
+      }
+
+      await waitUntil(
+        () => {
+          const preview = readPreview();
+          return (
+            preview.rawValue.includes("제목: 첫 줄|둘째 줄") &&
+            (preview.titleHtml.includes("첫 줄<br>둘째 줄") ||
+              preview.titleHtml.includes("첫 줄<br/>둘째 줄")) &&
+            preview.titleText.includes("첫 줄") &&
+            preview.titleText.includes("둘째 줄")
+          );
+        },
+        () => "Content form preview did not update: " + JSON.stringify(readPreview())
+      );
+      const contentPreview = readPreview();
+
+      await clickAction("card-design-tab");
+      const letterSpacing = await waitFor('[data-smoke-role="typography-letter-spacing"]');
+      const lineHeight = await waitFor('[data-smoke-role="typography-line-height"]');
+      if (!(letterSpacing instanceof HTMLInputElement) || !(lineHeight instanceof HTMLInputElement)) {
+        throw new Error("Typography smoke controls were not range inputs.");
+      }
+      setNativeValue(letterSpacing, 6);
+      setNativeValue(lineHeight, 130);
+
+      await waitUntil(
+        () => {
+          const preview = readPreview();
+          return (
+            preview.styleText.includes("letter-spacing: 0.060em") &&
+            preview.styleText.includes("line-height: 1.508")
+          );
+        },
+        () => "Typography preview did not update: " + JSON.stringify(readPreview())
+      );
+
+      const evidence = {
+        contentPreview,
+        typographyPreview: readPreview(),
+        controls: {
+          letterSpacing: letterSpacing.value,
+          lineHeight: lineHeight.value
+        }
+      };
+      const pre = document.createElement("pre");
+      pre.id = "content-form-regression-result";
+      pre.textContent = "CONTENT_FORM_REGRESSION_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+
+      const generate = await waitFor('[data-smoke-action="generate"]');
+      if (!(generate instanceof HTMLButtonElement)) {
+        throw new Error("Content form smoke render button was not available.");
+      }
+      generate.click();
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Content form smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const controls = record["controls"] as Record<string, unknown> | undefined;
+  const contentPreview = record["contentPreview"] as Record<string, unknown> | undefined;
+  const typographyPreview = record["typographyPreview"] as Record<string, unknown> | undefined;
+  const styleText =
+    typeof typographyPreview?.["styleText"] === "string" ? typographyPreview["styleText"] : "";
+  const titleHtml =
+    typeof typographyPreview?.["titleHtml"] === "string" ? typographyPreview["titleHtml"] : "";
+  const rawValue =
+    typeof contentPreview?.["rawValue"] === "string" ? contentPreview["rawValue"] : "";
+  const failed =
+    controls?.["letterSpacing"] !== "6" ||
+    controls?.["lineHeight"] !== "130" ||
+    !rawValue.includes("제목: 첫 줄|둘째 줄") ||
+    !(titleHtml.includes("첫 줄<br>둘째 줄") || titleHtml.includes("첫 줄<br/>둘째 줄")) ||
+    !styleText.includes("letter-spacing: 0.060em") ||
+    !styleText.includes("line-height: 1.508");
+
+  if (failed) {
+    return { ok: false, message: `Content form smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  return await readRenderSmokeResult(mainWindow);
+}
+
+async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
+  if (sourceImage.isEmpty()) {
+    return { ok: false, message: "Badge smoke source image could not be created." };
+  }
+
+  const source = await saveImageBufferToLibrary(storageRoot(), sourceImage.toPNG(), "badge-smoke-source.png");
+  if (isCardnewsError(source)) {
+    return { ok: false, message: source.message };
+  }
+
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const failIfError = (result, label) => {
+        if (result && result.ok === false) {
+          throw new Error(label + ": " + result.message);
+        }
+        return result;
+      };
+      const processed = failIfError(
+        await window.cardnews.removeImageBackground(${JSON.stringify(source.id)}, 18),
+        "removeImageBackground"
+      );
+      const deck = failIfError(
+        await window.cardnews.saveDeck({
+          headerLabel: "MONEY NOTE",
+          footerAccount: "kkongdon_story",
+          styleId: "minimal",
+          aspectRatio: "4:5",
+          cards: [
+            {
+              index: 1,
+              rawText: [
+                "유형: 표지",
+                "배지: TEXT BADGE",
+                "제목: 이미지 배지 테스트",
+                "소제목: 누끼 결과가 렌더에 들어갑니다"
+              ].join("\\n")
+            }
+          ],
+          overrides: {
+            "1": {
+              badge: {
+                imageId: processed.id,
+                imageHeight: 88,
+                shape: "none"
+              }
+            }
+          }
+        }),
+        "saveDeck"
+      );
+      const rendered = failIfError(await window.cardnews.renderDeck(deck.id), "renderDeck");
+      const pre = document.createElement("pre");
+      pre.id = "badge-background-removal-regression-result";
+      pre.textContent = "BADGE_BACKGROUND_REMOVAL_RESULT " + JSON.stringify({
+        processed,
+        rendered
+      });
+      document.body.append(pre);
+      return { processed, rendered };
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Badge background removal smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const processed = record["processed"];
+  const rendered = record["rendered"];
+  if (typeof processed !== "object" || processed === null || typeof rendered !== "object" || rendered === null) {
+    return { ok: false, message: "Badge background removal smoke result shape was invalid." };
+  }
+  const processedRecord = processed as Record<string, unknown>;
+  const renderedRecord = rendered as Record<string, unknown>;
+  const processedId = processedRecord["id"];
+  const outputDir = renderedRecord["outputDir"];
+  if (typeof processedId !== "string" || typeof outputDir !== "string") {
+    return { ok: false, message: "Badge background removal smoke did not return ids and output path." };
+  }
+
+  const html = await fs.readFile(path.join(outputDir, "card-01.html"), "utf8");
+  if (!html.includes('class="badge-image"') || !html.includes('data-slot="badge-image"')) {
+    return { ok: false, message: "Rendered HTML did not contain the image badge metric slot." };
+  }
+  if (!html.includes(processedId)) {
+    return { ok: false, message: "Rendered HTML did not use the processed background-removed image." };
+  }
+
+  const pngStat = await fs.stat(path.join(outputDir, "card-01.png"));
+  if (!pngStat.isFile() || pngStat.size === 0) {
+    return { ok: false, message: "Rendered badge smoke PNG was missing or empty." };
+  }
+
+  return { ok: true };
+}
+
+async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
+  if (sourceImage.isEmpty()) {
+    return { ok: false, message: "Next hint smoke source image could not be created." };
+  }
+
+  const source = await saveImageBufferToLibrary(storageRoot(), sourceImage.toPNG(), "next-hint-smoke.png");
+  if (isCardnewsError(source)) {
+    return { ok: false, message: source.message };
+  }
+
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const failIfError = (result, label) => {
+        if (result && result.ok === false) {
+          throw new Error(label + ": " + result.message);
+        }
+        return result;
+      };
+      const deck = failIfError(
+        await window.cardnews.saveDeck({
+          headerLabel: "MONEY NOTE",
+          footerAccount: "kkongdon_story",
+          styleId: "minimal",
+          aspectRatio: "4:5",
+          nextHint: {
+            kind: "image",
+            imageId: ${JSON.stringify(source.id)},
+            height: 44
+          },
+          cards: [
+            {
+              index: 1,
+              rawText: [
+                "유형: 표지",
+                "배지: NEXT",
+                "제목: 넘김 기호 이미지",
+                "소제목: 마지막 전 카드에만 보입니다"
+              ].join("\\n")
+            },
+            {
+              index: 2,
+              rawText: [
+                "유형: 마무리",
+                "제목: 마지막 카드",
+                "본문: 마지막 장에는 넘김 기호를 숨깁니다."
+              ].join("\\n")
+            }
+          ]
+        }),
+        "saveDeck"
+      );
+      const rendered = failIfError(await window.cardnews.renderDeck(deck.id), "renderDeck");
+      const pre = document.createElement("pre");
+      pre.id = "next-hint-image-regression-result";
+      pre.textContent = "NEXT_HINT_IMAGE_RESULT " + JSON.stringify({ rendered });
+      document.body.append(pre);
+      return { rendered };
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Next hint image smoke did not return a result." };
+  }
+  const rendered = (result as Record<string, unknown>)["rendered"];
+  if (typeof rendered !== "object" || rendered === null) {
+    return { ok: false, message: "Next hint image smoke result shape was invalid." };
+  }
+  const outputDir = (rendered as Record<string, unknown>)["outputDir"];
+  if (typeof outputDir !== "string") {
+    return { ok: false, message: "Next hint image smoke did not return an output path." };
+  }
+
+  const firstHtml = await fs.readFile(path.join(outputDir, "card-01.html"), "utf8");
+  const lastHtml = await fs.readFile(path.join(outputDir, "card-02.html"), "utf8");
+  if (!firstHtml.includes('class="next-hint-image"') || !firstHtml.includes('data-slot="next-hint-image"')) {
+    return { ok: false, message: "First card did not render next hint image slot." };
+  }
+  if (!firstHtml.includes(source.id) || !firstHtml.includes("height: 44px")) {
+    return { ok: false, message: "First card did not use the configured next hint image and height." };
+  }
+  if (lastHtml.includes("next-hint") || lastHtml.includes("■")) {
+    return { ok: false, message: "Last card still rendered a next hint marker." };
+  }
+
+  const pngStat = await fs.stat(path.join(outputDir, "card-01.png"));
+  if (!pngStat.isFile() || pngStat.size === 0) {
+    return { ok: false, message: "Rendered next hint PNG was missing or empty." };
+  }
+
+  return { ok: true };
+}
+
+function createSmokeBadgeBitmap(): Buffer {
+  const width = 12;
+  const height = 12;
+  const bitmap = Buffer.alloc(width * height * 4, 255);
+  for (let y = 3; y <= 8; y += 1) {
+    for (let x = 3; x <= 8; x += 1) {
+      const offset = (y * width + x) * 4;
+      bitmap[offset] = 0;
+      bitmap[offset + 1] = 0;
+      bitmap[offset + 2] = 0;
+      bitmap[offset + 3] = 255;
+    }
+  }
+  const holeOffset = (6 * width + 6) * 4;
+  bitmap[holeOffset] = 255;
+  bitmap[holeOffset + 1] = 255;
+  bitmap[holeOffset + 2] = 255;
+  bitmap[holeOffset + 3] = 255;
+  return bitmap;
 }
 
 async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
@@ -1937,6 +2322,13 @@ async function resolveDeckRenderAssets(deck: Deck): Promise<{
     assetImagePathById[deck.backgroundId] = backgroundImagePath;
   }
 
+  if (deck.nextHint?.kind === "image" && deck.nextHint.imageId) {
+    const nextHintImage = await findLibraryImage(storageRoot(), deck.nextHint.imageId);
+    if (nextHintImage) {
+      assetImagePathById[deck.nextHint.imageId] = nextHintImage.absolutePath;
+    }
+  }
+
   for (const [cardIndex, override] of Object.entries(deck.overrides ?? {})) {
     if (override.backgroundId === null) {
       backgroundImagePathByCardIndex[cardIndex] = null;
@@ -1948,6 +2340,13 @@ async function resolveDeckRenderAssets(deck: Deck): Promise<{
       }
     }
 
+    if (override.badge?.imageId && !assetImagePathById[override.badge.imageId]) {
+      const badgeImage = await findLibraryImage(storageRoot(), override.badge.imageId);
+      if (badgeImage) {
+        assetImagePathById[override.badge.imageId] = badgeImage.absolutePath;
+      }
+    }
+
     for (const layer of override.layers ?? []) {
       if (layer.kind !== "image" || assetImagePathById[layer.backgroundId]) {
         continue;
@@ -1956,6 +2355,12 @@ async function resolveDeckRenderAssets(deck: Deck): Promise<{
       const layerBackground = await findLibraryBackground(storageRoot(), layer.backgroundId);
       if (layerBackground) {
         assetImagePathById[layer.backgroundId] = layerBackground.absolutePath;
+        continue;
+      }
+
+      const layerImage = await findLibraryImage(storageRoot(), layer.backgroundId);
+      if (layerImage) {
+        assetImagePathById[layer.backgroundId] = layerImage.absolutePath;
       }
     }
   }
@@ -2311,6 +2716,7 @@ app.whenReady().then(() => {
     return renderBulkCsvText(csvText);
   });
   ipcMain.handle("cardnews:listBackgroundLibrary", () => listBackgroundLibrary(storageRoot()));
+  ipcMain.handle("cardnews:listImageLibrary", () => listImageLibrary(storageRoot()));
   ipcMain.handle("cardnews:listFontLibrary", () => listFontLibrary(storageRoot()));
   ipcMain.handle("cardnews:importFontToLibrary", async () => {
     const filePath = await chooseFontFile();
@@ -2333,6 +2739,20 @@ app.whenReady().then(() => {
     }
 
     return addBackgroundToLibrary(storageRoot(), filePath);
+  });
+  ipcMain.handle("cardnews:addImageToLibrary", async () => {
+    const filePaths = await chooseImageFiles(false);
+    const filePath = filePaths?.[0];
+    if (!filePath) {
+      return invalidInput("이미지 선택이 취소되었습니다.");
+    }
+
+    const decodeResult = validateImageDecode(filePath);
+    if (isCardnewsError(decodeResult)) {
+      return decodeResult;
+    }
+
+    return addImageToLibrary(storageRoot(), filePath);
   });
   ipcMain.handle("cardnews:searchStockImages", (_event, query: unknown, page: unknown) => {
     if (typeof query !== "string") {
@@ -2522,6 +2942,66 @@ app.whenReady().then(() => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "알 수 없는 파일 오류";
       return invalidInput(`배경 이미지를 읽지 못했습니다: ${message}`);
+    }
+  });
+  ipcMain.handle("cardnews:getImagePreview", async (_event, imageId: unknown) => {
+    if (typeof imageId !== "string" || imageId.length === 0) {
+      return invalidInput("이미지 id가 올바르지 않습니다.");
+    }
+
+    const found = await findLibraryImage(storageRoot(), imageId);
+    const assetPath = found?.absolutePath;
+    if (!assetPath) {
+      return invalidInput("라이브러리에서 이미지를 찾지 못했습니다.");
+    }
+
+    try {
+      const image = nativeImage.createFromPath(assetPath);
+      if (image.isEmpty()) {
+        return invalidInput("이미지를 디코딩할 수 없습니다.");
+      }
+
+      const { width } = image.getSize();
+      const resized = width > 1080 ? image.resize({ width: 1080 }) : image;
+      return `data:image/png;base64,${resized.toPNG().toString("base64")}`;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "알 수 없는 파일 오류";
+      return invalidInput(`이미지를 읽지 못했습니다: ${message}`);
+    }
+  });
+  ipcMain.handle("cardnews:removeImageBackground", async (_event, imageId: unknown, tolerance: unknown) => {
+    if (typeof imageId !== "string" || imageId.length === 0) {
+      return invalidInput("이미지 id가 올바르지 않습니다.");
+    }
+    if (typeof tolerance !== "number") {
+      return invalidInput("배경 제거 허용치는 숫자여야 합니다.");
+    }
+
+    const found = await findLibraryImage(storageRoot(), imageId);
+    const assetPath = found?.absolutePath;
+    if (!assetPath) {
+      return invalidInput("라이브러리에서 이미지를 찾지 못했습니다.");
+    }
+
+    try {
+      const image = nativeImage.createFromPath(assetPath);
+      if (image.isEmpty()) {
+        return invalidInput("이미지를 디코딩할 수 없습니다.");
+      }
+
+      const { width, height } = image.getSize();
+      const bitmap = image.toBitmap();
+      const processed = removeBackground(Uint8Array.from(bitmap), width, height, Math.min(96, Math.max(1, tolerance)));
+      const processedImage = nativeImage.createFromBitmap(Buffer.from(processed), { width, height });
+      if (processedImage.isEmpty()) {
+        return invalidInput("배경 제거 결과 이미지를 생성하지 못했습니다.");
+      }
+
+      const sourceName = found.entry.displayName.replace(/\.[^.]+$/, "");
+      return saveImageBufferToLibrary(storageRoot(), processedImage.toPNG(), `${sourceName}-no-bg.png`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "알 수 없는 파일 오류";
+      return invalidInput(`배경 제거에 실패했습니다: ${message}`);
     }
   });
   ipcMain.handle("cardnews:openOutputFolder", async (_event, jobId: unknown) => {

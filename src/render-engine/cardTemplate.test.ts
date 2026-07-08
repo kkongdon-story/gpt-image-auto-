@@ -39,6 +39,118 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).not.toContain("*연결*");
   });
 
+  it("renders explicit newline characters as line breaks inside text slots", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: {
+        ...sampleCard,
+        title: "첫 줄\n둘째 줄",
+        subtitle: "소제목 첫 줄\n소제목 둘째 줄",
+        paragraphs: ["본문 첫 줄\n본문 둘째 줄"],
+        bullets: ["불릿 첫 줄\n불릿 둘째 줄"],
+        emphasis: "강조 첫 줄\n강조 둘째 줄"
+      },
+      deck: sampleDeck()
+    });
+
+    expect(html).toContain("첫 줄<br/>둘째 줄");
+    expect(html).toContain("소제목 첫 줄<br/>소제목 둘째 줄");
+    expect(html).toContain("본문 첫 줄<br/>본문 둘째 줄");
+    expect(html).toContain("불릿 첫 줄<br/>불릿 둘째 줄");
+    expect(html).toContain("강조 첫 줄<br/>강조 둘째 줄");
+  });
+
+  it("applies typography letter spacing and line height overrides by scope", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({
+        overrides: {
+          "2": {
+            typography: {
+              letterSpacing: 0.06,
+              lineHeight: 1.3,
+              scope: "title"
+            }
+          }
+        }
+      }),
+      override: {
+        typography: {
+          letterSpacing: 0.06,
+          lineHeight: 1.3,
+          scope: "title"
+        }
+      }
+    });
+
+    expect(html).toContain("letter-spacing: 0.060em");
+    expect(html).toContain("line-height: 1.560");
+    expect(html).toContain("letter-spacing: 0.000em");
+  });
+
+  it("renders badge shape overrides and image badges from the shared asset map", () => {
+    const rectBadge = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        badge: { shape: "rect" }
+      }
+    });
+    const imageBadge = buildCardHtml({
+      assetCssUrls: { "img-badge": "file:///C:/tmp/badge.png" },
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        badge: { imageHeight: 88, imageId: "img-badge", shape: "none" }
+      }
+    });
+
+    expect(rectBadge).toContain("border-radius: 8px");
+    expect(imageBadge).toContain('class="badge-image"');
+    expect(imageBadge).toContain('data-slot="badge-image"');
+    expect(imageBadge).toContain("badge.png");
+    expect(imageBadge).toContain("height: 88px");
+    expect(imageBadge).not.toContain('<span class="badge"');
+  });
+
+  it("renders deck-level next hint images and suppresses hints on the last card", () => {
+    const imageHint = buildCardHtml({
+      assetCssUrls: { "img-next": "file:///C:/tmp/next.png" },
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({
+        nextHint: { height: 44, imageId: "img-next", kind: "image" }
+      })
+    });
+    const noHint = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck({
+        nextHint: { kind: "none" }
+      })
+    });
+    const lastCard = buildCardHtml({
+      assetCssUrls: { "img-next": "file:///C:/tmp/next.png" },
+      backgroundCssUrl: undefined,
+      card: { index: 3, type: "cta", title: "끝", paragraphs: [], bullets: [] },
+      deck: sampleDeck({
+        nextHint: { height: 44, imageId: "img-next", kind: "image" }
+      })
+    });
+
+    expect(imageHint).toContain('class="next-hint-image"');
+    expect(imageHint).toContain('data-slot="next-hint-image"');
+    expect(imageHint).toContain("next.png");
+    expect(imageHint).toContain("height: 44px");
+    expect(noHint).not.toContain("next-hint");
+    expect(noHint).not.toContain("&gt;&gt;&gt;&gt;");
+    expect(lastCard).not.toContain("next-hint");
+    expect(lastCard).not.toContain("■");
+  });
+
   it("renders badge, page number, and footer mention", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,

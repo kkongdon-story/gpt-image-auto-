@@ -35,6 +35,11 @@ const api: CardnewsApi = {
   exportTemplateFile: (content: string) => ipcRenderer.invoke("cardnews:exportTemplateFile", content),
   listBackgroundLibrary: () => ipcRenderer.invoke("cardnews:listBackgroundLibrary"),
   addBackgroundToLibrary: () => ipcRenderer.invoke("cardnews:addBackgroundToLibrary"),
+  listImageLibrary: () => ipcRenderer.invoke("cardnews:listImageLibrary"),
+  addImageToLibrary: () => ipcRenderer.invoke("cardnews:addImageToLibrary"),
+  getImagePreview: (imageId: string) => ipcRenderer.invoke("cardnews:getImagePreview", imageId),
+  removeImageBackground: (imageId: string, tolerance: number) =>
+    ipcRenderer.invoke("cardnews:removeImageBackground", imageId, tolerance),
   searchStockImages: (query: string, page: number) =>
     ipcRenderer.invoke("cardnews:searchStockImages", query, page),
   downloadStockImage: (input: StockImageDownloadInput) =>

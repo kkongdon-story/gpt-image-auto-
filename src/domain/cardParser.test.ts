@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCardText } from "./cardParser.js";
+import { parseCardText, serializeCard } from "./cardParser.js";
 import type { Card, CardnewsError, CardnewsResult } from "./types.js";
 
 function isCardnewsError(result: CardnewsResult<Card>): result is CardnewsError {
@@ -88,6 +88,32 @@ describe("parseCardText", () => {
     ]);
   });
 
+  it("parses explicit pipe line breaks and escaped pipes in label values", () => {
+    const parsed = expectParsedCard(
+      parseCardText(
+        [
+          "유형: 본문",
+          "배지: QUICK\\|NOTE",
+          "제목: 첫 줄|둘째 줄",
+          "소제목: 관점\\|실행|다음 질문",
+          "본문: 문단 첫 줄|문단 둘째 줄",
+          "- 불릿 첫 줄|불릿 둘째 줄",
+          "출처: 내부\\|메모",
+          "강조: 저장|다시 보기"
+        ].join("\n"),
+        6
+      )
+    );
+
+    expect(parsed.badge).toBe("QUICK|NOTE");
+    expect(parsed.title).toBe("첫 줄\n둘째 줄");
+    expect(parsed.subtitle).toBe("관점|실행\n다음 질문");
+    expect(parsed.paragraphs).toEqual(["문단 첫 줄\n문단 둘째 줄"]);
+    expect(parsed.bullets).toEqual(["불릿 첫 줄\n불릿 둘째 줄"]);
+    expect(parsed.source).toBe("내부|메모");
+    expect(parsed.emphasis).toBe("저장\n다시 보기");
+  });
+
   it("rejects an unsupported Korean card type", () => {
     const error = expectParserError(
       parseCardText(
@@ -124,6 +150,34 @@ describe("parseCardText", () => {
 
     expect(error.code).toBe("invalid_input");
     expect(error.message).toContain("제목");
+  });
+});
+
+describe("serializeCard", () => {
+  it("round-trips every label field through the pipe line-break grammar", () => {
+    const card: Card = {
+      index: 7,
+      type: "cta",
+      badge: "SAVE|NOW",
+      title: "첫 줄\n둘째 줄",
+      subtitle: "소제목|파이프\n두 번째",
+      paragraphs: ["본문 첫 줄\n본문 둘째 줄", "둘째 문단"],
+      bullets: ["불릿|파이프", "불릿 첫 줄\n불릿 둘째 줄"],
+      source: "내부|메모",
+      emphasis: "강조 첫 줄\n강조 둘째 줄"
+    };
+
+    const serialized = serializeCard(card);
+    expect(serialized).toContain("유형: 마무리");
+    expect(serialized).toContain("배지: SAVE\\|NOW");
+    expect(serialized).toContain("제목: 첫 줄|둘째 줄");
+    expect(serialized).toContain("소제목: 소제목\\|파이프|두 번째");
+    expect(serialized).toContain("본문: 본문 첫 줄|본문 둘째 줄");
+    expect(serialized).toContain("- 불릿\\|파이프");
+    expect(serialized).toContain("- 불릿 첫 줄|불릿 둘째 줄");
+
+    const parsed = expectParsedCard(parseCardText(serialized, card.index));
+    expect(parsed).toEqual(card);
   });
 });
 

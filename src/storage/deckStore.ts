@@ -12,6 +12,7 @@ import type {
   AppSettings,
   BackgroundLibraryItem,
   Card,
+  CardBadgeOverride,
   CardImageAdjust,
   CardLayer,
   CardLayoutOverride,
@@ -24,7 +25,9 @@ import type {
   DeckDraft,
   DeckPreset,
   FontLibraryItem,
+  ImageLibraryItem,
   LocalImageRef,
+  NextHintConfig,
   StylePresetRecord,
   StyleProfile,
   WorkspaceState
@@ -93,6 +96,7 @@ export function buildDeckFromDraft(
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
     ...(input.fontId ? { fontId: input.fontId } : {}),
     ...(input.chrome ? { chrome: normalizeChromeConfig(input.chrome) } : {}),
+    ...(input.nextHint ? { nextHint: normalizeNextHintConfig(input.nextHint) } : {}),
     ...(input.overrides ? { overrides: sanitizeOverrideMap(input.overrides) } : {})
   };
 
@@ -296,6 +300,9 @@ function parseStoredDeck(deckText: string): CardnewsResult<Deck> {
     ...("chrome" in parsed && isChromeConfigCandidate(parsed.chrome)
       ? { chrome: normalizeChromeConfig(parsed.chrome) }
       : {}),
+    ...("nextHint" in parsed && isNextHintConfig(parsed.nextHint)
+      ? { nextHint: normalizeNextHintConfig(parsed.nextHint) }
+      : {}),
     ...("overrides" in parsed && isCardOverrideMap(parsed.overrides)
       ? { overrides: sanitizeOverrideMap(parsed.overrides) }
       : {})
@@ -375,6 +382,7 @@ function isCardOverride(candidate: unknown): candidate is CardOverride {
     (record["adjust"] === undefined || isCardImageAdjust(record["adjust"])) &&
     (record["layout"] === undefined || isCardLayoutOverride(record["layout"])) &&
     (record["dim"] === undefined || typeof record["dim"] === "number") &&
+    (record["badge"] === undefined || isCardBadgeOverride(record["badge"])) &&
     (record["typography"] === undefined || isCardTypographyOverride(record["typography"])) &&
     (record["layers"] === undefined ||
       (Array.isArray(record["layers"]) && record["layers"].every(isCardLayer)))
@@ -417,12 +425,61 @@ function isCardTypographyOverride(candidate: unknown): candidate is CardTypograp
   return (
     (record["sizeScale"] === undefined || typeof record["sizeScale"] === "number") &&
     (record["weight"] === undefined || typeof record["weight"] === "number") &&
-    (record["italic"] === undefined || typeof record["italic"] === "boolean")
+    (record["italic"] === undefined || typeof record["italic"] === "boolean") &&
+    (record["letterSpacing"] === undefined || typeof record["letterSpacing"] === "number") &&
+    (record["lineHeight"] === undefined || typeof record["lineHeight"] === "number") &&
+    (record["scope"] === undefined ||
+      record["scope"] === "all" ||
+      record["scope"] === "title" ||
+      record["scope"] === "body")
+  );
+}
+
+function isCardBadgeOverride(candidate: unknown): candidate is CardBadgeOverride {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    (record["shape"] === undefined ||
+      record["shape"] === "pill" ||
+      record["shape"] === "rect" ||
+      record["shape"] === "none") &&
+    (record["imageId"] === undefined || typeof record["imageId"] === "string") &&
+    (record["imageHeight"] === undefined || typeof record["imageHeight"] === "number")
   );
 }
 
 function isChromeConfigCandidate(candidate: unknown): candidate is Record<string, unknown> {
   return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+}
+
+function isNextHintConfig(candidate: unknown): candidate is NextHintConfig {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    (record["kind"] === "arrows" || record["kind"] === "image" || record["kind"] === "none") &&
+    (record["imageId"] === undefined || typeof record["imageId"] === "string") &&
+    (record["height"] === undefined || typeof record["height"] === "number")
+  );
+}
+
+function normalizeNextHintConfig(input: NextHintConfig): NextHintConfig {
+  if (input.kind !== "image") {
+    return { kind: input.kind };
+  }
+
+  const imageId = input.imageId?.trim();
+  const height = typeof input.height === "number" ? Math.round(Math.min(72, Math.max(24, input.height))) : 40;
+  return {
+    kind: "image",
+    ...(imageId ? { imageId } : {}),
+    height
+  };
 }
 
 function isCardLayer(candidate: unknown): candidate is CardLayer {
@@ -584,9 +641,14 @@ function isEmptyOverride(override: CardOverride): boolean {
     override.adjust === undefined &&
     override.layout === undefined &&
     override.dim === undefined &&
+    (override.badge === undefined || isEmptyCardBadgeOverride(override.badge)) &&
     override.typography === undefined &&
     (override.layers === undefined || override.layers.length === 0)
   );
+}
+
+function isEmptyCardBadgeOverride(badge: CardBadgeOverride): boolean {
+  return badge.shape === undefined && !badge.imageId && badge.imageHeight === undefined;
 }
 
 function isStyleProfile(candidate: unknown): candidate is StyleProfile {
@@ -633,6 +695,13 @@ function normalizeFooterAccount(value: string): string {
 // 배경 이미지를 userData/library/backgrounds에 누적 저장하고 인덱스 JSON으로 관리한다.
 
 type StoredBackgroundEntry = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly extension: string;
+  readonly attribution?: string;
+};
+
+type StoredImageEntry = {
   readonly id: string;
   readonly displayName: string;
   readonly extension: string;
@@ -716,6 +785,105 @@ export async function findLibraryBackground(
   };
 }
 
+export async function listImageLibrary(storageRoot: string): Promise<readonly ImageLibraryItem[]> {
+  const entries = await readImageIndex(storageRoot);
+  return entries.map((entry) => ({
+    id: entry.id,
+    displayName: entry.displayName,
+    ...(entry.attribution ? { attribution: entry.attribution } : {})
+  }));
+}
+
+export async function addImageToLibrary(
+  storageRoot: string,
+  sourcePath: string,
+  attribution?: string
+): Promise<CardnewsResult<ImageLibraryItem>> {
+  const extension = path.extname(sourcePath).slice(1).toLowerCase();
+  if (!mimeTypeForExtension(extension)) {
+    return invalidInput("지원하지 않는 이미지 형식입니다. png, jpg, jpeg, webp만 사용할 수 있습니다.");
+  }
+
+  const stat = await fs.stat(sourcePath);
+  if (!stat.isFile() || stat.size > maxImageSizeBytes) {
+    return invalidInput("이미지 파일은 25MB 이하만 사용할 수 있습니다.");
+  }
+
+  const entries = await readImageIndex(storageRoot);
+  const id = `img-${Date.now().toString(36)}`;
+  const entry: StoredImageEntry = {
+    id,
+    displayName: path.basename(sourcePath),
+    extension,
+    ...(attribution ? { attribution } : {})
+  };
+
+  await fs.mkdir(getImageLibraryDirectory(storageRoot), { recursive: true });
+  await fs.copyFile(sourcePath, path.join(getImageLibraryDirectory(storageRoot), `${id}.${extension}`));
+  await writeImageIndex(storageRoot, [...entries, entry]);
+
+  return {
+    id: entry.id,
+    displayName: entry.displayName,
+    ...(entry.attribution ? { attribution: entry.attribution } : {})
+  };
+}
+
+export async function saveImageBufferToLibrary(
+  storageRoot: string,
+  pngBytes: Uint8Array,
+  displayName: string,
+  attribution?: string
+): Promise<CardnewsResult<ImageLibraryItem>> {
+  if (pngBytes.byteLength === 0 || pngBytes.byteLength > maxImageSizeBytes) {
+    return invalidInput("이미지 파일은 25MB 이하만 사용할 수 있습니다.");
+  }
+
+  const entries = await readImageIndex(storageRoot);
+  const id = `img-${Date.now().toString(36)}`;
+  const entry: StoredImageEntry = {
+    id,
+    displayName: displayName.trim() || `${id}.png`,
+    extension: "png",
+    ...(attribution ? { attribution } : {})
+  };
+
+  await fs.mkdir(getImageLibraryDirectory(storageRoot), { recursive: true });
+  await fs.writeFile(path.join(getImageLibraryDirectory(storageRoot), `${id}.png`), pngBytes);
+  await writeImageIndex(storageRoot, [...entries, entry]);
+
+  return {
+    id: entry.id,
+    displayName: entry.displayName,
+    ...(entry.attribution ? { attribution: entry.attribution } : {})
+  };
+}
+
+export async function findLibraryImage(
+  storageRoot: string,
+  imageId: string
+): Promise<{ readonly absolutePath: string; readonly entry: ImageLibraryItem } | undefined> {
+  const entries = await readImageIndex(storageRoot);
+  const entry = entries.find((candidate) => candidate.id === imageId);
+  if (!entry) {
+    return undefined;
+  }
+
+  const absolutePath = path.join(getImageLibraryDirectory(storageRoot), `${entry.id}.${entry.extension}`);
+  if (!(await pathExists(absolutePath))) {
+    return undefined;
+  }
+
+  return {
+    absolutePath,
+    entry: {
+      id: entry.id,
+      displayName: entry.displayName,
+      ...(entry.attribution ? { attribution: entry.attribution } : {})
+    }
+  };
+}
+
 function getLibraryDirectory(storageRoot: string): string {
   return path.join(storageRoot, "library");
 }
@@ -726,6 +894,14 @@ function getBackgroundLibraryDirectory(storageRoot: string): string {
 
 function getBackgroundIndexPath(storageRoot: string): string {
   return path.join(getLibraryDirectory(storageRoot), "backgrounds.json");
+}
+
+function getImageLibraryDirectory(storageRoot: string): string {
+  return path.join(getLibraryDirectory(storageRoot), "images");
+}
+
+function getImageIndexPath(storageRoot: string): string {
+  return path.join(getLibraryDirectory(storageRoot), "images.json");
 }
 
 async function readBackgroundIndex(storageRoot: string): Promise<readonly StoredBackgroundEntry[]> {
@@ -746,6 +922,36 @@ async function writeBackgroundIndex(
 }
 
 function isStoredBackgroundEntry(candidate: unknown): candidate is StoredBackgroundEntry {
+  if (typeof candidate !== "object" || candidate === null) {
+    return false;
+  }
+
+  return (
+    "id" in candidate &&
+    typeof candidate.id === "string" &&
+    "displayName" in candidate &&
+    typeof candidate.displayName === "string" &&
+    "extension" in candidate &&
+    typeof candidate.extension === "string" &&
+    (!("attribution" in candidate) || typeof candidate.attribution === "string")
+  );
+}
+
+async function readImageIndex(storageRoot: string): Promise<readonly StoredImageEntry[]> {
+  const parsed = await readJsonFile(getImageIndexPath(storageRoot));
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  return parsed.filter(isStoredImageEntry);
+}
+
+async function writeImageIndex(storageRoot: string, entries: readonly StoredImageEntry[]): Promise<void> {
+  await fs.mkdir(getLibraryDirectory(storageRoot), { recursive: true });
+  await fs.writeFile(getImageIndexPath(storageRoot), JSON.stringify(entries, null, 2), "utf8");
+}
+
+function isStoredImageEntry(candidate: unknown): candidate is StoredImageEntry {
   if (typeof candidate !== "object" || candidate === null) {
     return false;
   }
@@ -990,6 +1196,7 @@ export function isDeckPreset(candidate: unknown): candidate is DeckPreset {
     typeof record["footerAccount"] === "string" &&
     typeof record["styleId"] === "string" &&
     (record["chrome"] === undefined || isChromeConfigCandidate(record["chrome"])) &&
+    (record["nextHint"] === undefined || isNextHintConfig(record["nextHint"])) &&
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
@@ -1036,6 +1243,7 @@ export function isWorkspaceState(candidate: unknown): candidate is WorkspaceStat
     typeof record["footerAccount"] === "string" &&
     typeof record["styleId"] === "string" &&
     (record["chrome"] === undefined || isChromeConfigCandidate(record["chrome"])) &&
+    (record["nextHint"] === undefined || isNextHintConfig(record["nextHint"])) &&
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
@@ -1059,6 +1267,7 @@ function sanitizeDeckPreset(preset: DeckPreset): DeckPreset {
     ...preset,
     footerAccount: normalizeFooterAccount(preset.footerAccount),
     ...(preset.chrome ? { chrome: normalizeChromeConfig(preset.chrome) } : {}),
+    ...(preset.nextHint ? { nextHint: normalizeNextHintConfig(preset.nextHint) } : {}),
     ...(preset.overrides ? { overrides: sanitizeOverrideMap(preset.overrides) } : {})
   };
 }
@@ -1068,6 +1277,7 @@ function sanitizeWorkspaceState(state: WorkspaceState): WorkspaceState {
     ...state,
     footerAccount: normalizeFooterAccount(state.footerAccount),
     ...(state.chrome ? { chrome: normalizeChromeConfig(state.chrome) } : {}),
+    ...(state.nextHint ? { nextHint: normalizeNextHintConfig(state.nextHint) } : {}),
     ...(state.overrides ? { overrides: sanitizeOverrideMap(state.overrides) } : {})
   };
 }

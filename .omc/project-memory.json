@@ -1,0 +1,90 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1783328931511,
+  "projectRoot": "C:\\Users\\js480\\OneDrive\\바탕 화면\\1_Projects\\gpt-image-auto",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "background": {
+      "path": "background",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1783328931378,
+      "keyFiles": [
+        "background.js"
+      ]
+    },
+    "content": {
+      "path": "content",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1783328931379,
+      "keyFiles": [
+        "content.js",
+        "net-hook.js"
+      ]
+    },
+    "icons": {
+      "path": "icons",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1783328931380,
+      "keyFiles": [
+        "icon128.png",
+        "icon16.png",
+        "icon48.png",
+        "threads-icon.png"
+      ]
+    },
+    "popup": {
+      "path": "popup",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1783328931381,
+      "keyFiles": [
+        "popup.css",
+        "popup.html",
+        "popup.js"
+      ]
+    },
+    "PRD": {
+      "path": "PRD",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1783328931383,
+      "keyFiles": [
+        "01_PRD.md",
+        "02_DATA_MODEL.md",
+        "03_PHASES.md",
+        "04_PROJECT_SPEC.md",
+        "05_IMAGE_ATTACH_PRD.md"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

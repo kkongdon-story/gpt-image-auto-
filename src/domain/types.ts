@@ -21,6 +21,106 @@ export type LocalImageRef = {
   readonly sizeBytes: number;
 };
 
+export type MediaKind = "image" | "video";
+export type VideoProjectMode = "cards" | "video";
+
+export type MediaAssetRef = {
+  readonly id: string;
+  readonly kind: MediaKind;
+  readonly displayName: string;
+  readonly relativePath: string;
+  readonly mimeType: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly width: number;
+  readonly height: number;
+  readonly durationMs?: number;
+  readonly hasAudio?: boolean;
+  readonly posterRelativePath?: string;
+};
+
+export type BackgroundMediaSelection =
+  | { readonly mode: "inherit" }
+  | { readonly mode: "none" }
+  | { readonly mode: "asset"; readonly mediaId: string };
+
+export type CardSceneTransition = "none" | "fade" | "slide-left" | "slide-up";
+
+export type CardSceneSettings = {
+  readonly durationMs: number;
+  readonly durationMode?: "fixed" | "fit-primary-video";
+  readonly transition: CardSceneTransition;
+  readonly transitionMs: number;
+  readonly primaryAudioSourceId: string | null;
+};
+
+export type SemanticSlotId = "title" | "subtitle" | "body" | "badge" | "footer";
+
+export type SemanticSlotPlacement = {
+  readonly mode: "flow" | "card";
+  readonly x: number;
+  readonly y: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly anchor: "top-left" | "top-center" | "top-right";
+};
+
+export type SemanticItemKind =
+  | "header"
+  | "page-number"
+  | "title"
+  | "subtitle"
+  | "paragraph"
+  | "bullet"
+  | "badge-text"
+  | "badge-image"
+  | "footer"
+  | "source"
+  | "emphasis"
+  | "body-number"
+  | "next-hint";
+
+export type SemanticItemId = string;
+
+export type SemanticTextItemKeyRef = {
+  readonly key: string;
+  readonly textHash: string;
+};
+
+export type SemanticContentKeys = {
+  readonly paragraphs?: readonly SemanticTextItemKeyRef[];
+  readonly bullets?: readonly SemanticTextItemKeyRef[];
+};
+
+export type SemanticItemPlacement = {
+  readonly mode: "flow" | "card";
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly anchor: "top-left" | "top-center" | "top-right";
+};
+
+export type BodyNumberMode = "inherit" | "show" | "hide";
+
+export type BodyNumberDefault = "show" | "hide";
+
+export type BodyNumberStyle = {
+  readonly color?: string;
+  readonly fontFamily?: string;
+  readonly fontSize?: number;
+  readonly fontWeight?: number;
+  readonly italic?: boolean;
+  readonly lineHeight?: number;
+  readonly letterSpacing?: number;
+  readonly align?: "left" | "center" | "right";
+  readonly textAlign?: "left" | "center" | "right";
+  readonly textOpacity?: number;
+  readonly zIndex?: number;
+};
+
+export type BodyNumberTextStyle = BodyNumberStyle;
+
 export type FontLibraryItem = {
   readonly id: string;
   readonly displayName: string;
@@ -50,6 +150,11 @@ export type DeckDraft = {
   readonly backgroundDim?: number;
   readonly aspectRatio?: string;
   readonly backgroundId?: string;
+  readonly backgroundMedia?: BackgroundMediaSelection;
+  readonly mediaAssets?: readonly MediaAssetRef[];
+  readonly videoProjectMode?: VideoProjectMode;
+  readonly sceneDefaults?: CardSceneSettings;
+  readonly bodyNumberDefault?: BodyNumberDefault;
   readonly fontId?: string;
   readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
@@ -79,15 +184,20 @@ export type CardLayoutOverride = {
   readonly offsetY: number;
   readonly gapBadge: number;
   readonly gapSubtitle: number;
+  readonly titlePlacement?:
+    | { readonly mode: "flow" }
+    | { readonly mode: "card-y"; readonly y: number };
 };
 
 export type CardTypographyOverride = {
+  readonly color?: string;
   readonly sizeScale?: number;
   readonly weight?: number;
   readonly italic?: boolean;
   readonly letterSpacing?: number;
   readonly lineHeight?: number;
   readonly scope?: "all" | "title" | "body";
+  readonly textOpacity?: number;
 };
 
 export type ChromeSlotStyle = {
@@ -129,6 +239,36 @@ export type CardTextBoxLayer = CardLayerBase & {
   readonly fontWeight?: number;
   readonly italic?: boolean;
   readonly align?: "left" | "center" | "right";
+  readonly textOpacity?: number;
+};
+
+export type BulkBindingTarget =
+  | { readonly kind: "deck"; readonly field: "header" | "footer" }
+  | {
+      readonly kind: "standard";
+      readonly cardNumber: number;
+      readonly field: "badge" | "title" | "subtitle" | "body" | "bullets" | "source" | "emphasis";
+    }
+  | {
+      readonly kind: "layer-text";
+      readonly cardNumber: number;
+      readonly layerId: string;
+      readonly property: "text";
+    };
+
+export type BulkBinding = {
+  readonly key: string;
+  readonly label: string;
+  readonly required: boolean;
+  readonly defaultValue?: string;
+  readonly target: BulkBindingTarget;
+};
+
+export type BulkBindingMetadata = {
+  readonly schemaVersion: 1;
+  readonly templateId: string;
+  readonly templateRevision: number;
+  readonly bindings: readonly BulkBinding[];
 };
 
 export type CardShapeLayer = CardLayerBase & {
@@ -159,7 +299,16 @@ export type CardImageLayer = CardLayerBase & {
   readonly objectFit?: "cover" | "contain";
 };
 
-export type CardLayer = CardTextBoxLayer | CardShapeLayer | CardLineLayer | CardImageLayer;
+export type CardVideoLayer = CardLayerBase & {
+  readonly kind: "video";
+  readonly mediaId: string;
+  readonly objectFit: "cover" | "contain";
+  readonly clipStartMs: number;
+  readonly clipEndMs: number | null;
+  readonly volume: number;
+};
+
+export type CardLayer = CardTextBoxLayer | CardShapeLayer | CardLineLayer | CardImageLayer | CardVideoLayer;
 
 export type CardBadgeOverride = {
   readonly shape?: "pill" | "rect" | "none";
@@ -176,12 +325,20 @@ export type NextHintConfig = {
 
 export type CardOverride = {
   readonly backgroundId?: string | null;
+  readonly backgroundMedia?: BackgroundMediaSelection;
   readonly adjust?: CardImageAdjust;
   readonly badge?: CardBadgeOverride;
   readonly layout?: CardLayoutOverride;
   readonly dim?: number;
   readonly typography?: CardTypographyOverride;
   readonly layers?: readonly CardLayer[];
+  readonly scene?: CardSceneSettings;
+  readonly semanticSlots?: Partial<Record<SemanticSlotId, SemanticSlotPlacement>>;
+  readonly semanticContentKeys?: SemanticContentKeys;
+  readonly semanticItemPlacements?: Partial<Record<SemanticItemId, SemanticItemPlacement>>;
+  readonly bodyNumberMode?: BodyNumberMode;
+  readonly bodyNumberText?: string;
+  readonly bodyNumberStyle?: BodyNumberStyle;
 };
 
 export type CardOverrideMap = Readonly<Record<string, CardOverride>>;
@@ -199,6 +356,11 @@ export type Deck = {
   readonly backgroundDim?: number;
   readonly aspectRatio?: string;
   readonly backgroundId?: string;
+  readonly backgroundMedia?: BackgroundMediaSelection;
+  readonly mediaAssets?: readonly MediaAssetRef[];
+  readonly videoProjectMode?: VideoProjectMode;
+  readonly sceneDefaults?: CardSceneSettings;
+  readonly bodyNumberDefault?: BodyNumberDefault;
   readonly fontId?: string;
   readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
@@ -317,6 +479,11 @@ export type ImageLibraryItem = {
   readonly attribution?: string;
 };
 
+export type ImageLibraryRemoveResult = {
+  readonly id: string;
+  readonly removed: boolean;
+};
+
 /** 이름 붙여 저장하는 양식 프리셋 — 설정 + 카드 스켈레톤 전체 스냅샷 */
 export type DeckPreset = {
   readonly name: string;
@@ -327,10 +494,16 @@ export type DeckPreset = {
   readonly accentColor?: string;
   readonly backgroundDim?: number;
   readonly backgroundId?: string;
+  readonly backgroundMedia?: BackgroundMediaSelection;
+  readonly mediaAssets?: readonly MediaAssetRef[];
+  readonly videoProjectMode?: VideoProjectMode;
+  readonly sceneDefaults?: CardSceneSettings;
+  readonly bodyNumberDefault?: BodyNumberDefault;
   readonly aspectRatio?: string;
   readonly fontId?: string;
   readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
+  readonly bulkBindings?: BulkBindingMetadata;
   readonly cards: readonly string[];
 };
 
@@ -343,10 +516,16 @@ export type WorkspaceState = {
   readonly accentColor?: string;
   readonly backgroundDim?: number;
   readonly backgroundId?: string;
+  readonly backgroundMedia?: BackgroundMediaSelection;
+  readonly mediaAssets?: readonly MediaAssetRef[];
+  readonly videoProjectMode?: VideoProjectMode;
+  readonly sceneDefaults?: CardSceneSettings;
+  readonly bodyNumberDefault?: BodyNumberDefault;
   readonly aspectRatio?: string;
   readonly fontId?: string;
   readonly nextHint?: NextHintConfig;
   readonly overrides?: CardOverrideMap;
+  readonly bulkBindings?: BulkBindingMetadata;
   readonly railWidth?: number;
   readonly cards: readonly string[];
   readonly selectedIndex?: number;
@@ -403,13 +582,46 @@ export type BulkRenderResult = {
 
 export type AiProviderId = "claude" | "codex" | "gemini";
 
+export type AiProviderInstallableId = Extract<AiProviderId, "claude" | "codex">;
+
+export type AiProviderInstallMethod = "npm" | "powershell-native" | "winget";
+
+export type AiProviderInstallRecipeSummary = {
+  readonly id: string;
+  readonly provider: AiProviderInstallableId;
+  readonly platform: "windows";
+  readonly method: AiProviderInstallMethod;
+  readonly commandDisplay: string;
+  readonly verifyCommandDisplay: string;
+  readonly doctorCommandDisplay?: string;
+  readonly officialUrl: string;
+  readonly prerequisites: readonly string[];
+  readonly recommended: boolean;
+};
+
 export type AiProviderStatus = {
   readonly id: AiProviderId;
   readonly label: string;
   readonly installed: boolean;
   readonly installHint: string;
+  readonly installRecipes?: readonly AiProviderInstallRecipeSummary[];
   readonly version?: string;
+  readonly diagnostic?: string;
 };
+
+export type AiProviderInstallResult =
+  | {
+      readonly ok: true;
+      readonly outcome: "installed";
+      readonly message: string;
+      readonly providerStatus: AiProviderStatus;
+    }
+  | {
+      readonly ok: false;
+      readonly outcome: "cancelled" | "failed";
+      readonly message: string;
+      readonly exitCode?: number;
+    };
 
 export type AiChatRole = "system" | "user" | "assistant";
 
@@ -426,11 +638,14 @@ export type AiChatResult = {
 export type AppSettings = {
   readonly pixabayApiKey?: string;
   readonly aiDefaultProviderId?: AiProviderId;
+  readonly aiDefaultInstruction?: string;
+  readonly gptsTemplateBuilderUrl?: string;
 };
 
 export type ProjectArchiveResult = {
   readonly filePath: string;
   readonly backgroundCount: number;
+  readonly mediaCount?: number;
   readonly fontCount: number;
   readonly presetCount: number;
   readonly styleCount: number;
@@ -438,6 +653,43 @@ export type ProjectArchiveResult = {
 
 export type ProjectImportResult = ProjectArchiveResult & {
   readonly workspace: WorkspaceState;
+};
+
+export type TemplatePackImportResult = {
+  readonly workspace: WorkspaceState;
+  readonly presetName: string;
+  readonly styleId?: string;
+  readonly backgroundCount: number;
+  readonly assetCount: number;
+  readonly mediaCount?: number;
+  readonly cardCount: number;
+  readonly warnings: readonly string[];
+};
+
+export type VideoExportStage =
+  | "compile"
+  | "preflight"
+  | "producer_init"
+  | "render"
+  | "encode"
+  | "finalize";
+
+export type VideoExportProgress = {
+  readonly stage: VideoExportStage;
+  readonly percent: number;
+  readonly completedFrames?: number;
+  readonly totalFrames?: number;
+  readonly message?: string;
+  readonly elapsedMs?: number;
+};
+
+export type VideoExportResult = {
+  readonly filePath: string;
+  readonly durationMs: number;
+  readonly frameRate: 30;
+  readonly width: 1080;
+  readonly height: 1920;
+  readonly bytes: number;
 };
 
 export type StockImage = {

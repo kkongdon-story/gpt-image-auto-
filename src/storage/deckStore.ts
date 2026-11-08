@@ -2,7 +2,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseCardText } from "../domain/cardParser.js";
+import { findBackgroundLibraryUsage } from "../domain/backgroundLibraryUsage.js";
 import { normalizeChromeConfig } from "../domain/chromeConfig.js";
+import { isHexColor, normalizeHexColor } from "../domain/colors.js";
+import { isAllowedGptsTemplateBuilderUrl } from "../domain/externalLinks.js";
+import {
+  normalizeCardSceneSettings,
+  normalizeVideoProjectMode
+} from "../domain/media.js";
 import {
   migrateLineLayer,
   normalizeLineLayer,
@@ -11,6 +18,12 @@ import {
 import type {
   AppSettings,
   BackgroundLibraryItem,
+  BackgroundMediaSelection,
+  BodyNumberDefault,
+  BodyNumberMode,
+  BodyNumberTextStyle,
+  BulkBinding,
+  BulkBindingMetadata,
   Card,
   CardBadgeOverride,
   CardImageAdjust,
@@ -21,13 +34,17 @@ import type {
   CardTypographyOverride,
   CardnewsError,
   CardnewsResult,
+  CardSceneSettings,
   Deck,
   DeckDraft,
   DeckPreset,
   FontLibraryItem,
   ImageLibraryItem,
+  ImageLibraryRemoveResult,
   LocalImageRef,
+  MediaAssetRef,
   NextHintConfig,
+  SemanticSlotPlacement,
   StylePresetRecord,
   StyleProfile,
   WorkspaceState
@@ -46,6 +63,10 @@ export const currentDeckId = "current";
 
 const maxImageSizeBytes = 25 * 1024 * 1024;
 const maxFontSizeBytes = 25 * 1024 * 1024;
+
+function createLibraryItemId(prefix: "bg" | "img"): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 export function getCardnewsStorageRoot(userDataPath: string): string {
   return path.join(userDataPath, "gpt-cardnews-auto");
@@ -94,6 +115,11 @@ export function buildDeckFromDraft(
     ...(typeof input.backgroundDim === "number" ? { backgroundDim: input.backgroundDim } : {}),
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
+    ...(input.backgroundMedia ? { backgroundMedia: input.backgroundMedia } : {}),
+    ...(input.mediaAssets ? { mediaAssets: input.mediaAssets } : {}),
+    videoProjectMode: normalizeVideoProjectMode(input.videoProjectMode, input),
+    ...(input.sceneDefaults ? { sceneDefaults: input.sceneDefaults } : {}),
+    ...(input.bodyNumberDefault ? { bodyNumberDefault: input.bodyNumberDefault } : {}),
     ...(input.fontId ? { fontId: input.fontId } : {}),
     ...(input.chrome ? { chrome: normalizeChromeConfig(input.chrome) } : {}),
     ...(input.nextHint ? { nextHint: normalizeNextHintConfig(input.nextHint) } : {}),
@@ -190,7 +216,15 @@ export async function findDeckAssetPath(
 }
 
 export function getRenderOutputDirectory(storageRoot: string, jobId: string): string {
-  return path.join(storageRoot, "renders", jobId);
+  if (!/^[A-Za-z0-9_-]+$/.test(jobId)) {
+    throw new Error("Unsafe render job id");
+  }
+
+  return resolvePathInside(path.join(storageRoot, "renders"), jobId);
+}
+
+export function isRenderJobId(candidate: unknown): candidate is string {
+  return typeof candidate === "string" && /^render-[A-Za-z0-9_-]+$/.test(candidate);
 }
 
 function getDeckDirectory(storageRoot: string, deckId: string): string {
@@ -294,6 +328,35 @@ function parseStoredDeck(deckText: string): CardnewsResult<Deck> {
     ...("backgroundId" in parsed && typeof parsed.backgroundId === "string"
       ? { backgroundId: parsed.backgroundId }
       : {}),
+    ...("backgroundMedia" in parsed && isBackgroundMediaSelection(parsed.backgroundMedia)
+      ? { backgroundMedia: parsed.backgroundMedia }
+      : {}),
+    ...("mediaAssets" in parsed && Array.isArray(parsed.mediaAssets) && parsed.mediaAssets.every(isMediaAssetRef)
+      ? { mediaAssets: parsed.mediaAssets }
+      : {}),
+    videoProjectMode: normalizeVideoProjectMode(
+      "videoProjectMode" in parsed ? parsed.videoProjectMode : undefined,
+      {
+        backgroundMedia:
+          "backgroundMedia" in parsed && isBackgroundMediaSelection(parsed.backgroundMedia)
+            ? parsed.backgroundMedia
+            : undefined,
+        mediaAssets:
+          "mediaAssets" in parsed && Array.isArray(parsed.mediaAssets) && parsed.mediaAssets.every(isMediaAssetRef)
+            ? parsed.mediaAssets
+            : undefined,
+        overrides:
+          "overrides" in parsed && isCardOverrideMap(parsed.overrides)
+            ? parsed.overrides
+            : undefined
+      }
+    ),
+    ...("sceneDefaults" in parsed && isCardSceneSettings(parsed.sceneDefaults)
+      ? { sceneDefaults: parsed.sceneDefaults }
+      : {}),
+    ...("bodyNumberDefault" in parsed && isBodyNumberDefault(parsed.bodyNumberDefault)
+      ? { bodyNumberDefault: parsed.bodyNumberDefault }
+      : {}),
     ...("fontId" in parsed && typeof parsed.fontId === "string"
       ? { fontId: parsed.fontId }
       : {}),
@@ -379,13 +442,49 @@ function isCardOverride(candidate: unknown): candidate is CardOverride {
     (record["backgroundId"] === undefined ||
       record["backgroundId"] === null ||
       typeof record["backgroundId"] === "string") &&
+    (record["backgroundMedia"] === undefined || isBackgroundMediaSelection(record["backgroundMedia"])) &&
     (record["adjust"] === undefined || isCardImageAdjust(record["adjust"])) &&
     (record["layout"] === undefined || isCardLayoutOverride(record["layout"])) &&
     (record["dim"] === undefined || typeof record["dim"] === "number") &&
     (record["badge"] === undefined || isCardBadgeOverride(record["badge"])) &&
     (record["typography"] === undefined || isCardTypographyOverride(record["typography"])) &&
+    (record["scene"] === undefined || isCardSceneSettings(record["scene"])) &&
+    (record["semanticSlots"] === undefined || isSemanticSlots(record["semanticSlots"])) &&
+    (record["bodyNumberMode"] === undefined || isBodyNumberMode(record["bodyNumberMode"])) &&
+    (record["bodyNumberText"] === undefined || typeof record["bodyNumberText"] === "string") &&
+    (record["bodyNumberStyle"] === undefined || isBodyNumberTextStyle(record["bodyNumberStyle"])) &&
     (record["layers"] === undefined ||
       (Array.isArray(record["layers"]) && record["layers"].every(isCardLayer)))
+  );
+}
+
+function isBodyNumberTextStyle(candidate: unknown): candidate is BodyNumberTextStyle {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    (record["color"] === undefined ||
+      (typeof record["color"] === "string" && isHexColor(record["color"]))) &&
+    (record["fontFamily"] === undefined || typeof record["fontFamily"] === "string") &&
+    (record["fontSize"] === undefined ||
+      (typeof record["fontSize"] === "number" && Number.isFinite(record["fontSize"]))) &&
+    (record["fontWeight"] === undefined ||
+      (typeof record["fontWeight"] === "number" && Number.isFinite(record["fontWeight"]))) &&
+    (record["italic"] === undefined || typeof record["italic"] === "boolean") &&
+    (record["lineHeight"] === undefined ||
+      (typeof record["lineHeight"] === "number" && Number.isFinite(record["lineHeight"]))) &&
+    (record["letterSpacing"] === undefined ||
+      (typeof record["letterSpacing"] === "number" && Number.isFinite(record["letterSpacing"]))) &&
+    (record["textAlign"] === undefined ||
+      record["textAlign"] === "left" ||
+      record["textAlign"] === "center" ||
+      record["textAlign"] === "right") &&
+    (record["textOpacity"] === undefined ||
+      (typeof record["textOpacity"] === "number" && Number.isFinite(record["textOpacity"]))) &&
+    (record["zIndex"] === undefined ||
+      (typeof record["zIndex"] === "number" && Number.isFinite(record["zIndex"])))
   );
 }
 
@@ -412,8 +511,18 @@ function isCardLayoutOverride(candidate: unknown): candidate is CardLayoutOverri
     (record["align"] === "left" || record["align"] === "center") &&
     typeof record["offsetY"] === "number" &&
     typeof record["gapBadge"] === "number" &&
-    typeof record["gapSubtitle"] === "number"
+    typeof record["gapSubtitle"] === "number" &&
+    (record["titlePlacement"] === undefined || isTitlePlacement(record["titlePlacement"]))
   );
+}
+
+function isTitlePlacement(candidate: unknown): boolean {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+  const record = candidate as Record<string, unknown>;
+  return record["mode"] === "flow" ||
+    (record["mode"] === "card-y" && typeof record["y"] === "number" && Number.isFinite(record["y"]));
 }
 
 function isCardTypographyOverride(candidate: unknown): candidate is CardTypographyOverride {
@@ -423,11 +532,15 @@ function isCardTypographyOverride(candidate: unknown): candidate is CardTypograp
 
   const record = candidate as Record<string, unknown>;
   return (
+    (record["color"] === undefined ||
+      (typeof record["color"] === "string" && isHexColor(record["color"]))) &&
     (record["sizeScale"] === undefined || typeof record["sizeScale"] === "number") &&
     (record["weight"] === undefined || typeof record["weight"] === "number") &&
     (record["italic"] === undefined || typeof record["italic"] === "boolean") &&
     (record["letterSpacing"] === undefined || typeof record["letterSpacing"] === "number") &&
     (record["lineHeight"] === undefined || typeof record["lineHeight"] === "number") &&
+    (record["textOpacity"] === undefined ||
+      (typeof record["textOpacity"] === "number" && Number.isFinite(record["textOpacity"]))) &&
     (record["scope"] === undefined ||
       record["scope"] === "all" ||
       record["scope"] === "title" ||
@@ -484,6 +597,100 @@ function normalizeNextHintConfig(input: NextHintConfig): NextHintConfig {
   };
 }
 
+function isBackgroundMediaSelection(candidate: unknown): candidate is BackgroundMediaSelection {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    record["mode"] === "inherit" ||
+    record["mode"] === "none" ||
+    (record["mode"] === "asset" && typeof record["mediaId"] === "string" && record["mediaId"].length > 0)
+  );
+}
+
+function isMediaAssetRef(candidate: unknown): candidate is MediaAssetRef {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    typeof record["id"] === "string" &&
+    (record["kind"] === "image" || record["kind"] === "video") &&
+    typeof record["displayName"] === "string" &&
+    typeof record["relativePath"] === "string" &&
+    typeof record["mimeType"] === "string" &&
+    typeof record["bytes"] === "number" &&
+    typeof record["sha256"] === "string" &&
+    typeof record["width"] === "number" &&
+    typeof record["height"] === "number" &&
+    (record["durationMs"] === undefined || typeof record["durationMs"] === "number") &&
+    (record["hasAudio"] === undefined || typeof record["hasAudio"] === "boolean") &&
+    (record["posterRelativePath"] === undefined || typeof record["posterRelativePath"] === "string") &&
+    (record["importedAt"] === undefined || typeof record["importedAt"] === "string")
+  );
+}
+
+function isCardSceneSettings(candidate: unknown): candidate is CardSceneSettings {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    typeof record["durationMs"] === "number" &&
+    isCardSceneTransition(record["transition"]) &&
+    typeof record["transitionMs"] === "number" &&
+    (record["primaryAudioSourceId"] === null || typeof record["primaryAudioSourceId"] === "string")
+  );
+}
+
+function isCardSceneTransition(candidate: unknown): boolean {
+  return candidate === "none" || candidate === "fade" || candidate === "slide-left" || candidate === "slide-up";
+}
+
+function sanitizeCardSceneSettings(scene: CardSceneSettings): CardSceneSettings {
+  return normalizeCardSceneSettings(scene);
+}
+
+function isSemanticSlots(candidate: unknown): candidate is Partial<Record<string, SemanticSlotPlacement>> {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  return Object.entries(candidate).every(([slotId, placement]) => isSemanticSlotId(slotId) && isSemanticSlotPlacement(placement));
+}
+
+function isSemanticSlotId(candidate: string): boolean {
+  return candidate === "title" || candidate === "subtitle" || candidate === "body" || candidate === "badge" || candidate === "footer";
+}
+
+function isSemanticSlotPlacement(candidate: unknown): candidate is SemanticSlotPlacement {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return false;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  return (
+    (record["mode"] === "flow" || record["mode"] === "card") &&
+    typeof record["x"] === "number" &&
+    typeof record["y"] === "number" &&
+    (record["width"] === undefined || typeof record["width"] === "number") &&
+    (record["height"] === undefined || typeof record["height"] === "number") &&
+    (record["anchor"] === "top-left" || record["anchor"] === "top-center" || record["anchor"] === "top-right")
+  );
+}
+
+function isBodyNumberMode(candidate: unknown): candidate is BodyNumberMode {
+  return candidate === "inherit" || candidate === "show" || candidate === "hide";
+}
+
+function isBodyNumberDefault(candidate: unknown): candidate is BodyNumberDefault {
+  return candidate === "show" || candidate === "hide";
+}
+
 function isCardLayer(candidate: unknown): candidate is CardLayer {
   if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
     return false;
@@ -520,6 +727,8 @@ function isCardLayer(candidate: unknown): candidate is CardLayer {
         (record["fontSize"] === undefined || typeof record["fontSize"] === "number") &&
         (record["fontWeight"] === undefined || typeof record["fontWeight"] === "number") &&
         (record["italic"] === undefined || typeof record["italic"] === "boolean") &&
+        (record["textOpacity"] === undefined ||
+          (typeof record["textOpacity"] === "number" && Number.isFinite(record["textOpacity"]))) &&
         (record["align"] === undefined ||
           record["align"] === "left" ||
           record["align"] === "center" ||
@@ -540,6 +749,14 @@ function isCardLayer(candidate: unknown): candidate is CardLayer {
           record["objectFit"] === "cover" ||
           record["objectFit"] === "contain")
       );
+    case "video":
+      return (
+        typeof record["mediaId"] === "string" &&
+        (record["objectFit"] === "cover" || record["objectFit"] === "contain") &&
+        typeof record["clipStartMs"] === "number" &&
+        (record["clipEndMs"] === null || typeof record["clipEndMs"] === "number") &&
+        typeof record["volume"] === "number"
+      );
     default:
       return false;
   }
@@ -554,9 +771,71 @@ function sanitizeOverrideMap(overrides: CardOverrideMap): CardOverrideMap {
 
 function sanitizeOverride(override: CardOverride): CardOverride {
   const layers = override.layers?.map(sanitizeCardLayer);
+  const typography = override.typography ? sanitizeTypographyOverride(override.typography) : undefined;
+  const layout = override.layout ? sanitizeLayoutOverride(override.layout) : undefined;
+  const scene = override.scene ? sanitizeCardSceneSettings(override.scene) : undefined;
+  const bodyNumberStyle = override.bodyNumberStyle
+    ? sanitizeBodyNumberTextStyle(override.bodyNumberStyle)
+    : undefined;
   return {
     ...override,
+    ...(layout ? { layout } : {}),
+    ...(typography ? { typography } : {}),
+    ...(scene ? { scene } : {}),
+    ...(bodyNumberStyle ? { bodyNumberStyle } : {}),
     ...(layers ? { layers } : {})
+  };
+}
+
+function sanitizeBodyNumberTextStyle(style: BodyNumberTextStyle): BodyNumberTextStyle {
+  const color = normalizeHexColor(style.color);
+  const fontFamily = style.fontFamily?.trim();
+  return {
+    ...(color ? { color } : {}),
+    ...(fontFamily ? { fontFamily } : {}),
+    ...(style.fontSize !== undefined && Number.isFinite(style.fontSize) && style.fontSize > 0
+      ? { fontSize: style.fontSize }
+      : {}),
+    ...(style.fontWeight !== undefined && Number.isFinite(style.fontWeight)
+      ? { fontWeight: style.fontWeight }
+      : {}),
+    ...(style.italic !== undefined ? { italic: style.italic } : {}),
+    ...(style.lineHeight !== undefined && Number.isFinite(style.lineHeight) && style.lineHeight > 0
+      ? { lineHeight: style.lineHeight }
+      : {}),
+    ...(style.letterSpacing !== undefined && Number.isFinite(style.letterSpacing)
+      ? { letterSpacing: style.letterSpacing }
+      : {}),
+    ...(style.textAlign ? { textAlign: style.textAlign } : {}),
+    ...(style.textOpacity !== undefined
+      ? { textOpacity: clampFinite(style.textOpacity, 0, 100, 100) }
+      : {}),
+    ...(style.zIndex !== undefined && Number.isFinite(style.zIndex)
+      ? { zIndex: Math.trunc(style.zIndex) }
+      : {})
+  };
+}
+
+function sanitizeTypographyOverride(typography: CardTypographyOverride): CardTypographyOverride {
+  const color = normalizeHexColor(typography.color);
+  return {
+    ...typography,
+    ...(color ? { color } : {}),
+    ...(typography.textOpacity !== undefined
+      ? { textOpacity: clampFinite(typography.textOpacity, 0, 100, 100) }
+      : {})
+  };
+}
+
+function sanitizeLayoutOverride(layout: CardLayoutOverride): CardLayoutOverride {
+  const placement = layout.titlePlacement;
+  return {
+    ...layout,
+    ...(placement?.mode === "card-y"
+      ? { titlePlacement: { mode: "card-y" as const, y: clampFinite(placement.y, 0, 100, 50) } }
+      : placement?.mode === "flow"
+        ? { titlePlacement: { mode: "flow" as const } }
+        : {})
   };
 }
 
@@ -592,7 +871,24 @@ function sanitizeCardLayer(layer: CardLayer): CardLayer {
     });
   }
 
+  if (layer.kind === "text" && layer.textOpacity !== undefined) {
+    return { ...layer, textOpacity: clampFinite(layer.textOpacity, 0, 100, 100) };
+  }
+  if (layer.kind === "video") {
+    return {
+      ...layer,
+      clipStartMs: Math.max(0, Math.trunc(layer.clipStartMs)),
+      ...(layer.clipEndMs === null
+        ? { clipEndMs: null }
+        : { clipEndMs: Math.max(0, Math.trunc(layer.clipEndMs)) }),
+      volume: clampFinite(layer.volume, 0, 1, 1)
+    };
+  }
   return layer;
+}
+
+function clampFinite(value: number, minimum: number, maximum: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
 }
 
 function isEndpointLineLayerRecord(record: Record<string, unknown>): record is {
@@ -640,12 +936,20 @@ function isLegacyLineLayerRecord(record: Record<string, unknown>): record is Leg
 function isEmptyOverride(override: CardOverride): boolean {
   return (
     override.backgroundId === undefined &&
+    override.backgroundMedia === undefined &&
     override.adjust === undefined &&
     override.layout === undefined &&
     override.dim === undefined &&
     (override.badge === undefined || isEmptyCardBadgeOverride(override.badge)) &&
     override.typography === undefined &&
-    (override.layers === undefined || override.layers.length === 0)
+    (override.layers === undefined || override.layers.length === 0) &&
+    override.scene === undefined &&
+    override.semanticSlots === undefined &&
+    override.semanticContentKeys === undefined &&
+    override.semanticItemPlacements === undefined &&
+    override.bodyNumberMode === undefined &&
+    override.bodyNumberText === undefined &&
+    override.bodyNumberStyle === undefined
   );
 }
 
@@ -656,10 +960,6 @@ function isEmptyCardBadgeOverride(badge: CardBadgeOverride): boolean {
     badge.imageHeight === undefined &&
     badge.textColor === undefined
   );
-}
-
-function isHexColor(value: string): boolean {
-  return /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
 function isStyleProfile(candidate: unknown): candidate is StyleProfile {
@@ -698,8 +998,8 @@ function normalizeRequiredText(value: string, fallback: string): string {
 }
 
 function normalizeFooterAccount(value: string): string {
-  const normalized = normalizeRequiredText(value, "kkongdon_story").replace(/^@+/, "").trim();
-  return normalized.length > 0 ? normalized : "kkongdon_story";
+  const normalized = normalizeRequiredText(value, "kkongdon_story");
+  return normalized === "@" ? "kkongdon_story" : normalized;
 }
 
 // ── 배경 라이브러리 ────────────────────────────────────────────────
@@ -717,6 +1017,36 @@ type StoredImageEntry = {
   readonly displayName: string;
   readonly extension: string;
   readonly attribution?: string;
+};
+
+const backgroundLibraryIdPattern = /^bg-[A-Za-z0-9_-]+$/;
+const imageLibraryIdPattern = /^img-[A-Za-z0-9_-]+$/;
+
+function resolvePathInside(directory: string, fileName: string): string {
+  const root = path.resolve(directory);
+  const target = path.resolve(root, fileName);
+  const relative = path.relative(root, target);
+  if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Unsafe library path: ${fileName}`);
+  }
+  return target;
+}
+
+function resolveLibraryEntryPath(
+  directory: string,
+  entry: { readonly id: string; readonly extension: string }
+): string {
+  return resolvePathInside(directory, `${entry.id}.${entry.extension}`);
+}
+
+export type TemplatePackImportStorageSnapshot = {
+  readonly backgrounds: readonly StoredBackgroundEntry[];
+  readonly backgroundFiles: readonly string[];
+  readonly images: readonly StoredImageEntry[];
+  readonly imageFiles: readonly string[];
+  readonly styles: readonly StylePresetRecord[];
+  readonly presets: readonly DeckPreset[];
+  readonly workspace: WorkspaceState | null;
 };
 
 export async function listBackgroundLibrary(
@@ -746,7 +1076,7 @@ export async function addBackgroundToLibrary(
   }
 
   const entries = await readBackgroundIndex(storageRoot);
-  const id = `bg-${Date.now().toString(36)}`;
+  const id = createLibraryItemId("bg");
   const entry: StoredBackgroundEntry = {
     id,
     displayName: path.basename(sourcePath),
@@ -757,8 +1087,39 @@ export async function addBackgroundToLibrary(
   await fs.mkdir(getBackgroundLibraryDirectory(storageRoot), { recursive: true });
   await fs.copyFile(
     sourcePath,
-    path.join(getBackgroundLibraryDirectory(storageRoot), `${id}.${extension}`)
+    resolveLibraryEntryPath(getBackgroundLibraryDirectory(storageRoot), entry)
   );
+  await writeBackgroundIndex(storageRoot, [...entries, entry]);
+
+  return {
+    id: entry.id,
+    displayName: entry.displayName,
+    ...(entry.attribution ? { attribution: entry.attribution } : {})
+  };
+}
+
+export async function saveBackgroundBufferToLibrary(
+  storageRoot: string,
+  pngBytes: Uint8Array,
+  displayName: string,
+  attribution?: string
+): Promise<CardnewsResult<BackgroundLibraryItem>> {
+  if (pngBytes.byteLength === 0 || pngBytes.byteLength > maxImageSizeBytes) {
+    return invalidInput("이미지 파일은 25MB 이하만 사용할 수 있습니다.");
+  }
+
+  const normalizedDisplayName = displayName.trim() || "background.png";
+  const entries = await readBackgroundIndex(storageRoot);
+  const id = createLibraryItemId("bg");
+  const entry: StoredBackgroundEntry = {
+    id,
+    displayName: normalizedDisplayName,
+    extension: "png",
+    ...(attribution ? { attribution } : {})
+  };
+
+  await fs.mkdir(getBackgroundLibraryDirectory(storageRoot), { recursive: true });
+  await fs.writeFile(resolveLibraryEntryPath(getBackgroundLibraryDirectory(storageRoot), entry), pngBytes);
   await writeBackgroundIndex(storageRoot, [...entries, entry]);
 
   return {
@@ -778,10 +1139,7 @@ export async function findLibraryBackground(
     return undefined;
   }
 
-  const absolutePath = path.join(
-    getBackgroundLibraryDirectory(storageRoot),
-    `${entry.id}.${entry.extension}`
-  );
+  const absolutePath = resolveLibraryEntryPath(getBackgroundLibraryDirectory(storageRoot), entry);
   if (!(await pathExists(absolutePath))) {
     return undefined;
   }
@@ -796,13 +1154,92 @@ export async function findLibraryBackground(
   };
 }
 
-export async function listImageLibrary(storageRoot: string): Promise<readonly ImageLibraryItem[]> {
-  const entries = await readImageIndex(storageRoot);
-  return entries.map((entry) => ({
+export async function removeBackgroundFromLibrary(
+  storageRoot: string,
+  backgroundId: string
+): Promise<CardnewsResult<ImageLibraryRemoveResult>> {
+  const entries = await readBackgroundIndex(storageRoot);
+  const target = entries.find((entry) => entry.id === backgroundId);
+  if (!target) {
+    return { id: backgroundId, removed: false };
+  }
+
+  const workspace = await loadWorkspaceState(storageRoot);
+  const usages = workspace ? findBackgroundLibraryUsage(backgroundId, workspace) : [];
+  if (usages.length > 0) {
+    return invalidInput(
+      `사용 중인 배경 이미지는 삭제할 수 없습니다: ${usages.map((usage) => usage.label).join(", ")}`
+    );
+  }
+
+  const kept = entries.filter((entry) => entry.id !== backgroundId);
+  await fs.rm(resolveLibraryEntryPath(getBackgroundLibraryDirectory(storageRoot), target), {
+    force: true
+  });
+  await writeBackgroundIndex(storageRoot, kept);
+  return { id: backgroundId, removed: true };
+}
+
+export const internalSmokeImageAttribution = "__cardnews_internal_smoke__";
+export const smokeFixtureImageAttribution = "__cardnews_smoke_fixture__";
+
+export async function listImageLibrary(
+  storageRoot: string,
+  options: { readonly includeSmokeFixtures?: boolean } = {}
+): Promise<readonly ImageLibraryItem[]> {
+  const entries = options.includeSmokeFixtures
+    ? await readImageIndex(storageRoot)
+    : await purgeAndReadImageLibrarySmokeFixtures(storageRoot);
+  return entries.filter((entry) => isUserVisibleImageEntry(entry, options)).map((entry) => ({
     id: entry.id,
     displayName: entry.displayName,
     ...(entry.attribution ? { attribution: entry.attribution } : {})
   }));
+}
+
+function isUserVisibleImageEntry(
+  entry: StoredImageEntry,
+  options: { readonly includeSmokeFixtures?: boolean } = {}
+): boolean {
+  if (entry.attribution === internalSmokeImageAttribution) {
+    return false;
+  }
+
+  if (!options.includeSmokeFixtures && isSmokeFixtureImageEntry(entry)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isSmokeFixtureImageEntry(entry: StoredImageEntry): boolean {
+  return entry.attribution === internalSmokeImageAttribution || entry.attribution === smokeFixtureImageAttribution;
+}
+
+async function purgeAndReadImageLibrarySmokeFixtures(storageRoot: string): Promise<readonly StoredImageEntry[]> {
+  const entries = await readImageIndex(storageRoot);
+  const kept = entries.filter((entry) => !isSmokeFixtureImageEntry(entry));
+  const removed = entries.filter(isSmokeFixtureImageEntry);
+  if (removed.length === 0) {
+    return kept;
+  }
+
+  await Promise.all(
+    removed.map((entry) =>
+      fs.rm(resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), entry), {
+        force: true
+      })
+    )
+  );
+  await writeImageIndex(storageRoot, kept);
+  return kept;
+}
+
+export async function purgeImageLibrarySmokeFixtures(storageRoot: string): Promise<number> {
+  const before = await readImageIndex(storageRoot);
+  await purgeAndReadImageLibrarySmokeFixtures(storageRoot);
+  const after = await readImageIndex(storageRoot);
+  return before.length - after.length;
 }
 
 export async function addImageToLibrary(
@@ -821,7 +1258,7 @@ export async function addImageToLibrary(
   }
 
   const entries = await readImageIndex(storageRoot);
-  const id = `img-${Date.now().toString(36)}`;
+  const id = createLibraryItemId("img");
   const entry: StoredImageEntry = {
     id,
     displayName: path.basename(sourcePath),
@@ -830,7 +1267,7 @@ export async function addImageToLibrary(
   };
 
   await fs.mkdir(getImageLibraryDirectory(storageRoot), { recursive: true });
-  await fs.copyFile(sourcePath, path.join(getImageLibraryDirectory(storageRoot), `${id}.${extension}`));
+  await fs.copyFile(sourcePath, resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), entry));
   await writeImageIndex(storageRoot, [...entries, entry]);
 
   return {
@@ -850,17 +1287,26 @@ export async function saveImageBufferToLibrary(
     return invalidInput("이미지 파일은 25MB 이하만 사용할 수 있습니다.");
   }
 
+  const normalizedDisplayName = displayName.trim() || "image.png";
+  if (attribution === internalSmokeImageAttribution) {
+    return {
+      id: `internal-smoke-${Date.now().toString(36)}`,
+      displayName: normalizedDisplayName,
+      attribution
+    };
+  }
+
   const entries = await readImageIndex(storageRoot);
-  const id = `img-${Date.now().toString(36)}`;
+  const id = createLibraryItemId("img");
   const entry: StoredImageEntry = {
     id,
-    displayName: displayName.trim() || `${id}.png`,
+    displayName: normalizedDisplayName,
     extension: "png",
     ...(attribution ? { attribution } : {})
   };
 
   await fs.mkdir(getImageLibraryDirectory(storageRoot), { recursive: true });
-  await fs.writeFile(path.join(getImageLibraryDirectory(storageRoot), `${id}.png`), pngBytes);
+  await fs.writeFile(resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), entry), pngBytes);
   await writeImageIndex(storageRoot, [...entries, entry]);
 
   return {
@@ -868,6 +1314,24 @@ export async function saveImageBufferToLibrary(
     displayName: entry.displayName,
     ...(entry.attribution ? { attribution: entry.attribution } : {})
   };
+}
+
+export async function removeImageFromLibrary(
+  storageRoot: string,
+  imageId: string
+): Promise<ImageLibraryRemoveResult> {
+  const entries = await readImageIndex(storageRoot);
+  const target = entries.find((entry) => entry.id === imageId);
+  if (!target) {
+    return { id: imageId, removed: false };
+  }
+
+  const kept = entries.filter((entry) => entry.id !== imageId);
+  await fs.rm(resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), target), {
+    force: true
+  });
+  await writeImageIndex(storageRoot, kept);
+  return { id: imageId, removed: true };
 }
 
 export async function findLibraryImage(
@@ -880,7 +1344,7 @@ export async function findLibraryImage(
     return undefined;
   }
 
-  const absolutePath = path.join(getImageLibraryDirectory(storageRoot), `${entry.id}.${entry.extension}`);
+  const absolutePath = resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), entry);
   if (!(await pathExists(absolutePath))) {
     return undefined;
   }
@@ -893,6 +1357,94 @@ export async function findLibraryImage(
       ...(entry.attribution ? { attribution: entry.attribution } : {})
     }
   };
+}
+
+export async function createTemplatePackImportStorageSnapshot(
+  storageRoot: string
+): Promise<TemplatePackImportStorageSnapshot> {
+  return {
+    backgrounds: await readBackgroundIndex(storageRoot),
+    backgroundFiles: await listDirectoryFiles(getBackgroundLibraryDirectory(storageRoot)),
+    images: await readImageIndex(storageRoot),
+    imageFiles: await listDirectoryFiles(getImageLibraryDirectory(storageRoot)),
+    styles: await listCustomStyles(storageRoot),
+    presets: await listDeckPresets(storageRoot),
+    workspace: await loadWorkspaceState(storageRoot)
+  };
+}
+
+export async function restoreTemplatePackImportStorageSnapshot(
+  storageRoot: string,
+  snapshot: TemplatePackImportStorageSnapshot
+): Promise<void> {
+  const currentBackgrounds = await readBackgroundIndex(storageRoot);
+  const currentImages = await readImageIndex(storageRoot);
+  const keptBackgroundIds = new Set(snapshot.backgrounds.map((entry) => entry.id));
+  const keptImageIds = new Set(snapshot.images.map((entry) => entry.id));
+  const keptBackgroundFiles = new Set(snapshot.backgroundFiles);
+  const keptImageFiles = new Set(snapshot.imageFiles);
+  const currentBackgroundFiles = await listDirectoryFiles(getBackgroundLibraryDirectory(storageRoot));
+  const currentImageFiles = await listDirectoryFiles(getImageLibraryDirectory(storageRoot));
+
+  await Promise.all(
+    currentBackgrounds
+      .filter((entry) => !keptBackgroundIds.has(entry.id))
+      .map((entry) =>
+        fs.rm(resolveLibraryEntryPath(getBackgroundLibraryDirectory(storageRoot), entry), {
+          force: true
+        })
+      )
+  );
+  await Promise.all(
+    currentImages
+      .filter((entry) => !keptImageIds.has(entry.id))
+      .map((entry) =>
+        fs.rm(resolveLibraryEntryPath(getImageLibraryDirectory(storageRoot), entry), {
+          force: true
+        })
+      )
+  );
+  await Promise.all(
+    currentBackgroundFiles
+      .filter((fileName) => !keptBackgroundFiles.has(fileName))
+      .map((fileName) =>
+        fs.rm(path.join(getBackgroundLibraryDirectory(storageRoot), fileName), {
+          force: true
+        })
+      )
+  );
+  await Promise.all(
+    currentImageFiles
+      .filter((fileName) => !keptImageFiles.has(fileName))
+      .map((fileName) =>
+        fs.rm(path.join(getImageLibraryDirectory(storageRoot), fileName), {
+          force: true
+        })
+      )
+  );
+
+  await writeBackgroundIndex(storageRoot, snapshot.backgrounds);
+  await writeImageIndex(storageRoot, snapshot.images);
+  await writeCustomStyles(storageRoot, snapshot.styles);
+  await writePresets(storageRoot, snapshot.presets);
+
+  if (snapshot.workspace) {
+    await saveWorkspaceState(storageRoot, snapshot.workspace);
+  } else {
+    await fs.rm(getWorkspacePath(storageRoot), { force: true });
+  }
+}
+
+async function listDirectoryFiles(directory: string): Promise<readonly string[]> {
+  try {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
 }
 
 function getLibraryDirectory(storageRoot: string): string {
@@ -940,10 +1492,12 @@ function isStoredBackgroundEntry(candidate: unknown): candidate is StoredBackgro
   return (
     "id" in candidate &&
     typeof candidate.id === "string" &&
+    backgroundLibraryIdPattern.test(candidate.id) &&
     "displayName" in candidate &&
     typeof candidate.displayName === "string" &&
     "extension" in candidate &&
     typeof candidate.extension === "string" &&
+    mimeTypeForExtension(candidate.extension) !== undefined &&
     (!("attribution" in candidate) || typeof candidate.attribution === "string")
   );
 }
@@ -970,10 +1524,12 @@ function isStoredImageEntry(candidate: unknown): candidate is StoredImageEntry {
   return (
     "id" in candidate &&
     typeof candidate.id === "string" &&
+    imageLibraryIdPattern.test(candidate.id) &&
     "displayName" in candidate &&
     typeof candidate.displayName === "string" &&
     "extension" in candidate &&
     typeof candidate.extension === "string" &&
+    mimeTypeForExtension(candidate.extension) !== undefined &&
     (!("attribution" in candidate) || typeof candidate.attribution === "string")
   );
 }
@@ -983,6 +1539,8 @@ type StoredFontEntry = {
   readonly displayName: string;
   readonly extension: "ttf" | "otf" | "woff2";
 };
+
+const fontLibraryIdPattern = /^font-[A-Za-z0-9_-]+$/;
 
 export async function listFontLibrary(storageRoot: string): Promise<readonly FontLibraryItem[]> {
   const entries = await readFontIndex(storageRoot);
@@ -1016,7 +1574,7 @@ export async function importFontToLibrary(
   };
 
   await fs.mkdir(getFontLibraryDirectory(storageRoot), { recursive: true });
-  await fs.copyFile(sourcePath, path.join(getFontLibraryDirectory(storageRoot), `${id}.${extension}`));
+  await fs.copyFile(sourcePath, resolveLibraryEntryPath(getFontLibraryDirectory(storageRoot), entry));
   await writeFontIndex(storageRoot, [...entries, entry]);
 
   return entry;
@@ -1032,7 +1590,7 @@ export async function findLibraryFont(
     return undefined;
   }
 
-  const absolutePath = path.join(getFontLibraryDirectory(storageRoot), `${entry.id}.${entry.extension}`);
+  const absolutePath = resolveLibraryEntryPath(getFontLibraryDirectory(storageRoot), entry);
   if (!(await pathExists(absolutePath))) {
     return undefined;
   }
@@ -1099,6 +1657,7 @@ function isStoredFontEntry(candidate: unknown): candidate is StoredFontEntry {
   return (
     "id" in candidate &&
     typeof candidate.id === "string" &&
+    fontLibraryIdPattern.test(candidate.id) &&
     "displayName" in candidate &&
     typeof candidate.displayName === "string" &&
     "extension" in candidate &&
@@ -1211,9 +1770,18 @@ export function isDeckPreset(candidate: unknown): candidate is DeckPreset {
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
+    (record["backgroundMedia"] === undefined || isBackgroundMediaSelection(record["backgroundMedia"])) &&
+    (record["mediaAssets"] === undefined ||
+      (Array.isArray(record["mediaAssets"]) && record["mediaAssets"].every(isMediaAssetRef))) &&
+    (record["videoProjectMode"] === undefined ||
+      record["videoProjectMode"] === "cards" ||
+      record["videoProjectMode"] === "video") &&
+    (record["sceneDefaults"] === undefined || isCardSceneSettings(record["sceneDefaults"])) &&
+    (record["bodyNumberDefault"] === undefined || isBodyNumberDefault(record["bodyNumberDefault"])) &&
     (record["aspectRatio"] === undefined || typeof record["aspectRatio"] === "string") &&
     (record["fontId"] === undefined || typeof record["fontId"] === "string") &&
     (record["overrides"] === undefined || isCardOverrideMap(record["overrides"])) &&
+    (record["bulkBindings"] === undefined || isBulkBindingMetadata(record["bulkBindings"])) &&
     Array.isArray(record["cards"]) &&
     record["cards"].every((card) => typeof card === "string")
   );
@@ -1258,9 +1826,18 @@ export function isWorkspaceState(candidate: unknown): candidate is WorkspaceStat
     (record["accentColor"] === undefined || typeof record["accentColor"] === "string") &&
     (record["backgroundDim"] === undefined || typeof record["backgroundDim"] === "number") &&
     (record["backgroundId"] === undefined || typeof record["backgroundId"] === "string") &&
+    (record["backgroundMedia"] === undefined || isBackgroundMediaSelection(record["backgroundMedia"])) &&
+    (record["mediaAssets"] === undefined ||
+      (Array.isArray(record["mediaAssets"]) && record["mediaAssets"].every(isMediaAssetRef))) &&
+    (record["videoProjectMode"] === undefined ||
+      record["videoProjectMode"] === "cards" ||
+      record["videoProjectMode"] === "video") &&
+    (record["sceneDefaults"] === undefined || isCardSceneSettings(record["sceneDefaults"])) &&
+    (record["bodyNumberDefault"] === undefined || isBodyNumberDefault(record["bodyNumberDefault"])) &&
     (record["aspectRatio"] === undefined || typeof record["aspectRatio"] === "string") &&
     (record["fontId"] === undefined || typeof record["fontId"] === "string") &&
     (record["overrides"] === undefined || isCardOverrideMap(record["overrides"])) &&
+    (record["bulkBindings"] === undefined || isBulkBindingMetadata(record["bulkBindings"])) &&
     (record["railWidth"] === undefined || typeof record["railWidth"] === "number") &&
     (record["selectedIndex"] === undefined || typeof record["selectedIndex"] === "number") &&
     Array.isArray(record["cards"]) &&
@@ -1279,7 +1856,10 @@ function sanitizeDeckPreset(preset: DeckPreset): DeckPreset {
     footerAccount: normalizeFooterAccount(preset.footerAccount),
     ...(preset.chrome ? { chrome: normalizeChromeConfig(preset.chrome) } : {}),
     ...(preset.nextHint ? { nextHint: normalizeNextHintConfig(preset.nextHint) } : {}),
-    ...(preset.overrides ? { overrides: sanitizeOverrideMap(preset.overrides) } : {})
+    videoProjectMode: normalizeVideoProjectMode(preset.videoProjectMode, preset),
+    ...(preset.sceneDefaults ? { sceneDefaults: sanitizeCardSceneSettings(preset.sceneDefaults) } : {}),
+    ...(preset.overrides ? { overrides: sanitizeOverrideMap(preset.overrides) } : {}),
+    ...(preset.bulkBindings ? { bulkBindings: sanitizeBulkBindingMetadata(preset.bulkBindings) } : {})
   };
 }
 
@@ -1289,7 +1869,52 @@ function sanitizeWorkspaceState(state: WorkspaceState): WorkspaceState {
     footerAccount: normalizeFooterAccount(state.footerAccount),
     ...(state.chrome ? { chrome: normalizeChromeConfig(state.chrome) } : {}),
     ...(state.nextHint ? { nextHint: normalizeNextHintConfig(state.nextHint) } : {}),
-    ...(state.overrides ? { overrides: sanitizeOverrideMap(state.overrides) } : {})
+    videoProjectMode: normalizeVideoProjectMode(state.videoProjectMode, state),
+    ...(state.sceneDefaults ? { sceneDefaults: sanitizeCardSceneSettings(state.sceneDefaults) } : {}),
+    ...(state.overrides ? { overrides: sanitizeOverrideMap(state.overrides) } : {}),
+    ...(state.bulkBindings ? { bulkBindings: sanitizeBulkBindingMetadata(state.bulkBindings) } : {})
+  };
+}
+
+function isBulkBindingMetadata(candidate: unknown): candidate is BulkBindingMetadata {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+  const record = candidate as Record<string, unknown>;
+  return record["schemaVersion"] === 1 &&
+    typeof record["templateId"] === "string" && record["templateId"].trim().length > 0 &&
+    typeof record["templateRevision"] === "number" && Number.isInteger(record["templateRevision"]) && record["templateRevision"] >= 0 &&
+    Array.isArray(record["bindings"]) && record["bindings"].length <= 146 && record["bindings"].every(isBulkBinding);
+}
+
+function isBulkBinding(candidate: unknown): candidate is BulkBinding {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+  const record = candidate as Record<string, unknown>;
+  if (typeof record["key"] !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(record["key"]) ||
+      typeof record["label"] !== "string" || typeof record["required"] !== "boolean" ||
+      (record["defaultValue"] !== undefined && typeof record["defaultValue"] !== "string")) return false;
+  const target = record["target"];
+  if (typeof target !== "object" || target === null || Array.isArray(target)) return false;
+  const t = target as Record<string, unknown>;
+  if (t["kind"] === "deck") return t["field"] === "header" || t["field"] === "footer";
+  if (!Number.isInteger(t["cardNumber"]) || (t["cardNumber"] as number) < 1) return false;
+  if (t["kind"] === "standard") return ["badge", "title", "subtitle", "body", "bullets", "source", "emphasis"].includes(String(t["field"]));
+  return t["kind"] === "layer-text" && typeof t["layerId"] === "string" && t["layerId"].length > 0 && t["property"] === "text";
+}
+
+function sanitizeBulkBindingMetadata(metadata: BulkBindingMetadata): BulkBindingMetadata {
+  const seen = new Set<string>();
+  return {
+    schemaVersion: 1,
+    templateId: metadata.templateId.trim(),
+    templateRevision: Math.max(0, Math.trunc(metadata.templateRevision)),
+    bindings: metadata.bindings.filter((binding) => {
+      if (seen.has(binding.key)) return false;
+      seen.add(binding.key);
+      return true;
+    }).map((binding) => ({
+      ...binding,
+      label: binding.label.trim(),
+      target: { ...binding.target }
+    }))
   };
 }
 
@@ -1315,7 +1940,12 @@ function isAppSettings(candidate: unknown): candidate is AppSettings {
   const record = candidate as Record<string, unknown>;
   return (
     (record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string") &&
-    (record["aiDefaultProviderId"] === undefined || isAiProviderIdSetting(record["aiDefaultProviderId"]))
+    (record["aiDefaultProviderId"] === undefined || isAiProviderIdSetting(record["aiDefaultProviderId"])) &&
+    (record["aiDefaultInstruction"] === undefined ||
+      (typeof record["aiDefaultInstruction"] === "string" && record["aiDefaultInstruction"].length <= 6000)) &&
+    (record["gptsTemplateBuilderUrl"] === undefined ||
+      (typeof record["gptsTemplateBuilderUrl"] === "string" &&
+        isAllowedGptsTemplateBuilderUrl(record["gptsTemplateBuilderUrl"])))
   );
 }
 

@@ -1,6 +1,6 @@
 // noqa: SIZE_OK - v4 release keeps offscreen rendering lifecycle and blank-frame guards in one audited unit; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
 import { BrowserWindow } from "electron";
-import type { NativeImage } from "electron";
+import type { NativeImage, WebContents } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -20,16 +20,38 @@ import { findAspectRatio } from "../domain/aspectRatios.js";
 import { buildCardHtml } from "./cardTemplate.js";
 import { evaluateQualityGates } from "./gates/qualityGates.js";
 import { evaluateVisualContentGate } from "./gates/visualContentGate.js";
+import {
+  decideCaptureNormalization,
+  planCardSurfaceCompensation,
+  validateCardGeometry,
+  type CardSurfaceCompensation,
+  type CardGeometryProbe,
+  type ValidatedCardGeometry
+} from "./captureGeometry.js";
+import { PaintFrameCollector, type PaintFrameSource } from "./paintFrameCollector.js";
+import {
+  createRenderCaptureReport,
+  createRenderDiagnostic,
+  createRenderUserMessage,
+  type RenderCaptureReport,
+  type RenderDiagnostic,
+  type RenderDiagnosticCode,
+  type RenderNormalizationDiagnostic
+} from "./renderDiagnostics.js";
+import { validateFinalImage } from "./finalImageValidation.js";
+import { createRenderWindowOptions } from "./renderWindowConfig.js";
 import type { StylePreset } from "./stylePresets.js";
 
 const FINAL_CAPTURE_ATTEMPTS = 5;
 
 export type RenderDeckInput = {
+  readonly appVersion?: string;
   readonly assetImagePathById?: Readonly<Record<string, string>>;
   readonly backgroundImagePath: string | undefined;
   readonly backgroundImagePathByCardIndex?: Readonly<Record<string, string | null>>;
   readonly customStyles?: readonly StylePreset[];
   readonly deck: Deck;
+  readonly edition?: "lite" | "pro";
   readonly jobId: string;
   readonly outputDir: string;
   /** `@font-face` CSS(data URI 소스) — 렌더 결정론을 위한 폰트 임베드 */
@@ -37,10 +59,53 @@ export type RenderDeckInput = {
 };
 
 type CardRenderOutput = {
+  readonly captureReport: RenderCaptureReport;
   readonly metrics: readonly RenderSlotMetric[];
   readonly png: Buffer;
   readonly visualIssues: readonly QualityGateIssue[];
 };
+
+type RenderFailure = CardnewsError & {
+  readonly diagnostic: RenderDiagnostic;
+};
+
+type CapturedFrame = {
+  readonly image: NativeImage;
+  readonly normalization: RenderNormalizationDiagnostic;
+  readonly source: { readonly width: number; readonly height: number };
+};
+
+class CaptureFrameFailure extends Error {
+  readonly capturedBitmap: { readonly width: number; readonly height: number } | undefined;
+  readonly code: RenderDiagnosticCode;
+  readonly normalization: RenderNormalizationDiagnostic;
+
+  constructor(input: {
+    readonly capturedBitmap?: { readonly width: number; readonly height: number };
+    readonly code: RenderDiagnosticCode;
+    readonly normalization: RenderNormalizationDiagnostic;
+  }) {
+    super(input.normalization.reason ?? input.code);
+    this.name = "CaptureFrameFailure";
+    this.capturedBitmap = input.capturedBitmap;
+    this.code = input.code;
+    this.normalization = input.normalization;
+  }
+}
+
+class RenderFontReadinessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RenderFontReadinessError";
+  }
+}
+
+class RenderImageReadinessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RenderImageReadinessError";
+  }
+}
 
 export async function renderDeckOffscreen(
   input: RenderDeckInput
@@ -50,6 +115,7 @@ export async function renderDeckOffscreen(
   const renderedCards: RenderedCard[] = [];
   const allMetrics: RenderSlotMetric[] = [];
   const allIssues: QualityGateIssue[] = [];
+  const captureReports: RenderCaptureReport[] = [];
 
   const ratio = findAspectRatio(input.deck.aspectRatio);
   const dimensions = { width: ratio.width, height: ratio.height };
@@ -58,7 +124,7 @@ export async function renderDeckOffscreen(
     const renderedCard = await renderCard(input, card);
     if (isCardnewsError(renderedCard)) {
       await writeRenderError(input.outputDir, card.index, renderedCard);
-      return renderedCard;
+      return toPublicError(renderedCard);
     }
 
     const metricGateReport = evaluateQualityGates(renderedCard.metrics, dimensions);
@@ -72,6 +138,7 @@ export async function renderDeckOffscreen(
     await fs.writeFile(filePath, renderedCard.png);
     allMetrics.push(...renderedCard.metrics);
     allIssues.push(...cardGateReport.issues);
+    captureReports.push(renderedCard.captureReport);
     renderedCards.push({
       bytes: renderedCard.png.byteLength,
       fileName,
@@ -83,7 +150,7 @@ export async function renderDeckOffscreen(
   }
 
   const gateReport = buildGateReport(allIssues);
-  await writeRenderReports(input.outputDir, allMetrics, gateReport);
+  await writeRenderReports(input.outputDir, allMetrics, gateReport, captureReports);
 
   return {
     cardCount: renderedCards.length,
@@ -99,19 +166,15 @@ async function renderCard(
   card: Card
 ): Promise<CardnewsResult<CardRenderOutput>> {
   const ratio = findAspectRatio(input.deck.aspectRatio);
-  const window = new BrowserWindow({
-    height: ratio.height,
-    show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      offscreen: true,
-      sandbox: true
-    },
-    width: ratio.width
-  });
+  const dimensions = { width: ratio.width, height: ratio.height };
+  let window: BrowserWindow | undefined;
+  let frameCollector: PaintFrameCollector<NativeImage> | undefined;
+  let geometryProbe: CardGeometryProbe | undefined;
 
   try {
+    window = new BrowserWindow(createRenderWindowOptions(dimensions));
+    window.setContentSize(dimensions.width, dimensions.height);
+    window.webContents.setZoomFactor(1);
     window.webContents.setFrameRate(30);
     const cardBackgroundImagePath = resolveCardBackgroundImagePath(input, card);
     const backgroundCssUrl = cardBackgroundImagePath
@@ -133,29 +196,124 @@ async function renderCard(
     // 산출물 폴더에 파일로 쓰고 file://로 로드한다(디버깅용 계약 파일 겸용).
     const htmlPath = path.join(input.outputDir, `card-${String(card.index).padStart(2, "0")}.html`);
     await fs.writeFile(htmlPath, html, "utf8");
-    await window.loadURL(pathToFileURL(htmlPath).toString());
+    frameCollector = await createPaintCollectorAndLoad(window.webContents, () =>
+      window!.loadURL(pathToFileURL(htmlPath).toString())
+    );
     await waitForFonts(window, Boolean(input.deck.fontId));
-    await waitForImageAssets(window);
+    await waitForImageAssets(window.webContents);
     await window.webContents.executeJavaScript(
       "document.body.dataset.cardnewsReady = String(Date.now()); true"
     );
     await waitForAnimationFrames(window, 3);
 
-    const image = await captureFinalImage(window);
-    if (isBlankImage(image)) {
-      return renderFailed(`카드 ${card.index} 렌더링 결과가 비어 있습니다.`);
+    geometryProbe = await collectCardGeometryProbe(window);
+    let geometryResult = validateCardGeometry(geometryProbe, ratio);
+    if (!geometryResult.ok) {
+      const compensation = planCardSurfaceCompensation(geometryProbe, ratio);
+      if (compensation.ok && needsSurfaceCompensation(compensation.value)) {
+        await applyCardSurfaceCompensation(window, compensation.value);
+        await waitForAnimationFrames(window, 2);
+        geometryProbe = await collectCardGeometryProbe(window);
+        geometryResult = validateCardGeometry(geometryProbe, ratio);
+      }
+    }
+    if (!geometryResult.ok) {
+      return renderFailure(
+        input,
+        card.index,
+        ratio,
+        geometryResult.code,
+        createRenderUserMessage({
+          cardIndex: card.index,
+          code: geometryResult.code,
+          expected: dimensions
+        }),
+        {
+          geometry: geometryProbe,
+          normalization: {
+            decision: "not_attempted",
+            reason: geometryResult.reason,
+            scale: null
+          }
+        }
+      );
     }
 
+    let capturedFrame: CapturedFrame;
+    try {
+      capturedFrame = await captureFinalImage(frameCollector, geometryResult.value, dimensions);
+    } catch (error) {
+      if (error instanceof CaptureFrameFailure) {
+        const actual = error.capturedBitmap;
+        return renderFailure(
+          input,
+          card.index,
+          ratio,
+          error.code,
+          createRenderUserMessage({
+            ...(actual ? { actual } : {}),
+            cardIndex: card.index,
+            code: error.code,
+            expected: dimensions
+          }),
+          {
+            ...(actual ? { capturedBitmap: actual } : {}),
+            geometry: geometryProbe,
+            normalization: error.normalization
+          }
+        );
+      }
+      throw error;
+    }
+
+    const image = capturedFrame.image;
     const imageSize = image.getSize();
-    if (imageSize.width !== ratio.width || imageSize.height !== ratio.height) {
-      return renderFailed(
-        `카드 ${card.index} PNG 크기가 올바르지 않습니다: ${imageSize.width}x${imageSize.height}`
+    const finalValidation = validateFinalImage({
+      blank: isBlankImage(image),
+      empty: image.isEmpty(),
+      size: imageSize,
+      target: dimensions
+    });
+    if (!finalValidation.ok) {
+      return renderFailure(
+        input,
+        card.index,
+        ratio,
+        finalValidation.code,
+        createRenderUserMessage({
+          actual: imageSize,
+          cardIndex: card.index,
+          code: finalValidation.code,
+          expected: dimensions
+        }),
+        {
+          capturedBitmap: capturedFrame.source,
+          finalBitmap: imageSize,
+          geometry: geometryProbe,
+          normalization: capturedFrame.normalization
+        }
       );
     }
 
     const png = image.toPNG();
     if (png.byteLength === 0) {
-      return renderFailed(`카드 ${card.index} PNG가 비어 있습니다.`);
+      return renderFailure(
+        input,
+        card.index,
+        ratio,
+        "RENDER_CAPTURE_BLANK",
+        createRenderUserMessage({
+          cardIndex: card.index,
+          code: "RENDER_CAPTURE_BLANK",
+          expected: dimensions
+        }),
+        {
+          capturedBitmap: capturedFrame.source,
+          finalBitmap: imageSize,
+          geometry: geometryProbe,
+          normalization: capturedFrame.normalization
+        }
+      );
     }
 
     const visualGate = evaluateVisualContentGate({
@@ -174,13 +332,69 @@ async function renderCard(
       return renderFailed(`카드 ${card.index} 슬롯 메트릭이 비어 있습니다.`);
     }
 
-    return { metrics, png, visualIssues: visualGate.issues };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "알 수 없는 렌더링 오류";
+    const captureReport = createRenderCaptureReport({
+      appVersion: input.appVersion ?? process.env["npm_package_version"],
+      aspectRatioId: ratio.id,
+      capturedBitmap: capturedFrame.source,
+      cardIndex: card.index,
+      edition: input.edition,
+      expected: dimensions,
+      finalBitmap: imageSize,
+      geometry: geometryProbe,
+      normalization: capturedFrame.normalization
+    });
 
-    return renderFailed(`카드 ${card.index} 렌더링에 실패했습니다: ${message}`);
+    return { captureReport, metrics, png, visualIssues: visualGate.issues };
+  } catch (error) {
+    return renderFailure(
+      input,
+      card.index,
+      ratio,
+      "RENDER_INTERNAL_ERROR",
+      createRenderUserMessage({
+        cardIndex: card.index,
+        code: "RENDER_INTERNAL_ERROR",
+        expected: dimensions
+      }),
+      {
+        ...(geometryProbe ? { geometry: geometryProbe } : {}),
+        internalError: error,
+        normalization: {
+          decision: "not_attempted",
+          reason: "Rendering failed before a validated final image was available.",
+          scale: null
+        }
+      }
+    );
   } finally {
-    window.destroy();
+    frameCollector?.dispose();
+    if (window && !window.isDestroyed()) {
+      window.destroy();
+    }
+  }
+}
+
+function needsSurfaceCompensation(compensation: CardSurfaceCompensation): boolean {
+  return compensation.scaleX !== 1 || compensation.scaleY !== 1;
+}
+
+async function applyCardSurfaceCompensation(
+  window: BrowserWindow,
+  compensation: CardSurfaceCompensation
+): Promise<void> {
+  const applied = (await window.webContents.executeJavaScript(`
+    (() => {
+      const card = document.querySelector(".card");
+      if (!(card instanceof HTMLElement)) {
+        return false;
+      }
+      card.style.transformOrigin = "0 0";
+      card.style.transform = "scale(${compensation.scaleX}, ${compensation.scaleY})";
+      return true;
+    })()
+  `)) as unknown;
+  if (applied !== true) {
+    throw new Error("카드 DPI 표면 보정을 적용하지 못했습니다.");
   }
 }
 
@@ -223,26 +437,28 @@ async function waitForFonts(window: BrowserWindow, requireUserFont: boolean): Pr
   `)) as { readonly ready?: unknown; readonly userFontLoaded?: unknown };
 
   if (result.ready !== true) {
-    throw new Error("폰트 로딩 시간이 초과되었습니다.");
+    throw new RenderFontReadinessError("폰트 로딩 시간이 초과되었습니다.");
   }
 
   if (requireUserFont && result.userFontLoaded !== true) {
-    throw new Error("사용자 폰트를 로드하지 못했습니다: Cardnews User Font");
+    throw new RenderFontReadinessError("사용자 폰트를 로드하지 못했습니다: Cardnews User Font");
   }
 }
 
-async function waitForImageAssets(window: BrowserWindow): Promise<void> {
-  await window.webContents.executeJavaScript(`
-    Promise.race([
-      Promise.all([
+export async function waitForImageAssets(executor: {
+  executeJavaScript(script: string): Promise<unknown>;
+}): Promise<void> {
+  const result = await executor.executeJavaScript(`
+    (async () => {
+      const statuses = await Promise.race([
+        Promise.all([
         ...Array.from(document.images).map((image) => {
-          if (image.complete && image.naturalWidth > 0) {
-            return true;
+          if (image.complete) {
+            return image.naturalWidth > 0;
           }
           return new Promise((resolve) => {
-            const done = () => resolve(true);
-            image.addEventListener("load", done, { once: true });
-            image.addEventListener("error", done, { once: true });
+            image.addEventListener("load", () => resolve(true), { once: true });
+            image.addEventListener("error", () => resolve(false), { once: true });
           });
         }),
         ...Array.from(document.querySelectorAll(".photo, .layer-image"))
@@ -253,15 +469,40 @@ async function waitForImageAssets(window: BrowserWindow): Promise<void> {
           })
           .map((url) => new Promise((resolve) => {
             const image = new Image();
-            const done = () => resolve(true);
-            image.onload = done;
-            image.onerror = done;
+            image.onload = () => resolve(true);
+            image.onerror = () => resolve(false);
             image.src = url;
           }))
-      ]),
-      new Promise((resolve) => setTimeout(() => resolve(false), 5000))
-    ])
+        ]).then((values) => ({
+          failedCount: values.filter((value) => value !== true).length,
+          ready: values.every((value) => value === true),
+          timedOut: false
+        })),
+        new Promise((resolve) => setTimeout(
+          () => resolve({ failedCount: 0, ready: false, timedOut: true }),
+          5000
+        ))
+      ]);
+      return statuses;
+    })()
   `);
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    throw new RenderImageReadinessError("이미지 자산 준비 상태를 확인하지 못했습니다.");
+  }
+
+  const readiness = result as Record<string, unknown>;
+  if (readiness["ready"] === true) {
+    return;
+  }
+  if (readiness["timedOut"] === true) {
+    throw new RenderImageReadinessError("이미지 로딩 시간이 초과되었습니다.");
+  }
+
+  const failedCount =
+    typeof readiness["failedCount"] === "number" && Number.isFinite(readiness["failedCount"])
+      ? readiness["failedCount"]
+      : 1;
+  throw new RenderImageReadinessError(`이미지 자산을 로드하지 못했습니다: ${failedCount}개`);
 }
 
 async function waitForAnimationFrames(window: BrowserWindow, frameCount: number): Promise<void> {
@@ -281,21 +522,219 @@ async function waitForAnimationFrames(window: BrowserWindow, frameCount: number)
   `);
 }
 
-async function captureFinalImage(window: BrowserWindow): Promise<NativeImage> {
+async function captureFinalImage(
+  frameCollector: PaintFrameCollector<NativeImage>,
+  geometry: ValidatedCardGeometry,
+  target: { readonly width: number; readonly height: number }
+): Promise<CapturedFrame> {
+  let lastFailure: CaptureFrameFailure | undefined;
   for (let attempt = 0; attempt < FINAL_CAPTURE_ATTEMPTS; attempt += 1) {
     if (attempt > 0) {
       await delay(160 * attempt);
     }
 
-    window.webContents.invalidate();
-    await waitForAnimationFrames(window, 2);
-    const image = await window.webContents.capturePage();
-    if (!image.isEmpty() && !isBlankImage(image)) {
-      return image;
+    try {
+      const frame = await frameCollector.captureInvalidatedFrame(2_500);
+      const image = frame.image;
+      if (image.isEmpty() || isBlankImage(image)) {
+        lastFailure = new CaptureFrameFailure({
+          capturedBitmap: image.getSize(),
+          code: "RENDER_CAPTURE_BLANK",
+          normalization: {
+            decision: "rejected",
+            reason: "Captured offscreen frame was blank.",
+            scale: null
+          }
+        });
+        continue;
+      }
+
+      const source = image.getSize();
+      const decision = decideCaptureNormalization({
+        geometry,
+        hasUnexpectedBorder: hasUnexpectedTransparentBorder(image),
+        source,
+        target
+      });
+      if (!decision.ok) {
+        lastFailure = new CaptureFrameFailure({
+          capturedBitmap: source,
+          code: "RENDER_CAPTURE_ASPECT_MISMATCH",
+          normalization: {
+            decision: "rejected",
+            reason: decision.reason,
+            scale: null
+          }
+        });
+        continue;
+      }
+
+      return {
+        image:
+          decision.value.decision === "exact"
+            ? image
+            : image.resize({ width: target.width, height: target.height, quality: "best" }),
+        normalization: {
+          decision: decision.value.decision,
+          reason: null,
+          scale: decision.value.scale
+        },
+        source
+      };
+    } catch (error) {
+      lastFailure =
+        error instanceof CaptureFrameFailure
+          ? error
+          : new CaptureFrameFailure({
+              code: "RENDER_CAPTURE_BLANK",
+              normalization: {
+                decision: "rejected",
+                reason:
+                  error instanceof Error &&
+                  error.message === "Timed out waiting for a post-readiness paint frame."
+                    ? error.message
+                    : "Offscreen paint capture failed before a usable frame.",
+                scale: null
+              }
+            });
     }
   }
 
-  throw new Error("Captured offscreen frame stayed blank after render readiness.");
+  throw (
+    lastFailure ??
+    new CaptureFrameFailure({
+      code: "RENDER_CAPTURE_BLANK",
+      normalization: {
+        decision: "rejected",
+        reason: "Captured offscreen frame stayed blank after render readiness.",
+        scale: null
+      }
+    })
+  );
+}
+
+export async function createPaintCollectorAndLoad(
+  webContents: WebContents,
+  load: () => Promise<void>
+): Promise<PaintFrameCollector<NativeImage>> {
+  const collector = new PaintFrameCollector(createPaintFrameSource(webContents));
+  try {
+    await load();
+    return collector;
+  } catch (error) {
+    collector.dispose();
+    throw error;
+  }
+}
+
+export function createPaintFrameSource(webContents: WebContents): PaintFrameSource<NativeImage> {
+  return {
+    invalidate: () => {
+      webContents.invalidate();
+    },
+    subscribe: (listener) => {
+      const handlePaint = (
+        _event: Electron.Event,
+        _dirtyRect: Electron.Rectangle,
+        image: NativeImage
+      ): void => {
+        listener(image);
+      };
+      webContents.on("paint", handlePaint);
+      return () => {
+        webContents.removeListener("paint", handlePaint);
+      };
+    }
+  };
+}
+
+async function collectCardGeometryProbe(window: BrowserWindow): Promise<CardGeometryProbe> {
+  const rawProbe: unknown = await window.webContents.executeJavaScript(`
+    (() => {
+      const card = document.querySelector(".card");
+      const rect = card ? card.getBoundingClientRect() : undefined;
+      const computed = card ? window.getComputedStyle(card) : undefined;
+      return {
+        cardExists: Boolean(card),
+        rect: rect
+          ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          : { x: 0, y: 0, width: 0, height: 0 },
+        computedWidth: computed ? Number.parseFloat(computed.width) : 0,
+        computedHeight: computed ? Number.parseFloat(computed.height) : 0,
+        contentWidth: window.innerWidth,
+        contentHeight: window.innerHeight,
+        documentWidth: document.documentElement.scrollWidth,
+        documentHeight: document.documentElement.scrollHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        fontsReady: !document.fonts || document.fonts.status === "loaded",
+        imagesReady: Array.from(document.images).every(
+          (image) => image.complete && (image.naturalWidth > 0 || !image.currentSrc)
+        )
+      };
+    })()
+  `);
+
+  return parseCardGeometryProbe(rawProbe, window.webContents.getZoomFactor());
+}
+
+function parseCardGeometryProbe(rawProbe: unknown, zoomFactor: number): CardGeometryProbe {
+  const record = isRecord(rawProbe) ? rawProbe : {};
+  const rect = isRecord(record["rect"]) ? record["rect"] : {};
+  return {
+    cardExists: record["cardExists"] === true,
+    rect: {
+      x: numberOrNaN(rect["x"]),
+      y: numberOrNaN(rect["y"]),
+      width: numberOrNaN(rect["width"]),
+      height: numberOrNaN(rect["height"])
+    },
+    computedWidth: numberOrNaN(record["computedWidth"]),
+    computedHeight: numberOrNaN(record["computedHeight"]),
+    contentWidth: numberOrNaN(record["contentWidth"]),
+    contentHeight: numberOrNaN(record["contentHeight"]),
+    documentWidth: numberOrNaN(record["documentWidth"]),
+    documentHeight: numberOrNaN(record["documentHeight"]),
+    devicePixelRatio: numberOrNaN(record["devicePixelRatio"]),
+    zoomFactor,
+    fontsReady: record["fontsReady"] === true,
+    imagesReady: record["imagesReady"] === true
+  };
+}
+
+function hasUnexpectedTransparentBorder(image: NativeImage): boolean {
+  const size = image.getSize();
+  const bitmap = image.toBitmap();
+  if (size.width <= 0 || size.height <= 0 || bitmap.byteLength < size.width * size.height * 4) {
+    return true;
+  }
+
+  const sampleCount = 24;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const x = Math.round((index / (sampleCount - 1)) * (size.width - 1));
+    const y = Math.round((index / (sampleCount - 1)) * (size.height - 1));
+    if (
+      readAlpha(bitmap, size.width, x, 0) < 250 ||
+      readAlpha(bitmap, size.width, x, size.height - 1) < 250 ||
+      readAlpha(bitmap, size.width, 0, y) < 250 ||
+      readAlpha(bitmap, size.width, size.width - 1, y) < 250
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function readAlpha(bitmap: Buffer, width: number, x: number, y: number): number {
+  return bitmap[(y * width + x) * 4 + 3] ?? 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function numberOrNaN(value: unknown): number {
+  return typeof value === "number" ? value : Number.NaN;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -378,23 +817,47 @@ function parseMetric(rawMetric: unknown): RenderSlotMetric | undefined {
 }
 
 function isBlankImage(image: NativeImage): boolean {
-  const bitmap = image.toBitmap();
+  return isBlankBitmap(image.toBitmap());
+}
+
+export function isBlankBitmap(bitmap: Buffer): boolean {
   if (bitmap.byteLength < 4) {
     return true;
   }
 
-  const firstBlue = readByte(bitmap, 0);
-  const firstGreen = readByte(bitmap, 1);
-  const firstRed = readByte(bitmap, 2);
-  const firstAlpha = readByte(bitmap, 3);
-  const step = Math.max(4, Math.floor(bitmap.byteLength / 1600));
+  const pixelCount = Math.floor(bitmap.byteLength / 4);
+  const sampleCount = Math.min(1_600, pixelCount);
+  let firstBlue = 0;
+  let firstGreen = 0;
+  let firstRed = 0;
+  let firstAlpha = 0;
+  let foundVisiblePixel = false;
 
-  for (let index = 4; index < bitmap.byteLength; index += step) {
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const pixelIndex =
+      sampleCount === 1
+        ? 0
+        : Math.round((sampleIndex * (pixelCount - 1)) / (sampleCount - 1));
+    const index = pixelIndex * 4;
+    const alpha = readByte(bitmap, index + 3);
+    if (alpha === 0) {
+      continue;
+    }
+
+    if (!foundVisiblePixel) {
+      firstBlue = readByte(bitmap, index);
+      firstGreen = readByte(bitmap, index + 1);
+      firstRed = readByte(bitmap, index + 2);
+      firstAlpha = alpha;
+      foundVisiblePixel = true;
+      continue;
+    }
+
     if (
       readByte(bitmap, index) !== firstBlue ||
       readByte(bitmap, index + 1) !== firstGreen ||
       readByte(bitmap, index + 2) !== firstRed ||
-      readByte(bitmap, index + 3) !== firstAlpha
+      alpha !== firstAlpha
     ) {
       return false;
     }
@@ -418,12 +881,18 @@ function buildGateReport(issues: readonly QualityGateIssue[]): QualityGateReport
 async function writeRenderReports(
   outputDir: string,
   metrics: readonly RenderSlotMetric[],
-  gateReport: QualityGateReport
+  gateReport: QualityGateReport,
+  captureReports: readonly RenderCaptureReport[]
 ): Promise<void> {
   await fs.writeFile(path.join(outputDir, "slots.json"), JSON.stringify(metrics, null, 2), "utf8");
   await fs.writeFile(
     path.join(outputDir, "gate-report.json"),
     JSON.stringify(gateReport, null, 2),
+    "utf8"
+  );
+  await fs.writeFile(
+    path.join(outputDir, "render-diagnostics.json"),
+    JSON.stringify(captureReports, null, 2),
     "utf8"
   );
 }
@@ -434,9 +903,12 @@ async function writeRenderError(
   error: CardnewsError
 ): Promise<void> {
   await fs.mkdir(outputDir, { recursive: true });
+  const payload = isRenderFailure(error)
+    ? { ...error.diagnostic, userMessage: error.message }
+    : { cardIndex, code: error.code, message: error.message };
   await fs.writeFile(
     path.join(outputDir, "render-error.json"),
-    JSON.stringify({ cardIndex, code: error.code, message: error.message }, null, 2),
+    JSON.stringify(payload, null, 2),
     "utf8"
   );
 }
@@ -447,6 +919,48 @@ function createSha256(buffer: Buffer): string {
 
 function renderFailed(message: string): CardnewsError {
   return { ok: false, code: "render_failed", message };
+}
+
+function renderFailure(
+  input: RenderDeckInput,
+  cardIndex: number,
+  ratio: { readonly id: string; readonly width: number; readonly height: number },
+  code: RenderDiagnosticCode,
+  message: string,
+  facts: {
+    readonly capturedBitmap?: { readonly width: number; readonly height: number };
+    readonly finalBitmap?: { readonly width: number; readonly height: number };
+    readonly geometry?: CardGeometryProbe;
+    readonly internalError?: unknown;
+    readonly normalization: RenderNormalizationDiagnostic;
+  }
+): RenderFailure {
+  return {
+    ok: false,
+    code: "render_failed",
+    message,
+    diagnostic: createRenderDiagnostic({
+      appVersion: input.appVersion ?? process.env["npm_package_version"],
+      aspectRatioId: ratio.id,
+      ...(facts.capturedBitmap ? { capturedBitmap: facts.capturedBitmap } : {}),
+      cardIndex,
+      code,
+      edition: input.edition,
+      expected: { width: ratio.width, height: ratio.height },
+      ...(facts.finalBitmap ? { finalBitmap: facts.finalBitmap } : {}),
+      ...(facts.geometry ? { geometry: facts.geometry } : {}),
+      ...(facts.internalError !== undefined ? { internalError: facts.internalError } : {}),
+      normalization: facts.normalization
+    })
+  };
+}
+
+function toPublicError(error: CardnewsError): CardnewsError {
+  return { ok: false, code: error.code, message: error.message };
+}
+
+function isRenderFailure(error: CardnewsError): error is RenderFailure {
+  return "diagnostic" in error;
 }
 
 function isCardnewsError<T>(result: CardnewsResult<T>): result is CardnewsError {

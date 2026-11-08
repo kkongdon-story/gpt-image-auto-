@@ -38,6 +38,14 @@ export const defaultChromeConfig: ChromeConfig = {
   }
 };
 
+export const pageNumberTemplatePresets = [
+  { label: "1 / N", template: "{n} / {total}" },
+  { label: "1/N", template: "{n}/{total}" },
+  { label: "1-N", template: "{n}-{total}" },
+  { label: "01 / N", template: "{n2} / {total}" },
+  { label: "1장 / N장", template: "{n}장 / {total}장" }
+] as const;
+
 type PartialChromeSlot = Partial<ChromeSlotStyle>;
 type PartialChromePageNumber = Partial<ChromePageNumberStyle>;
 

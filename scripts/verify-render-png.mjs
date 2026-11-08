@@ -3,9 +3,19 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index += 1) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  CRC32_TABLE[index] = value >>> 0;
+}
+
 const DEFAULTS = {
   minNonWhiteRatio: 0.02,
   minCoverageRatio: 0.08,
@@ -77,31 +87,125 @@ function readChunks(buffer) {
 
   const chunks = [];
   let offset = PNG_SIGNATURE.length;
+  let sawIend = false;
   while (offset + 12 <= buffer.length) {
     const length = buffer.readUInt32BE(offset);
     const type = buffer.toString('ascii', offset + 4, offset + 8);
+    validateChunkType(type);
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
     const crcEnd = dataEnd + 4;
     if (crcEnd > buffer.length) {
       throw new Error(`PNG chunk ${type} extends beyond file size`);
     }
-    chunks.push({ type, data: buffer.subarray(dataStart, dataEnd) });
+    const expectedCrc = buffer.readUInt32BE(dataEnd);
+    const actualCrc = crc32(buffer.subarray(offset + 4, dataEnd));
+    if (actualCrc !== expectedCrc) {
+      throw new Error(`PNG chunk ${type} has invalid CRC`);
+    }
+    chunks.push({ type, data: buffer.subarray(dataStart, dataEnd), length });
     offset = crcEnd;
     if (type === 'IEND') {
-      return chunks;
+      sawIend = true;
+      break;
     }
   }
 
-  throw new Error('PNG is missing IEND chunk');
+  if (!sawIend) {
+    throw new Error('PNG is missing IEND chunk');
+  }
+  if (offset !== buffer.length) {
+    throw new Error('PNG has trailing data after IEND');
+  }
+  validateChunkSequence(chunks);
+  return chunks;
+}
+
+function validateChunkType(type) {
+  if (!/^[A-Za-z]{4}$/.test(type)) {
+    throw new Error(`PNG chunk has invalid type: ${JSON.stringify(type)}`);
+  }
+}
+
+function validateChunkSequence(chunks) {
+  if (chunks.length < 3) {
+    throw new Error('PNG is missing required chunks');
+  }
+  if (chunks[0].type !== 'IHDR') {
+    throw new Error('PNG first chunk must be IHDR');
+  }
+  if (chunks[chunks.length - 1].type !== 'IEND') {
+    throw new Error('PNG final chunk must be IEND');
+  }
+
+  let ihdrCount = 0;
+  let iendCount = 0;
+  let idatCount = 0;
+  let seenIdat = false;
+  let seenChunkAfterIdat = false;
+  let seenPlte = false;
+
+  for (const chunk of chunks) {
+    if (chunk.type === 'IHDR') {
+      ihdrCount += 1;
+      if (ihdrCount > 1) {
+        throw new Error('PNG contains multiple IHDR chunks');
+      }
+    } else if (chunk.type === 'IEND') {
+      iendCount += 1;
+      if (chunk.length !== 0) {
+        throw new Error('PNG IEND chunk must be empty');
+      }
+      if (iendCount > 1) {
+        throw new Error('PNG contains multiple IEND chunks');
+      }
+    } else if (chunk.type === 'PLTE') {
+      if (seenIdat) {
+        throw new Error('PNG PLTE chunk must appear before IDAT');
+      }
+      seenPlte = true;
+    } else if (chunk.type === 'IDAT') {
+      if (seenChunkAfterIdat) {
+        throw new Error('PNG IDAT chunks must be consecutive');
+      }
+      seenIdat = true;
+      idatCount += 1;
+    } else if (seenIdat) {
+      seenChunkAfterIdat = true;
+    }
+  }
+
+  if (ihdrCount !== 1) {
+    throw new Error('PNG is missing IHDR chunk');
+  }
+  if (idatCount === 0) {
+    throw new Error('PNG is missing IDAT image data');
+  }
+  if (iendCount !== 1) {
+    throw new Error('PNG is missing IEND chunk');
+  }
+
+  const ihdr = chunks[0];
+  if (ihdr.data.length !== 13) {
+    throw new Error('PNG IHDR chunk must be 13 bytes');
+  }
+  const colorType = ihdr.data.readUInt8(9);
+  if (colorType === 3 && !seenPlte) {
+    throw new Error('Indexed-color PNG is missing required PLTE chunk');
+  }
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function parsePng(buffer) {
   const chunks = readChunks(buffer);
-  const ihdr = chunks.find((chunk) => chunk.type === 'IHDR');
-  if (!ihdr || ihdr.data.length !== 13) {
-    throw new Error('PNG is missing a valid IHDR chunk');
-  }
+  const ihdr = chunks[0];
 
   const info = {
     width: ihdr.data.readUInt32BE(0),
@@ -406,6 +510,7 @@ function analyzePng(buffer, parsed, args) {
       bitDepth: parsed.bitDepth,
       colorType: parsed.colorType,
       interlace: parsed.interlace,
+      chunksValidated: true,
     },
     sampledPixels,
     sampleStep,
@@ -493,4 +598,14 @@ function main() {
   }
 }
 
-main();
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+  main();
+}
+
+export {
+  analyzePng,
+  crc32,
+  parseArgs,
+  parsePng,
+  readChunks,
+};

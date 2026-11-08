@@ -1,5 +1,6 @@
 import electron = require("electron");
 import type { CardnewsApi } from "../src/domain/cardnews-api.js";
+import type { MediaKind, Mp4ExportInput, Mp4ExportProgress } from "../src/domain/cardnews-api.js";
 import type {
   AppSettings,
   AiChatMessage,
@@ -35,16 +36,36 @@ const api: CardnewsApi = {
   importBulkCsvFile: () => ipcRenderer.invoke("cardnews:importBulkCsvFile"),
   exportBulkCsvTemplate: (content: string) => ipcRenderer.invoke("cardnews:exportBulkCsvTemplate", content),
   renderBulkCsv: (csvText: string) => ipcRenderer.invoke("cardnews:renderBulkCsv", csvText),
+  renderTemplateBulkCsv: (csvText: string, workspace: unknown, metadata: unknown) =>
+    ipcRenderer.invoke("cardnews:renderTemplateBulkCsv", csvText, workspace, metadata),
   importCustomStyleFile: () => ipcRenderer.invoke("cardnews:importCustomStyleFile"),
   exportTemplateFile: (content: string) => ipcRenderer.invoke("cardnews:exportTemplateFile", content),
   listBackgroundLibrary: () => ipcRenderer.invoke("cardnews:listBackgroundLibrary"),
   addBackgroundToLibrary: () => ipcRenderer.invoke("cardnews:addBackgroundToLibrary"),
+  removeBackgroundFromLibrary: (backgroundId: string) =>
+    ipcRenderer.invoke("cardnews:removeBackgroundFromLibrary", backgroundId),
   listImageLibrary: () => ipcRenderer.invoke("cardnews:listImageLibrary"),
   addImageToLibrary: () => ipcRenderer.invoke("cardnews:addImageToLibrary"),
   getImagePreview: (imageId: string) => ipcRenderer.invoke("cardnews:getImagePreview", imageId),
+  removeImageFromLibrary: (imageId: string) => ipcRenderer.invoke("cardnews:removeImageFromLibrary", imageId),
+  importMediaAsset: (kind?: MediaKind) => ipcRenderer.invoke("cardnews:media:import", kind),
+  listMediaCatalog: () => ipcRenderer.invoke("cardnews:media:list"),
+  getMediaPreview: (mediaId: string) => ipcRenderer.invoke("cardnews:media:preview", mediaId),
+  listMediaUsage: (mediaId: string) => ipcRenderer.invoke("cardnews:media:usage", mediaId),
+  deleteMediaAsset: (mediaId: string) => ipcRenderer.invoke("cardnews:media:delete", mediaId),
+  exportVideoMp4: (input: Mp4ExportInput) => ipcRenderer.invoke("cardnews:video:export", input),
+  cancelVideoExport: (jobId: string) => ipcRenderer.invoke("cardnews:video:cancel", jobId),
+  onVideoExportProgress: (handler: (progress: Mp4ExportProgress) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: Mp4ExportProgress) => handler(progress);
+    ipcRenderer.on("cardnews:video:progress", listener);
+    return () => ipcRenderer.removeListener("cardnews:video:progress", listener);
+  },
+  importTemplatePack: () => ipcRenderer.invoke("cardnews:importTemplatePack"),
   removeImageBackground: (imageId: string, tolerance: number) =>
     ipcRenderer.invoke("cardnews:removeImageBackground", imageId, tolerance),
-  listAiProviders: () => ipcRenderer.invoke("cardnews:ai:listProviders"),
+  listAiProviders: (forceRefresh?: boolean) => ipcRenderer.invoke("cardnews:ai:listProviders", forceRefresh),
+  installAiProvider: (providerId: AiProviderId, recipeId: string) =>
+    ipcRenderer.invoke("cardnews:ai:install", providerId, recipeId),
   runAiChat: (providerId: AiProviderId, messages: readonly AiChatMessage[]) =>
     ipcRenderer.invoke("cardnews:ai:chat", providerId, messages),
   searchStockImages: (query: string, page: number) =>

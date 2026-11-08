@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "binaryPresent": false,
+  "trustStatus": "placeholder-only-not-approved",
+  "executableRelativePath": "ffmpeg/ffmpeg.exe",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "versionPattern": "^ffmpeg version ",
+  "requiredEncoders": ["h264_mf", "aac"],
+  "forbiddenBuildConfigurationTokens": ["--enable-gpl", "--enable-nonfree", "libx264"],
+  "licenseNotice": "Placeholder only. Supply an LGPL-compatible FFmpeg build and keep the final notice in THIRD_PARTY_NOTICES.md.",
+  "sourceOfferUrl": "https://ffmpeg.org/download.html",
+  "buildRecipeUrl": "https://trac.ffmpeg.org/wiki/CompilationGuide",
+  "provenance": {
+    "reviewedBy": "not-reviewed",
+    "reviewedAt": "not-reviewed",
+    "upstreamVersion": "not-pinned",
+    "downloadUrl": "not-downloaded",
+    "notes": "No FFmpeg binary is bundled in this repository by M22. Replace this placeholder only when a trusted LGPL binary has been reviewed, pinned by SHA-256, and scanned."
+  }
+}

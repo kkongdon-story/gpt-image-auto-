@@ -11,13 +11,28 @@ import {
 } from "react";
 import { aspectRatios, defaultAspectRatioId, findAspectRatio } from "../domain/aspectRatios";
 import { parseCardText, serializeCard } from "../domain/cardParser";
-import { defaultChromeConfig, normalizeChromeConfig } from "../domain/chromeConfig";
-import { buildTemplateDocument, parseDeckDocument, type DeckDocument } from "../domain/deckImporter";
 import {
-  buildDraftPrompt,
-  buildMockDraftDocument,
-  buildResearchPrompt,
-  buildTopicPrompt,
+  defaultChromeConfig,
+  normalizeChromeConfig,
+  pageNumberTemplatePresets,
+  renderPageNumber
+} from "../domain/chromeConfig";
+import { buildTemplateDocument, parseDeckDocument, type DeckDocument } from "../domain/deckImporter";
+import { normalizeHexColor } from "../domain/colors";
+import {
+  deleteBodyNumber,
+  isBodyNumberSemanticItemId,
+  resetBodyNumberToAutomatic,
+  resolveBodyNumber
+} from "../domain/bodyNumber";
+import {
+  deletePage,
+  duplicatePage,
+  insertPageAfter,
+  insertPageBefore,
+  type PageOperationResult
+} from "../domain/pageOperations";
+import {
   extractTemplateDocument,
   FeatureLock,
   addEditionImage,
@@ -29,12 +44,17 @@ import {
   listEditionImages,
   loadEditionBulkInput,
   loadEditionProject,
+  removeEditionImage,
   removeEditionImageBackdrop,
   runEditionAi,
   runEditionBulkRender,
   saveEditionBulkTemplate,
   saveEditionProject
 } from "@edition";
+import { isAllowedGptsTemplateBuilderUrl, kakaoInquiryUrl } from "../domain/externalLinks";
+import { createThreadsProfileUrl, normalizeThreadsHandle } from "../domain/socialLinks";
+import { aiNextActionSmokeId } from "./aiAssistantModel";
+import { useAiAssistant } from "./useAiAssistant";
 import {
   getLineLayerAngle,
   getLineLayerRenderGeometry,
@@ -43,12 +63,69 @@ import {
   setLineLayerEndpoint,
   translateLineLayer
 } from "../domain/lineLayer";
+import {
+  applyBodyNumberToolbarPatch,
+  applyCardTypographyToolbarPatch,
+  applyTextLayerToolbarPatch,
+  isEditorToolbarVisible,
+  resolveEditorToolbarTarget
+} from "./editorToolbar";
+import { findBackgroundLibraryUsage } from "./backgroundLibraryUsage";
+import { findImageLibraryUsage } from "./imageLibraryUsage";
+import {
+  defaultCardSceneSettings,
+  normalizeCardSceneSettings,
+  normalizeVideoProjectMode
+} from "../domain/media";
+import { compileVideoTimeline, findCompiledSceneAt } from "../domain/videoTimeline";
+import {
+  copyLayerToClipboard,
+  createLayerClipboardState,
+  cutLayerToClipboard,
+  pasteLayerFromClipboard,
+  resolveLayerClipboardCommand,
+  type LayerClipboardCommand,
+  type LayerClipboardState
+} from "./layerClipboard";
+import {
+  assignBackgroundMediaAsset,
+  bodyNumberModeLabel,
+  buildSceneAudioCandidates,
+  buildSemanticSlotDrafts,
+  buildVideoExportSummary,
+  createVideoLayerFromAsset,
+  formatDuration,
+  rectToSemanticSlotPlacement,
+  semanticSlotPlacementToRect,
+  setBackgroundMediaMode,
+  updateSemanticSlotText,
+  updateSemanticSlotPlacement
+} from "./m22MediaUi";
+import {
+  clientDeltaToEditorPercent,
+  clientPointToEditorPercent,
+  domRectToEditorRect,
+  type EditorRect
+} from "./editorGeometry";
+import type {
+  MediaCatalogAsset,
+  MediaCatalogError,
+  MediaCatalogResult,
+  Mp4ExportApiResult,
+  Mp4ExportError,
+  Mp4ExportProgress,
+  Mp4ExportResult
+} from "../domain/cardnews-api";
 import type {
   AppSettings,
-  AiChatMessage,
   AiProviderId,
   AiProviderStatus,
   BackgroundLibraryItem,
+  BackgroundMediaSelection,
+  BodyNumberDefault,
+  BodyNumberMode,
+  BulkBindingMetadata,
+  BulkBindingTarget,
   BulkRenderResult,
   Card,
   CardBadgeOverride,
@@ -56,9 +133,12 @@ import type {
   CardLineLayer,
   CardOverride,
   CardOverrideMap,
+  CardSceneSettings,
   CardType,
   CardnewsError,
   CardnewsResult,
+  CardTextBoxLayer,
+  CardTypographyOverride,
   ChromeSlotStyle,
   ChromePageNumberStyle,
   DeckDraft,
@@ -67,15 +147,24 @@ import type {
   FontData,
   FontLibraryItem,
   ImageLibraryItem,
+  MediaAssetRef,
+  MediaKind,
   NextHintConfig,
   RenderJobResult,
+  SemanticItemId,
+  SemanticSlotPlacement,
   StockImage,
   StockImageDownloadInput,
   StylePresetRecord,
+  VideoProjectMode,
   WorkspaceState
 } from "../domain/types";
 import { buildCardHtml, buildFontFaceCss } from "../render-engine/cardTemplate";
 import { buildDesignContract, buildSampleStyleJson, parseStyleJson } from "../render-engine/customStyles";
+import {
+  prepareSemanticItemPlacements,
+  syncSemanticItemPlacements
+} from "../render-engine/semanticPlacement";
 import {
   accentSwatches,
   defaultStyleId,
@@ -83,19 +172,67 @@ import {
   stylePresets
 } from "../render-engine/stylePresets";
 
-const maxCards = 12;
+const maxCards = 50;
 const defaultHeaderLabel = "MONEY NOTE";
 const defaultFooterAccount = "kkongdon_story";
-const threadsUrl = "https://www.threads.com/@kkongdon_story";
-const kakaoInquiryUrl = "https://open.kakao.com/me/kkongdon";
 
 function normalizeFooterAccount(value: string): string {
   const trimmed = value.trim();
-  const withoutAt = trimmed.replace(/^@+/, "").trim();
-  return withoutAt.length > 0 ? withoutAt : defaultFooterAccount;
+  return trimmed.length > 0 && trimmed !== "@" ? trimmed : defaultFooterAccount;
+}
+
+function createBulkBindingKey(target: BulkBindingTarget, existingKeys: readonly string[]): string {
+  const raw =
+    target.kind === "deck"
+      ? `deck_${target.field}`
+      : target.kind === "standard"
+        ? `card_${target.cardNumber}_${target.field}`
+        : `card_${target.cardNumber}_layer_${target.layerId}`;
+  const base = raw.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_").slice(0, 56) || "binding";
+  let candidate = /^[A-Za-z]/.test(base) ? base : `b_${base}`;
+  let suffix = 2;
+  while (existingKeys.includes(candidate)) candidate = `${base.slice(0, 58)}_${suffix++}`;
+  return candidate;
+}
+
+const customPageNumberTemplateValue = "__custom__";
+
+function resolvePageNumberTemplateValue(template: string): string {
+  return pageNumberTemplatePresets.some((preset) => preset.template === template)
+    ? template
+    : customPageNumberTemplateValue;
 }
 
 const aiProviderOrder: readonly AiProviderId[] = ["claude", "codex", "gemini"];
+const defaultAiInstruction =
+  "You are a cardnews production assistant. Help turn the user's topic or source notes into a concise Korean cardnews draft, preserving the user's intent and returning usable content for the current template.";
+
+function videoExportStageLabel(stage: Mp4ExportProgress["stage"]): string {
+  switch (stage) {
+    case "compile":
+      return "장면 구성";
+    case "preflight":
+      return "내보내기 환경 확인";
+    case "producer_init":
+      return "영상 프레임 준비";
+    case "render":
+      return "카드 렌더링";
+    case "encode":
+      return "MP4 인코딩";
+    case "finalize":
+      return "파일 마무리";
+  }
+}
+
+function formatElapsedMs(elapsedMs?: number): string {
+  if (!elapsedMs || elapsedMs < 1000) {
+    return "0초";
+  }
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
+}
 
 function chooseDefaultAiProvider(
   providers: readonly AiProviderStatus[],
@@ -111,49 +248,53 @@ function chooseDefaultAiProvider(
   return installed ?? preferred ?? "claude";
 }
 
-function buildImagePrompt(seed: string): string {
-  return [
-    "꽁돈/kkongdon_story 카드뉴스에 쓸 배경 또는 배지 이미지 프롬프트를 작성합니다.",
-    "스타일: 깔끔한 한국형 비즈니스 카드뉴스, 실제 사용 가능한 소재, 과한 장식 없음.",
-    `주제: ${seed.trim() || "AI 자동화로 카드뉴스 제작 시간을 줄이는 장면"}`
-  ].join("\n");
-}
-
-type InspectorTab = "design" | "content" | "export";
+type InspectorTab = "design" | "content" | "media" | "export";
 type CardEditorTab = "content" | "design";
-type AiPresetKind = "topic" | "research" | "draft" | "image";
-type AiThreadRole = "user" | "assistant";
 
-type AiDetectedDraft = {
-  readonly templateText: string;
-  readonly cardCount: number;
+type PageContextMenuState = {
+  readonly index: number;
+  readonly x: number;
+  readonly y: number;
 };
 
-type AiThreadEntry = {
-  readonly id: string;
-  readonly role: AiThreadRole;
-  readonly content: string;
-  readonly detectedDraft?: AiDetectedDraft;
-  readonly retryPrompt?: string;
-  readonly status?: "loading" | "error";
-};
+type StandardBulkField = Extract<BulkBindingTarget, { readonly kind: "standard" }>["field"];
+
+function cardStandardBindingEntries(card: Card): readonly {
+  readonly field: StandardBulkField;
+  readonly label: string;
+  readonly value: string;
+}[] {
+  return [
+    { field: "badge", label: "배지", value: card.badge ?? "" },
+    { field: "title", label: "제목", value: card.title },
+    { field: "subtitle", label: "소제목", value: card.subtitle ?? "" },
+    { field: "body", label: "본문", value: card.paragraphs.join("\n") },
+    { field: "bullets", label: "불릿", value: card.bullets.join("\n") },
+    { field: "source", label: "출처", value: card.source ?? "" },
+    { field: "emphasis", label: "강조", value: card.emphasis ?? "" }
+  ];
+}
 
 type ImagePickerTarget =
   | { readonly kind: "badge" }
   | { readonly kind: "nextHint" }
   | { readonly kind: "layer"; readonly layerId: string };
 
+type M22OptionalCardnewsApi = {
+  readonly listMediaCatalog?: () => Promise<MediaCatalogResult<readonly MediaCatalogAsset[]>>;
+  readonly importMediaAsset?: (kind?: MediaKind) => Promise<MediaCatalogResult<MediaCatalogAsset>>;
+  readonly getMediaPreview?: (mediaId: string) => Promise<MediaCatalogResult<string>>;
+  readonly exportVideoMp4?: (input: { readonly workspace: WorkspaceState }) => Promise<Mp4ExportApiResult>;
+  readonly cancelVideoExport?: (jobId: string) => Promise<Mp4ExportError | { readonly ok: true; readonly jobId: string }>;
+  readonly onVideoExportProgress?: (handler: (progress: Mp4ExportProgress) => void) => () => void;
+};
+
 type ParsedCardEntry = {
   readonly card: Card;
   readonly error: CardnewsError | undefined;
 };
 
-type LayerRect = {
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
-};
+type LayerRect = EditorRect;
 
 type ResizeHandle = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 type TextLayer = Extract<CardLayer, { readonly kind: "text" }>;
@@ -167,6 +308,7 @@ type DragState =
       readonly startClientX: number;
       readonly startClientY: number;
       readonly startRect: LayerRect;
+      readonly activated: boolean;
     }
   | {
       readonly kind: "line-move";
@@ -174,12 +316,16 @@ type DragState =
       readonly startClientX: number;
       readonly startClientY: number;
       readonly startLayer: CardLineLayer;
+      readonly activated: boolean;
     }
   | {
       readonly kind: "line-endpoint";
       readonly layerId: string;
       readonly endpoint: LineEndpoint;
+      readonly startClientX: number;
+      readonly startClientY: number;
       readonly startLayer: CardLineLayer;
+      readonly activated: boolean;
     }
   | {
       readonly kind: "resize";
@@ -188,7 +334,30 @@ type DragState =
       readonly startClientX: number;
       readonly startClientY: number;
       readonly startRect: LayerRect;
+      readonly activated: boolean;
     };
+
+type SemanticDragState = {
+  readonly kind: "move" | "resize";
+  readonly slotId: SemanticItemId;
+  readonly handle?: ResizeHandle;
+  readonly startClientX: number;
+  readonly startClientY: number;
+  readonly startRect: LayerRect;
+  readonly anchor: SemanticSlotPlacement["anchor"];
+  readonly activated: boolean;
+};
+
+const dragActivationThresholdPx = 4;
+
+function hasExceededDragActivationThreshold(
+  startClientX: number,
+  startClientY: number,
+  clientX: number,
+  clientY: number
+): boolean {
+  return Math.hypot(clientX - startClientX, clientY - startClientY) >= dragActivationThresholdPx;
+}
 
 const resizeHandles: readonly ResizeHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 const cardTypeOptions: readonly { readonly value: CardType; readonly label: string }[] = [
@@ -340,11 +509,36 @@ function layerLabel(layer: CardLayer): string {
   if (layer.kind === "line") {
     return "선";
   }
-  return "이미지";
+  return layer.kind === "video" ? "영상" : "이미지";
 }
 
 function isCardnewsError<T>(result: CardnewsResult<T>): result is CardnewsError {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
+}
+
+function isMediaCatalogError<T>(result: MediaCatalogResult<T>): result is MediaCatalogError {
+  return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
+}
+
+function isMp4ExportError(result: Mp4ExportApiResult): result is Mp4ExportError {
+  return result.ok === false;
+}
+
+function mediaCatalogAssetToRef(asset: MediaCatalogAsset): MediaAssetRef {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    displayName: asset.displayName,
+    relativePath: asset.relativePath,
+    mimeType: asset.mimeType,
+    bytes: asset.bytes,
+    sha256: asset.sha256,
+    width: asset.width,
+    height: asset.height,
+    ...(asset.durationMs !== undefined ? { durationMs: asset.durationMs } : {}),
+    ...(asset.hasAudio !== undefined ? { hasAudio: asset.hasAudio } : {}),
+    ...(asset.posterRelativePath ? { posterRelativePath: asset.posterRelativePath } : {})
+  };
 }
 
 function parseEditorCardType(value: string): CardType {
@@ -506,17 +700,31 @@ function StageCanvas({
   editMode,
   layers,
   selectedLayerId,
+  semanticSlots,
+  selectedSemanticSlotId,
   editingLayerId,
+  editingSemanticSlotId,
   editingText,
+  editingSemanticText,
+  playheadMs,
+  sceneStartMs,
   onSelectLayer,
+  onSelectSemanticSlot,
   onTransformLayer,
   onTransformLineLayer,
+  onTransformSemanticSlot,
   onNudgeLayer,
   onDeleteLayer,
+  onDeleteSemanticSlot,
+  onClipboardCommand,
   onStartTextEdit,
+  onStartSemanticTextEdit,
   onEditingTextChange,
+  onEditingSemanticTextChange,
   onCommitTextEdit,
-  onCancelTextEdit
+  onCommitSemanticTextEdit,
+  onCancelTextEdit,
+  onCancelSemanticTextEdit
 }: {
   readonly html: string;
   readonly cardWidth: number;
@@ -524,30 +732,226 @@ function StageCanvas({
   readonly editMode: boolean;
   readonly layers: readonly CardLayer[];
   readonly selectedLayerId: string | null;
+  readonly semanticSlots: readonly {
+    readonly id: SemanticItemId;
+    readonly label: string;
+    readonly text: string;
+    readonly placement: SemanticSlotPlacement;
+  }[];
+  readonly selectedSemanticSlotId: SemanticItemId | null;
   readonly editingLayerId: string | null;
+  readonly editingSemanticSlotId: SemanticItemId | null;
   readonly editingText: string;
+  readonly editingSemanticText: string;
+  readonly playheadMs: number;
+  readonly sceneStartMs: number;
   readonly onSelectLayer: (layerId: string | null) => void;
+  readonly onSelectSemanticSlot: (slotId: SemanticItemId | null) => void;
   readonly onTransformLayer: (layerId: string, rect: LayerRect) => void;
   readonly onTransformLineLayer: (layerId: string, layer: CardLineLayer) => void;
+  readonly onTransformSemanticSlot: (slotId: SemanticItemId, placement: SemanticSlotPlacement) => void;
   readonly onNudgeLayer: (layerId: string, deltaXPercent: number, deltaYPercent: number) => void;
   readonly onDeleteLayer: (layerId: string) => void;
+  readonly onDeleteSemanticSlot: (slotId: SemanticItemId) => void;
+  readonly onClipboardCommand: (command: LayerClipboardCommand) => void;
   readonly onStartTextEdit: (layer: CardLayer) => void;
+  readonly onStartSemanticTextEdit: (slotId: SemanticItemId, text: string) => void;
   readonly onEditingTextChange: (value: string) => void;
+  readonly onEditingSemanticTextChange: (value: string) => void;
   readonly onCommitTextEdit: () => void;
+  readonly onCommitSemanticTextEdit: () => void;
   readonly onCancelTextEdit: () => void;
+  readonly onCancelSemanticTextEdit: () => void;
 }): ReactElement {
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const composingRef = useRef(false);
   const dragRef = useRef<DragState | null>(null);
+  const semanticDragRef = useRef<SemanticDragState | null>(null);
   const draftRectRef = useRef<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
+  const draftSemanticRef = useRef<{ readonly slotId: SemanticItemId; readonly rect: LayerRect; readonly anchor: SemanticSlotPlacement["anchor"] } | null>(null);
   const draftLineRef = useRef<{ readonly layerId: string; readonly layer: CardLineLayer } | null>(null);
+  const transientPreviewRef = useRef<{
+    readonly element: HTMLElement;
+    readonly translate: string;
+    readonly scale: string;
+    readonly transformOrigin: string;
+  } | null>(null);
   const [scale, setScale] = useState(0.4);
   const [draftRect, setDraftRect] = useState<{ readonly layerId: string; readonly rect: LayerRect } | null>(null);
+  const [draftSemantic, setDraftSemanticState] = useState<{
+    readonly slotId: SemanticItemId;
+    readonly rect: LayerRect;
+    readonly anchor: SemanticSlotPlacement["anchor"];
+  } | null>(null);
+  const [measuredSemanticRects, setMeasuredSemanticRects] = useState<Readonly<Record<string, LayerRect>>>({});
+  const [measuredLayerRects, setMeasuredLayerRects] = useState<Readonly<Record<string, LayerRect>>>({});
   const [draftLine, setDraftLineState] = useState<{ readonly layerId: string; readonly layer: CardLineLayer } | null>(
     null
   );
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
   const editingLayer = layers.find((layer): layer is TextLayer => layer.id === editingLayerId && layer.kind === "text");
+  const selectedSemanticSlot = semanticSlots.find((slot) => slot.id === selectedSemanticSlotId);
+  const editingSemanticSlot = semanticSlots.find((slot) => slot.id === editingSemanticSlotId);
+
+  function findEditingForeground(): HTMLElement | null {
+    if (!editingLayerId) return null;
+    return (
+      Array.from(iframeRef.current?.contentDocument?.querySelectorAll<HTMLElement>("[data-layer-text]") ?? []).find(
+        (element) => element.dataset["layerText"] === editingLayerId
+      ) ?? null
+    );
+  }
+
+  function findEditingSemanticForeground(): HTMLElement | null {
+    if (!editingSemanticSlotId) return null;
+    return (
+      Array.from(
+        iframeRef.current?.contentDocument?.querySelectorAll<HTMLElement>(
+          "[data-semantic-item-id], [data-slot]"
+        ) ?? []
+      ).find(
+        (element) =>
+          element.dataset["semanticItemId"] === editingSemanticSlotId ||
+          element.dataset["slot"] === editingSemanticSlotId
+      ) ?? null
+    );
+  }
+
+  function findRenderedLayer(layerId: string): HTMLElement | null {
+    return (
+      Array.from(
+        iframeRef.current?.contentDocument?.querySelectorAll<HTMLElement>("[data-editor-layer-id]") ?? []
+      ).find((element) => element.dataset["editorLayerId"] === layerId) ?? null
+    );
+  }
+
+  function findRenderedSemanticItem(slotId: SemanticItemId): HTMLElement | null {
+    return (
+      Array.from(
+        iframeRef.current?.contentDocument?.querySelectorAll<HTMLElement>(
+          "[data-semantic-item-id], [data-slot]"
+        ) ?? []
+      ).find(
+        (element) =>
+          element.dataset["semanticItemId"] === slotId ||
+          element.dataset["slot"] === slotId
+      ) ?? null
+    );
+  }
+
+  function beginTransientPreview(element: HTMLElement | null): void {
+    const previous = transientPreviewRef.current;
+    if (previous?.element.isConnected) {
+      previous.element.style.translate = previous.translate;
+      previous.element.style.scale = previous.scale;
+      previous.element.style.transformOrigin = previous.transformOrigin;
+    }
+    transientPreviewRef.current = element
+      ? {
+          element,
+          translate: element.style.translate,
+          scale: element.style.scale,
+          transformOrigin: element.style.transformOrigin
+        }
+      : null;
+  }
+
+  function applyTransientPreview(startRect: LayerRect, nextRect: LayerRect): void {
+    const preview = transientPreviewRef.current;
+    if (!preview?.element.isConnected || startRect.width <= 0 || startRect.height <= 0) return;
+    preview.element.style.transformOrigin = "top left";
+    preview.element.style.translate = `${((nextRect.x - startRect.x) / 100) * cardWidth}px ${((nextRect.y - startRect.y) / 100) * cardHeight}px`;
+    preview.element.style.scale = `${nextRect.width / startRect.width} ${nextRect.height / startRect.height}`;
+  }
+
+  function commitMeasuredRects(document: Document): void {
+    const card = document.querySelector<HTMLElement>(".card");
+    if (!card) return;
+    const cardRect = card.getBoundingClientRect();
+    const elements = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-semantic-item-id], [data-slot]")
+    );
+    const nextSemantic: Record<string, LayerRect> = {};
+    for (const slot of semanticSlots) {
+      const element = elements.find(
+        (candidate) =>
+          candidate.dataset["semanticItemId"] === slot.id ||
+          candidate.dataset["slot"] === slot.id
+      );
+      if (!element) continue;
+      const rect = domRectToEditorRect(element.getBoundingClientRect(), cardRect);
+      if (!rect) continue;
+      nextSemantic[slot.id] = {
+        x: roundLayerValue(rect.x),
+        y: roundLayerValue(rect.y),
+        width: roundLayerValue(rect.width),
+        height: roundLayerValue(rect.height)
+      };
+    }
+    const nextLayers: Record<string, LayerRect> = {};
+    for (const layer of layers) {
+      if (layer.kind === "line") continue;
+      const element = findRenderedLayer(layer.id);
+      if (!element) continue;
+      const rect = domRectToEditorRect(element.getBoundingClientRect(), cardRect);
+      if (!rect) continue;
+      nextLayers[layer.id] = {
+        x: roundLayerValue(rect.x),
+        y: roundLayerValue(rect.y),
+        width: roundLayerValue(rect.width),
+        height: roundLayerValue(rect.height)
+      };
+    }
+    setMeasuredSemanticRects(nextSemantic);
+    setMeasuredLayerRects(nextLayers);
+  }
+
+  async function measureRenderedRects(): Promise<void> {
+    const document = iframeRef.current?.contentDocument;
+    if (!document) return;
+    syncSemanticItemPlacements(document);
+    commitMeasuredRects(document);
+    await Promise.all(
+      Array.from(document.querySelectorAll<HTMLVideoElement>("video")).map(
+        (video) =>
+          new Promise<void>((resolve) => {
+            if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+              resolve();
+              return;
+            }
+            const done = (): void => resolve();
+            video.addEventListener("loadeddata", done, { once: true });
+            video.addEventListener("error", done, { once: true });
+            window.setTimeout(done, 2000);
+          })
+      )
+    );
+    await prepareSemanticItemPlacements(document);
+    if (iframeRef.current?.contentDocument !== document) return;
+    commitMeasuredRects(document);
+  }
+
+  useEffect(() => {
+    const foreground = findEditingForeground();
+    if (!foreground) return;
+    const previousVisibility = foreground.style.visibility;
+    foreground.style.visibility = "hidden";
+    return () => {
+      foreground.style.visibility = previousVisibility;
+    };
+  }, [editingLayerId, html]);
+
+  useEffect(() => {
+    const foreground = findEditingSemanticForeground();
+    if (!foreground) return;
+    const previousVisibility = foreground.style.visibility;
+    foreground.style.visibility = "hidden";
+    return () => {
+      foreground.style.visibility = previousVisibility;
+    };
+  }, [editingSemanticSlotId, html]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -565,8 +969,45 @@ function StageCanvas({
     return () => observer.disconnect();
   }, [cardWidth]);
 
+  useEffect(() => {
+    const document = iframeRef.current?.contentDocument;
+    if (!document) return;
+    const localSeconds = Math.max(0, (playheadMs - sceneStartMs) / 1000);
+    for (const video of document.querySelectorAll<HTMLVideoElement>("video.live-card-video")) {
+      const clipStartSeconds = Math.max(0, Number(video.dataset["clipStartMs"] || "0") / 1000);
+      const clipEndRaw = Number(video.dataset["clipEndMs"] || "");
+      const seek = (): void => {
+        const clipEndSeconds = Number.isFinite(clipEndRaw) && clipEndRaw > 0 ? clipEndRaw / 1000 : video.duration;
+        const finalFrame = Number.isFinite(clipEndSeconds)
+          ? Math.max(clipStartSeconds, clipEndSeconds - 1 / 30)
+          : clipStartSeconds + localSeconds;
+        video.currentTime = Math.max(clipStartSeconds, Math.min(clipStartSeconds + localSeconds, finalFrame));
+        video.pause();
+      };
+      if (video.readyState >= HTMLMediaElement.HAVE_METADATA) seek();
+      else video.addEventListener("loadedmetadata", seek, { once: true });
+    }
+  }, [html, playheadMs, sceneStartMs]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      void measureRenderedRects();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [html, layers, semanticSlots]);
+
   function rectFor(layer: CardLayer): LayerRect {
-    return draftRect?.layerId === layer.id ? draftRect.rect : layerRect(layer);
+    if (draftRect?.layerId === layer.id) return draftRect.rect;
+    return measuredLayerRects[layer.id] ?? layerRect(layer);
+  }
+
+  function semanticRectFor(
+    slot: { readonly id: SemanticItemId; readonly placement: SemanticSlotPlacement }
+  ): LayerRect | undefined {
+    if (draftSemantic?.slotId === slot.id) return draftSemantic.rect;
+    const measuredRect = measuredSemanticRects[slot.id];
+    if (measuredRect) return measuredRect;
+    return slot.placement.mode === "card" ? semanticSlotPlacementToRect(slot.placement) : undefined;
   }
 
   function lineFor(layer: CardLineLayer): CardLineLayer {
@@ -606,6 +1047,17 @@ function StageCanvas({
     setDraftRect(nextDraft);
   }
 
+  function setDraftSemantic(
+    nextDraft: {
+      readonly slotId: SemanticItemId;
+      readonly rect: LayerRect;
+      readonly anchor: SemanticSlotPlacement["anchor"];
+    } | null
+  ): void {
+    draftSemanticRef.current = nextDraft;
+    setDraftSemanticState(nextDraft);
+  }
+
   function setDraftLine(nextDraft: { readonly layerId: string; readonly layer: CardLineLayer } | null): void {
     draftLineRef.current = nextDraft;
     setDraftLineState(nextDraft);
@@ -622,15 +1074,76 @@ function StageCanvas({
     } catch {
     }
     onSelectLayer(layer.id);
+    onSelectSemanticSlot(null);
     const rect = rectFor(layer);
+    beginTransientPreview(findRenderedLayer(layer.id));
     dragRef.current = {
       kind: "move",
       layerId: layer.id,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startRect: rect
+      startRect: rect,
+      activated: false
     };
-    setDraft({ layerId: layer.id, rect });
+  }
+
+  function beginSemanticMove(
+    event: ReactPointerEvent<HTMLElement>,
+    slot: { readonly id: SemanticItemId; readonly placement: SemanticSlotPlacement }
+  ): void {
+    if (!editMode) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(null);
+    onSelectSemanticSlot(slot.id);
+    const rect = semanticRectFor(slot);
+    if (!rect) return;
+    const anchor = slot.placement.anchor;
+    beginTransientPreview(findRenderedSemanticItem(slot.id));
+    semanticDragRef.current = {
+      kind: "move",
+      slotId: slot.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: rect,
+      anchor,
+      activated: false
+    };
+  }
+
+  function beginSemanticResize(
+    event: ReactPointerEvent<HTMLElement>,
+    slot: { readonly id: SemanticItemId; readonly placement: SemanticSlotPlacement },
+    handle: ResizeHandle
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+    }
+    onSelectLayer(null);
+    onSelectSemanticSlot(slot.id);
+    const rect = semanticRectFor(slot);
+    if (!rect) return;
+    const anchor = slot.placement.anchor;
+    beginTransientPreview(findRenderedSemanticItem(slot.id));
+    semanticDragRef.current = {
+      kind: "resize",
+      slotId: slot.id,
+      handle,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: rect,
+      anchor,
+      activated: false
+    };
   }
 
   function beginResize(event: ReactPointerEvent<HTMLElement>, layer: CardLayer, handle: ResizeHandle): void {
@@ -641,16 +1154,18 @@ function StageCanvas({
     } catch {
     }
     onSelectLayer(layer.id);
+    onSelectSemanticSlot(null);
     const rect = rectFor(layer);
+    beginTransientPreview(findRenderedLayer(layer.id));
     dragRef.current = {
       kind: "resize",
       layerId: layer.id,
       handle,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startRect: rect
+      startRect: rect,
+      activated: false
     };
-    setDraft({ layerId: layer.id, rect });
   }
 
   function beginLineMove(event: ReactPointerEvent<HTMLElement>, layer: CardLineLayer): void {
@@ -664,15 +1179,16 @@ function StageCanvas({
     } catch {
     }
     onSelectLayer(layer.id);
+    onSelectSemanticSlot(null);
     const currentLayer = lineFor(layer);
     dragRef.current = {
       kind: "line-move",
       layerId: layer.id,
       startClientX: event.clientX,
       startClientY: event.clientY,
-      startLayer: currentLayer
+      startLayer: currentLayer,
+      activated: false
     };
-    setDraftLine({ layerId: layer.id, layer: currentLayer });
   }
 
   function beginLineEndpoint(
@@ -687,33 +1203,91 @@ function StageCanvas({
     } catch {
     }
     onSelectLayer(layer.id);
+    onSelectSemanticSlot(null);
     const currentLayer = lineFor(layer);
     dragRef.current = {
       kind: "line-endpoint",
       layerId: layer.id,
       endpoint,
-      startLayer: currentLayer
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startLayer: currentLayer,
+      activated: false
     };
-    setDraftLine({ layerId: layer.id, layer: currentLayer });
   }
 
   function updateDraft(event: ReactPointerEvent<HTMLDivElement>): void {
     const drag = dragRef.current;
-    const overlay = overlayRef.current;
-    if (!drag || !overlay) {
+    const semanticDrag = semanticDragRef.current;
+    const cardViewportRect = iframeRef.current?.getBoundingClientRect();
+    if (!cardViewportRect) {
       return;
     }
-    const bounds = overlay.getBoundingClientRect();
+    if (semanticDrag) {
+      const wasActivated = semanticDrag.activated;
+      if (
+        !wasActivated &&
+        !hasExceededDragActivationThreshold(
+          semanticDrag.startClientX,
+          semanticDrag.startClientY,
+          event.clientX,
+          event.clientY
+        )
+      ) {
+        return;
+      }
+      if (!wasActivated) {
+        semanticDragRef.current = { ...semanticDrag, activated: true };
+      }
+      const delta = clientDeltaToEditorPercent(
+        semanticDrag.startClientX,
+        semanticDrag.startClientY,
+        event.clientX,
+        event.clientY,
+        cardViewportRect
+      );
+      if (!delta) return;
+      const nextRect =
+        semanticDrag.kind === "resize" && semanticDrag.handle
+          ? transformResizeRect(semanticDrag.startRect, semanticDrag.handle, delta.x, delta.y)
+          : transformMoveRect(semanticDrag.startRect, delta.x, delta.y);
+      const previewRect = event.shiftKey || !wasActivated ? nextRect : snapLayerRect(nextRect, cardWidth, cardHeight);
+      applyTransientPreview(semanticDrag.startRect, previewRect);
+      setDraftSemantic({
+        slotId: semanticDrag.slotId,
+        rect: previewRect,
+        anchor: semanticDrag.anchor
+      });
+      return;
+    }
+    if (!drag) {
+      return;
+    }
+    const wasActivated = drag.activated;
+    if (
+      !wasActivated &&
+      !hasExceededDragActivationThreshold(
+        drag.startClientX,
+        drag.startClientY,
+        event.clientX,
+        event.clientY
+      )
+    ) {
+      return;
+    }
+    if (!wasActivated) {
+      dragRef.current = { ...drag, activated: true };
+    }
     if (drag.kind === "line-endpoint") {
-      const pointerX = ((event.clientX - bounds.left) / bounds.width) * 100;
-      const pointerY = ((event.clientY - bounds.top) / bounds.height) * 100;
+      const pointer = clientPointToEditorPercent(event.clientX, event.clientY, cardViewportRect);
+      if (!pointer) return;
       setDraftLine({
         layerId: drag.layerId,
         layer: setLineLayerEndpoint(
           drag.startLayer,
           drag.endpoint,
-          pointerX,
-          pointerY,
+          pointer.x,
+          pointer.y,
           event.shiftKey,
           { width: cardWidth, height: cardHeight }
         )
@@ -721,23 +1295,31 @@ function StageCanvas({
       return;
     }
 
-    const deltaXPercent = ((event.clientX - drag.startClientX) / bounds.width) * 100;
-    const deltaYPercent = ((event.clientY - drag.startClientY) / bounds.height) * 100;
+    const delta = clientDeltaToEditorPercent(
+      drag.startClientX,
+      drag.startClientY,
+      event.clientX,
+      event.clientY,
+      cardViewportRect
+    );
+    if (!delta) return;
     if (drag.kind === "line-move") {
       setDraftLine({
         layerId: drag.layerId,
-        layer: translateLineLayer(drag.startLayer, deltaXPercent, deltaYPercent)
+        layer: translateLineLayer(drag.startLayer, delta.x, delta.y)
       });
       return;
     }
 
     const nextRect =
       drag.kind === "move"
-        ? transformMoveRect(drag.startRect, deltaXPercent, deltaYPercent)
-        : transformResizeRect(drag.startRect, drag.handle, deltaXPercent, deltaYPercent);
+        ? transformMoveRect(drag.startRect, delta.x, delta.y)
+        : transformResizeRect(drag.startRect, drag.handle, delta.x, delta.y);
+    const previewRect = event.shiftKey || !wasActivated ? nextRect : snapLayerRect(nextRect, cardWidth, cardHeight);
+    applyTransientPreview(drag.startRect, previewRect);
     setDraft({
       layerId: drag.layerId,
-      rect: event.shiftKey ? nextRect : snapLayerRect(nextRect, cardWidth, cardHeight)
+      rect: previewRect
     });
   }
 
@@ -750,23 +1332,78 @@ function StageCanvas({
     if (lineDraft) {
       onTransformLineLayer(lineDraft.layerId, lineDraft.layer);
     }
+    const semanticDraft = draftSemanticRef.current;
+    if (semanticDraft) {
+      onTransformSemanticSlot(
+        semanticDraft.slotId,
+        rectToSemanticSlotPlacement(semanticDraft.rect, semanticDraft.anchor)
+      );
+    }
     dragRef.current = null;
+    semanticDragRef.current = null;
+    transientPreviewRef.current = null;
     setDraft(null);
+    setDraftSemantic(null);
     setDraftLine(null);
   }
 
+  function nudgeSelectedSemantic(deltaXPercent: number, deltaYPercent: number): void {
+    if (!selectedSemanticSlot) return;
+    const rect = semanticRectFor(selectedSemanticSlot);
+    if (!rect) return;
+    onTransformSemanticSlot(
+      selectedSemanticSlot.id,
+      rectToSemanticSlotPlacement(
+        clampLayerRect({
+          ...rect,
+          x: rect.x + deltaXPercent,
+          y: rect.y + deltaYPercent
+        }),
+        selectedSemanticSlot.placement.anchor
+      )
+    );
+  }
+
   function handleOverlayKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
-    if (!editMode || !selectedLayer || editingLayerId) {
+    if (!editMode || editingLayerId || editingSemanticSlotId) {
       return;
     }
+    const clipboardCommand = resolveLayerClipboardCommand(
+      {
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        isComposing: event.nativeEvent.isComposing,
+        target: event.target
+      },
+      { editMode, inlineEditActive: Boolean(editingLayerId), isComposing: event.nativeEvent.isComposing }
+    );
+    if (clipboardCommand) {
+      event.preventDefault();
+      onClipboardCommand(clipboardCommand);
+      return;
+    }
+    if (!selectedLayer && !selectedSemanticSlot) return;
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
-      onDeleteLayer(selectedLayer.id);
+      if (selectedSemanticSlot) {
+        onDeleteSemanticSlot(selectedSemanticSlot.id);
+        return;
+      }
+      if (selectedLayer) onDeleteLayer(selectedLayer.id);
       return;
     }
     if (event.key === "Escape") {
       event.preventDefault();
       onSelectLayer(null);
+      onSelectSemanticSlot(null);
+      return;
+    }
+    if (event.key === "Enter" && selectedSemanticSlot) {
+      event.preventDefault();
+      onStartSemanticTextEdit(selectedSemanticSlot.id, selectedSemanticSlot.text);
       return;
     }
 
@@ -775,18 +1412,24 @@ function StageCanvas({
     const vertical = (step / cardHeight) * 100;
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      onNudgeLayer(selectedLayer.id, -horizontal, 0);
+      if (selectedLayer) onNudgeLayer(selectedLayer.id, -horizontal, 0);
+      nudgeSelectedSemantic(-horizontal, 0);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      onNudgeLayer(selectedLayer.id, horizontal, 0);
+      if (selectedLayer) onNudgeLayer(selectedLayer.id, horizontal, 0);
+      nudgeSelectedSemantic(horizontal, 0);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      onNudgeLayer(selectedLayer.id, 0, -vertical);
+      if (selectedLayer) onNudgeLayer(selectedLayer.id, 0, -vertical);
+      nudgeSelectedSemantic(0, -vertical);
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      onNudgeLayer(selectedLayer.id, 0, vertical);
+      if (selectedLayer) onNudgeLayer(selectedLayer.id, 0, vertical);
+      nudgeSelectedSemantic(0, vertical);
     }
   }
+
+  const editingSemanticRect = editingSemanticSlot ? semanticRectFor(editingSemanticSlot) : undefined;
 
   return (
     <div
@@ -798,10 +1441,19 @@ function StageCanvas({
       }}
     >
       <iframe
+        ref={iframeRef}
         title="selected-card"
         sandbox="allow-same-origin"
         srcDoc={html}
         scrolling="no"
+        onLoad={() => {
+          transientPreviewRef.current = null;
+          const foreground = findEditingForeground();
+          if (foreground) foreground.style.visibility = "hidden";
+          const semanticForeground = findEditingSemanticForeground();
+          if (semanticForeground) semanticForeground.style.visibility = "hidden";
+          void measureRenderedRects();
+        }}
         style={{
           width: cardWidth,
           height: cardHeight,
@@ -814,9 +1466,12 @@ function StageCanvas({
           className="edit-overlay"
           ref={overlayRef}
           tabIndex={0}
+          data-semantic-slot-count={semanticSlots.length}
+          data-measured-semantic-count={Object.keys(measuredSemanticRects).length}
           onPointerDown={(event) => {
             if (event.target === event.currentTarget) {
               onSelectLayer(null);
+              onSelectSemanticSlot(null);
             }
           }}
           onPointerMove={updateDraft}
@@ -891,6 +1546,40 @@ function StageCanvas({
               </div>
             );
           })}
+          {semanticSlots.map((slot) => {
+            const rect = semanticRectFor(slot);
+            if (!rect) return null;
+            const selected = slot.id === selectedSemanticSlotId;
+            const editing = slot.id === editingSemanticSlotId;
+            return (
+              <div
+                key={`semantic-${slot.id}`}
+                className={`edit-semantic-box semantic-${slot.id}${selected ? " selected" : ""}${editing ? " editing" : ""}`}
+                data-smoke-role="semantic-slot-box"
+                data-semantic-slot={slot.id}
+                aria-label={`${slot.label} 직접 편집`}
+                style={layerStyle(rect)}
+                onPointerDown={(event) => beginSemanticMove(event, slot)}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onStartSemanticTextEdit(slot.id, slot.text);
+                }}
+              >
+                <span className="edit-layer-label">{slot.label}</span>
+                {selected
+                  ? resizeHandles.map((handle) => (
+                      <span
+                        key={handle}
+                        className={`resize-handle ${handle}`}
+                        data-smoke-role={`semantic-resize-${handle}`}
+                        onPointerDown={(event) => beginSemanticResize(event, slot, handle)}
+                      />
+                    ))
+                  : null}
+              </div>
+            );
+          })}
           {editingLayer ? (
             <textarea
               className="layer-inline-textarea"
@@ -898,16 +1587,27 @@ function StageCanvas({
               style={{
                 ...layerStyle(rectFor(editingLayer)),
                 color: editingLayer.color ?? "inherit",
+                background: editingLayer.backgroundColor ?? "transparent",
                 fontSize: `${Math.max(10, (editingLayer.fontSize ?? 40) * scale)}px`,
                 fontStyle: editingLayer.italic === true ? "italic" : "normal",
                 fontWeight: editingLayer.fontWeight ?? 700,
-                textAlign: editingLayer.align ?? "left"
+                textAlign: editingLayer.align ?? "left",
+                opacity: (editingLayer.textOpacity ?? 100) / 100
               }}
               autoFocus
               onPointerDown={(event) => event.stopPropagation()}
               onChange={(event) => onEditingTextChange(event.target.value)}
+              onInput={(event) => onEditingTextChange(event.currentTarget.value)}
               onBlur={onCommitTextEdit}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={(event) => {
+                composingRef.current = false;
+                onEditingTextChange(event.currentTarget.value);
+              }}
               onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || composingRef.current) return;
                 if (event.key === "Escape") {
                   event.preventDefault();
                   onCancelTextEdit();
@@ -915,6 +1615,36 @@ function StageCanvas({
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();
                   onCommitTextEdit();
+                }
+              }}
+            />
+          ) : null}
+          {editingSemanticSlot && editingSemanticRect ? (
+            <textarea
+              className="layer-inline-textarea semantic-inline-textarea"
+              value={editingSemanticText}
+              style={layerStyle(editingSemanticRect)}
+              autoFocus
+              onPointerDown={(event) => event.stopPropagation()}
+              onChange={(event) => onEditingSemanticTextChange(event.target.value)}
+              onInput={(event) => onEditingSemanticTextChange(event.currentTarget.value)}
+              onBlur={onCommitSemanticTextEdit}
+              onCompositionStart={() => {
+                composingRef.current = true;
+              }}
+              onCompositionEnd={(event) => {
+                composingRef.current = false;
+                onEditingSemanticTextChange(event.currentTarget.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || composingRef.current) return;
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancelSemanticTextEdit();
+                }
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  onCommitSemanticTextEdit();
                 }
               }}
             />
@@ -945,12 +1675,30 @@ export function App(): ReactElement {
   const [aspectRatioId, setAspectRatioId] = useState<string>(defaultAspectRatioId);
   const [fontCss, setFontCss] = useState<string | null>(null);
   const [customAccent, setCustomAccent] = useState<string | null>(null);
+  const [accentDraft, setAccentDraft] = useState("");
   const [customDim, setCustomDim] = useState<number | null>(null);
   const [backgroundId, setBackgroundId] = useState<string | null>(null);
+  const [mediaAssets, setMediaAssets] = useState<readonly MediaAssetRef[]>([]);
+  const [mediaPreviews, setMediaPreviews] = useState<Readonly<Record<string, string>>>({});
+  const [backgroundMedia, setBackgroundMedia] = useState<BackgroundMediaSelection>({ mode: "none" });
+  const [sceneDefaults, setSceneDefaults] = useState(defaultCardSceneSettings);
+  const [videoProjectMode, setVideoProjectMode] = useState<VideoProjectMode>("cards");
+  const [timelinePlayheadMs, setTimelinePlayheadMs] = useState(0);
+  const [bodyNumberDefault, setBodyNumberDefault] = useState<BodyNumberDefault>("show");
   const [overrides, setOverrides] = useState<CardOverrideMap>({});
+  const overrideHistoryRef = useRef<{ past: CardOverrideMap[]; future: CardOverrideMap[] }>({
+    past: [],
+    future: []
+  });
+  const [, setOverrideHistoryVersion] = useState(0);
+  const [bulkBindings, setBulkBindings] = useState<BulkBindingMetadata | undefined>(undefined);
   const [backgroundPreviews, setBackgroundPreviews] = useState<Readonly<Record<string, string>>>({});
   const [backgroundLibrary, setBackgroundLibrary] = useState<readonly BackgroundLibraryItem[]>([]);
   const [backgroundPreview, setBackgroundPreview] = useState<string | null>(null);
+  const [backgroundManagerOpen, setBackgroundManagerOpen] = useState(false);
+  const [backgroundManagerSelectedId, setBackgroundManagerSelectedId] = useState<string | null>(null);
+  const [backgroundManagerSearch, setBackgroundManagerSearch] = useState("");
+  const [backgroundManagerBusy, setBackgroundManagerBusy] = useState(false);
   const [imagePreviews, setImagePreviews] = useState<Readonly<Record<string, string>>>({});
   const [imageLibrary, setImageLibrary] = useState<readonly ImageLibraryItem[]>([]);
   const [backgroundRemovalTolerance, setBackgroundRemovalTolerance] = useState(28);
@@ -962,16 +1710,16 @@ export function App(): ReactElement {
   const [styleWarnings, setStyleWarnings] = useState<readonly string[]>([]);
   const [settings, setSettings] = useState<AppSettings>({});
   const [pixabayApiKeyDraft, setPixabayApiKeyDraft] = useState("");
+  const [gptsTemplateBuilderUrlDraft, setGptsTemplateBuilderUrlDraft] = useState("");
   const [aiProviders, setAiProviders] = useState<readonly AiProviderStatus[]>([]);
   const [aiProviderId, setAiProviderId] = useState<AiProviderId>("claude");
-  const [aiInput, setAiInput] = useState("Codex로 카드뉴스 제작 시간을 줄이는 방법");
-  const [aiThread, setAiThread] = useState<readonly AiThreadEntry[]>([]);
-  const [, setAiDraftText] = useState("");
-  const [aiBusy, setAiBusy] = useState(false);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
-  const [aiStatus, setAiStatus] = useState("CLI 상태를 확인하세요.");
+  const [aiInstallBusy, setAiInstallBusy] = useState(false);
+  const [pendingMediaAsset, setPendingMediaAsset] = useState<MediaAssetRef | null>(null);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [imagePickerTarget, setImagePickerTarget] = useState<ImagePickerTarget | null>(null);
   const [imagePickerSelectedId, setImagePickerSelectedId] = useState<string | null>(null);
+  const [imagePickerSearch, setImagePickerSearch] = useState("");
   const [imagePickerBusy, setImagePickerBusy] = useState(false);
   const [stockSearchOpen, setStockSearchOpen] = useState(false);
   const [stockQuery, setStockQuery] = useState("money background");
@@ -981,9 +1729,13 @@ export function App(): ReactElement {
   const [infoOpen, setInfoOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [selectedSemanticSlotId, setSelectedSemanticSlotId] = useState<SemanticItemId | null>(null);
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
+  const [editingSemanticSlotId, setEditingSemanticSlotId] = useState<SemanticItemId | null>(null);
   const [editingLayerText, setEditingLayerText] = useState("");
+  const [editingSemanticText, setEditingSemanticText] = useState("");
   const [railWidth, setRailWidth] = useState(150);
+  const [pageContextMenu, setPageContextMenu] = useState<PageContextMenuState | null>(null);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("design");
   const [cardEditorTab, setCardEditorTab] = useState<CardEditorTab>("content");
   const [presets, setPresets] = useState<readonly DeckPreset[]>([]);
@@ -995,9 +1747,18 @@ export function App(): ReactElement {
   const [bulkResult, setBulkResult] = useState<BulkRenderResult | null>(null);
   const [approvedJobId, setApprovedJobId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [isVideoExporting, setIsVideoExporting] = useState(false);
+  const [videoExportProgress, setVideoExportProgress] = useState<Mp4ExportProgress | null>(null);
+  const [videoExportResult, setVideoExportResult] = useState<Mp4ExportResult | null>(null);
+  const [videoExportError, setVideoExportError] = useState<Mp4ExportError | null>(null);
+  const [activeVideoExportJobId, setActiveVideoExportJobId] = useState<string | null>(null);
+  const [aiDefaultInstructionDraft, setAiDefaultInstructionDraft] = useState("");
+  const exportDialogRef = useRef<HTMLDivElement | null>(null);
   const workspaceReady = useRef(false);
-  const aiInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
   const fontBlobUrlRef = useRef<string | null>(null);
+  const layerClipboardRef = useRef<LayerClipboardState>(createLayerClipboardState());
+  const thumbnailRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const preset = resolveStylePreset(styleId, customStyles);
   const accentColor = customAccent ?? preset.accentDefault;
@@ -1018,10 +1779,58 @@ export function App(): ReactElement {
     () => aiProviders.find((provider) => provider.id === aiProviderId),
     [aiProviderId, aiProviders]
   );
+  const {
+    busy: aiBusy,
+    input: aiInput,
+    inputRef: aiInputRef,
+    reset: resetAiThread,
+    retry: retryAiMessage,
+    runNextAction: handleAiNextAction,
+    runPreset: runAiPreset,
+    send: sendAiMessage,
+    setDraftText: setAiDraftText,
+    setInput: setAiInput,
+    setStatus: setAiStatus,
+    status: aiStatus,
+    thread: aiThread
+  } = useAiAssistant({
+    ...(settings.aiDefaultInstruction?.trim() ? { defaultInstruction: settings.aiDefaultInstruction.trim() } : {}),
+    providerId: aiProviderId,
+    providerLabel: selectedAiProvider?.label ?? aiProviderId,
+    setGlobalStatus: setStatus,
+    styleNames: styleNameEntries
+  });
+  const threadsHandle = normalizeThreadsHandle(footerAccount) || normalizeThreadsHandle(defaultFooterAccount);
+  const threadsDisplay = `@${threadsHandle}`;
+  const threadsUrl = createThreadsProfileUrl(footerAccount);
+  const backgroundManagerSelectedItem = useMemo(
+    () => backgroundLibrary.find((item) => item.id === backgroundManagerSelectedId),
+    [backgroundLibrary, backgroundManagerSelectedId]
+  );
+  const filteredBackgroundLibrary = useMemo(() => {
+    const query = backgroundManagerSearch.trim().toLowerCase();
+    if (!query) {
+      return backgroundLibrary;
+    }
+
+    return backgroundLibrary.filter(
+      (item) => item.displayName.toLowerCase().includes(query) || item.id.toLowerCase().includes(query)
+    );
+  }, [backgroundLibrary, backgroundManagerSearch]);
   const imagePickerSelectedItem = useMemo(
     () => imageLibrary.find((item) => item.id === imagePickerSelectedId),
     [imageLibrary, imagePickerSelectedId]
   );
+  const filteredImageLibrary = useMemo(() => {
+    const query = imagePickerSearch.trim().toLowerCase();
+    if (!query) {
+      return imageLibrary;
+    }
+
+    return imageLibrary.filter(
+      (item) => item.displayName.toLowerCase().includes(query) || item.id.toLowerCase().includes(query)
+    );
+  }, [imageLibrary, imagePickerSearch]);
 
   const debouncedCards = useDebouncedValue(cards, 250);
   const debouncedHeader = useDebouncedValue(headerLabel, 250);
@@ -1052,6 +1861,11 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatio: aspectRatioId,
+      backgroundMedia,
+      mediaAssets,
+      videoProjectMode,
+      sceneDefaults,
+      bodyNumberDefault,
       nextHint: nextHintConfig,
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
@@ -1066,6 +1880,11 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatioId,
+      backgroundMedia,
+      mediaAssets,
+      videoProjectMode,
+      sceneDefaults,
+      bodyNumberDefault,
       nextHintConfig,
       backgroundId,
       selectedFontId,
@@ -1073,23 +1892,37 @@ export function App(): ReactElement {
     ]
   );
 
+  const previewAssetCssUrls = useMemo(
+    () => ({ ...backgroundPreviews, ...imagePreviews, ...mediaPreviews }),
+    [backgroundPreviews, imagePreviews, mediaPreviews]
+  );
   const previewHtmls = useMemo(
     () =>
       previewDeck.cards.map((card) => {
         const override = overrides[String(card.index)];
         const cardBackgroundId = override?.backgroundId === null ? null : override?.backgroundId ?? backgroundId;
-        const assetCssUrls = { ...backgroundPreviews, ...imagePreviews };
         return buildCardHtml({
-          assetCssUrls,
+          assetCssUrls: previewAssetCssUrls,
           backgroundCssUrl: cardBackgroundId ? backgroundPreviews[cardBackgroundId] : undefined,
           card,
           customStyles,
           deck: previewDeck,
+          liveVideo: videoProjectMode === "video" && card.index === selectedIndex + 1,
           ...(fontCss ? { fontCss } : {}),
           ...(override ? { override } : {})
         });
       }),
-    [previewDeck, backgroundId, backgroundPreviews, customStyles, imagePreviews, overrides, fontCss]
+    [
+      previewDeck,
+      backgroundId,
+      backgroundPreviews,
+      customStyles,
+      overrides,
+      fontCss,
+      previewAssetCssUrls,
+      selectedIndex,
+      videoProjectMode
+    ]
   );
 
   const parseErrorCount = parsedEntries.filter((entry) => entry.error).length;
@@ -1107,6 +1940,143 @@ export function App(): ReactElement {
   const selectedOverride = overrides[String(selectedCardNumber)];
   const selectedLayers = useMemo(() => selectedOverride?.layers ?? [], [selectedOverride]);
   const selectedLayer = selectedLayers.find((layer) => layer.id === selectedLayerId);
+  const selectedTextLayer: CardTextBoxLayer | undefined = selectedLayer?.kind === "text" ? selectedLayer : undefined;
+  const selectedBackgroundMedia = selectedOverride?.backgroundMedia ?? { mode: "inherit" };
+  const selectedScene = normalizeCardSceneSettings(selectedOverride?.scene, sceneDefaults);
+  const selectedPreviewCard = previewDeck.cards[selectedIndex];
+  const selectedBodyNumber = selectedPreviewCard
+    ? resolveBodyNumber(previewDeck, selectedPreviewCard, selectedOverride)
+    : undefined;
+  const selectedGlobalMediaAsset =
+    backgroundMedia.mode === "asset" ? mediaAssets.find((asset) => asset.id === backgroundMedia.mediaId) : undefined;
+  const selectedCardMediaAsset =
+    selectedBackgroundMedia.mode === "asset"
+      ? mediaAssets.find((asset) => asset.id === selectedBackgroundMedia.mediaId)
+      : undefined;
+  const selectedSemanticSlots = useMemo(
+    () =>
+      buildSemanticSlotDrafts(selectedEditorCard, footerAccount, selectedOverride, {
+        ...(chromeConfig.header.visible ? { headerLabel } : {}),
+        ...(chromeConfig.pageNumber.visible
+          ? { pageNumber: `${selectedCardNumber} / ${Math.max(1, parsedEntries.length)}` }
+          : {}),
+        ...(selectedOverride?.badge?.imageId ? { badgeImageLabel: "배지 이미지" } : {}),
+        ...(selectedBodyNumber?.visible ? { bodyNumber: selectedBodyNumber.text } : {}),
+        ...(selectedCardNumber < parsedEntries.length && nextHintConfig.kind !== "none"
+          ? { nextHint: "넘김 기호" }
+          : {})
+      }),
+    [
+      chromeConfig.header.visible,
+      chromeConfig.pageNumber.visible,
+      footerAccount,
+      headerLabel,
+      nextHintConfig.kind,
+      parsedEntries.length,
+      selectedBodyNumber,
+      selectedCardNumber,
+      selectedEditorCard,
+      selectedOverride
+    ]
+  );
+  const selectedAudioCandidates = useMemo(
+    () => buildSceneAudioCandidates(selectedCardNumber, selectedBackgroundMedia, selectedLayers, mediaAssets),
+    [mediaAssets, selectedBackgroundMedia, selectedCardNumber, selectedLayers]
+  );
+  const videoExportSummary = useMemo(() => buildVideoExportSummary(previewDeck), [previewDeck]);
+  const compiledTimeline = useMemo(() => compileVideoTimeline(previewDeck), [previewDeck]);
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "z") return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.isContentEditable ||
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.shiftKey) {
+        redoOverrideChange();
+      } else {
+        undoOverrideChange();
+      }
+    };
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, []);
+  useEffect(() => {
+    if (!exportDialogOpen) {
+      return;
+    }
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = exportDialogRef.current;
+    const focusableSelector =
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusFirst = (): void => {
+      const first = dialog?.querySelector<HTMLElement>(focusableSelector);
+      (first ?? dialog)?.focus();
+    };
+    const animationFrame = window.requestAnimationFrame(focusFirst);
+    const handleDialogKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setExportDialogOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) {
+        return;
+      }
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      document.removeEventListener("keydown", handleDialogKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [exportDialogOpen]);
+  const editorToolbarTarget = resolveEditorToolbarTarget({
+    editMode,
+    selectedLayer: selectedTextLayer,
+    selectedSemanticSlotId
+  });
+  const backgroundManagerUsages = useMemo(
+    () =>
+      backgroundManagerSelectedId
+        ? findBackgroundLibraryUsage(backgroundManagerSelectedId, { backgroundId, overrides })
+        : [],
+    [backgroundId, backgroundManagerSelectedId, overrides]
+  );
+  const backgroundManagerDeleteDisabled =
+    !backgroundManagerSelectedId || backgroundManagerBusy || backgroundManagerUsages.length > 0;
+  const imagePickerUsages = useMemo(
+    () =>
+      imagePickerSelectedId
+        ? findImageLibraryUsage(imagePickerSelectedId, { nextHint: nextHintConfig, overrides })
+        : [],
+    [imagePickerSelectedId, nextHintConfig, overrides]
+  );
+  const imagePickerDeleteDisabled = !imagePickerSelectedId || imagePickerBusy || imagePickerUsages.length > 0;
 
   // ── 시작 시 라이브러리/프리셋/워크스페이스 복원 ──
   useEffect(() => {
@@ -1149,6 +2119,8 @@ export function App(): ReactElement {
       if (!isCardnewsError(settingsResult)) {
         setSettings(settingsResult);
         setPixabayApiKeyDraft(settingsResult.pixabayApiKey ?? "");
+        setGptsTemplateBuilderUrlDraft(settingsResult.gptsTemplateBuilderUrl ?? "");
+        setAiDefaultInstructionDraft(settingsResult.aiDefaultInstruction ?? "");
       }
       if (!isCardnewsError(aiProvidersResult)) {
         setAiProviders(aiProvidersResult);
@@ -1169,7 +2141,9 @@ export function App(): ReactElement {
       }
 
       workspaceReady.current = true;
+      setWorkspaceHydrated(true);
 
+      await refreshMediaAssets();
       const restoredFontId = !isCardnewsError(workspaceResult) && workspaceResult ? workspaceResult.fontId ?? null : null;
       await loadFontCss(restoredFontId);
     })();
@@ -1196,12 +2170,39 @@ export function App(): ReactElement {
     customAccent,
     customDim,
     backgroundId,
+    mediaAssets,
+    backgroundMedia,
+    sceneDefaults,
+    bodyNumberDefault,
     selectedFontId,
     overrides,
+    bulkBindings,
     nextHintConfig,
     railWidth,
     selectedIndex
   ]);
+
+  useEffect(() => {
+    setAccentDraft(accentColor);
+  }, [accentColor]);
+
+  useEffect(() => {
+    if (!pageContextMenu) return;
+    const invokingIndex = pageContextMenu.index;
+    const closeMenu = () => {
+      setPageContextMenu(null);
+      queueMicrotask(() => thumbnailRefs.current[invokingIndex]?.focus());
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [pageContextMenu]);
 
   useEffect(() => {
     const ids = new Set<string>();
@@ -1253,8 +2254,11 @@ export function App(): ReactElement {
 
   useEffect(() => {
     setSelectedLayerId(null);
+    setSelectedSemanticSlotId(null);
     setEditingLayerId(null);
+    setEditingSemanticSlotId(null);
     setEditingLayerText("");
+    setEditingSemanticText("");
   }, [selectedIndex]);
 
   useEffect(() => {
@@ -1265,6 +2269,14 @@ export function App(): ReactElement {
     }
   }, [selectedLayerId, selectedLayers]);
 
+  useEffect(() => {
+    if (selectedSemanticSlotId && !selectedSemanticSlots.some((slot) => slot.id === selectedSemanticSlotId)) {
+      setSelectedSemanticSlotId(null);
+      setEditingSemanticSlotId(null);
+      setEditingSemanticText("");
+    }
+  }, [selectedSemanticSlotId, selectedSemanticSlots]);
+
   function applySnapshot(snapshot: {
     readonly headerLabel: string;
     readonly footerAccount: string;
@@ -1273,10 +2285,16 @@ export function App(): ReactElement {
     readonly accentColor?: string;
     readonly backgroundDim?: number;
     readonly backgroundId?: string;
+    readonly backgroundMedia?: BackgroundMediaSelection;
+    readonly mediaAssets?: readonly MediaAssetRef[];
+    readonly videoProjectMode?: VideoProjectMode;
+    readonly sceneDefaults?: typeof defaultCardSceneSettings;
+    readonly bodyNumberDefault?: BodyNumberDefault;
     readonly aspectRatio?: string;
     readonly fontId?: string;
     readonly nextHint?: NextHintConfig;
     readonly overrides?: CardOverrideMap;
+    readonly bulkBindings?: BulkBindingMetadata;
     readonly railWidth?: number;
     readonly cards: readonly string[];
     readonly selectedIndex?: number;
@@ -1289,6 +2307,11 @@ export function App(): ReactElement {
     }
     setCustomAccent(snapshot.accentColor ?? null);
     setCustomDim(snapshot.backgroundDim ?? null);
+    setBackgroundMedia(snapshot.backgroundMedia ?? { mode: "none" });
+    setMediaAssets(snapshot.mediaAssets ?? []);
+    setVideoProjectMode(normalizeVideoProjectMode(snapshot.videoProjectMode, snapshot));
+    setSceneDefaults(normalizeCardSceneSettings(snapshot.sceneDefaults, defaultCardSceneSettings));
+    setBodyNumberDefault(snapshot.bodyNumberDefault ?? "show");
     if (snapshot.aspectRatio && aspectRatios.some((ratio) => ratio.id === snapshot.aspectRatio)) {
       setAspectRatioId(snapshot.aspectRatio);
     }
@@ -1301,6 +2324,7 @@ export function App(): ReactElement {
       setSelectedIndex(Math.min(snapshot.selectedIndex ?? 0, nextCards.length - 1));
     }
     setOverrides(snapshot.overrides ?? {});
+    setBulkBindings(snapshot.bulkBindings);
     if (typeof snapshot.railWidth === "number") {
       setRailWidth(Math.min(280, Math.max(90, snapshot.railWidth)));
     }
@@ -1342,6 +2366,21 @@ export function App(): ReactElement {
     setBackgroundPreviews((current) => ({ ...current, [nextBackgroundId]: preview }));
   }
 
+  async function refreshBackgroundLibraryWithPreviews(preferredId?: string | null): Promise<void> {
+    const library = await window.cardnews.listBackgroundLibrary();
+    if (isCardnewsError(library)) {
+      setStatus(library.message);
+      return;
+    }
+
+    setBackgroundLibrary(library);
+    for (const item of library) {
+      if (!backgroundPreviews[item.id] || item.id === preferredId) {
+        void loadBackgroundPreview(item.id);
+      }
+    }
+  }
+
   async function loadImagePreview(imageId: string): Promise<void> {
     const preview = await getEditionImagePreview(imageId);
     if (isCardnewsError(preview)) {
@@ -1350,6 +2389,168 @@ export function App(): ReactElement {
     }
 
     setImagePreviews((current) => ({ ...current, [imageId]: preview }));
+  }
+
+  function getM22OptionalApi(): M22OptionalCardnewsApi {
+    return window.cardnews as unknown as M22OptionalCardnewsApi;
+  }
+
+  async function refreshMediaAssets(): Promise<void> {
+    const api = getM22OptionalApi();
+    if (!api.listMediaCatalog) {
+      return;
+    }
+
+    const result = await api.listMediaCatalog();
+    if (isMediaCatalogError(result)) {
+      setStatus(result.message);
+      return;
+    }
+
+    setMediaAssets(result.map(mediaCatalogAssetToRef));
+  }
+
+  async function loadMediaPreview(mediaId: string): Promise<void> {
+    const api = getM22OptionalApi();
+    if (!api.getMediaPreview || mediaPreviews[mediaId]) {
+      return;
+    }
+
+    const preview = await api.getMediaPreview(mediaId);
+    if (isMediaCatalogError(preview)) {
+      setStatus(preview.message);
+      return;
+    }
+
+    setMediaPreviews((current) => ({ ...current, [mediaId]: preview }));
+  }
+
+  async function importMediaForSelection(kind: MediaKind): Promise<void> {
+    const api = getM22OptionalApi();
+    if (!api.importMediaAsset) {
+      setStatus("미디어 가져오기 API가 아직 연결되지 않았습니다.");
+      return;
+    }
+
+    const imported = await api.importMediaAsset(kind);
+    if (isMediaCatalogError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+    const importedRef = mediaCatalogAssetToRef(imported);
+
+    setMediaAssets((current) =>
+      current.some((asset) => asset.id === importedRef.id) ? current : [...current, importedRef]
+    );
+    void loadMediaPreview(importedRef.id);
+    setPendingMediaAsset(importedRef);
+    setStatus(`${importedRef.kind === "video" ? "영상" : "이미지"}를 가져왔습니다. 적용 위치를 선택하세요.`);
+  }
+
+  function assignImportedMedia(target: "global" | "card" | "video-layer"): void {
+    const importedRef = pendingMediaAsset;
+    if (!importedRef) return;
+    if (target === "global") {
+      setBackgroundMedia(assignBackgroundMediaAsset(importedRef.id));
+    } else if (target === "card") {
+      updateSelectedOverride({ backgroundMedia: assignBackgroundMediaAsset(importedRef.id) });
+    } else if (importedRef.kind === "video") {
+      const layer = createVideoLayerFromAsset(importedRef, `layer-video-${Date.now().toString(36)}`);
+      updateSelectedOverrideWith((currentOverride) => ({
+        ...currentOverride,
+        layers: [...(currentOverride.layers ?? []), layer]
+      }));
+      setSelectedLayerId(layer.id);
+      setEditMode(true);
+    }
+    if (importedRef.kind === "video") {
+      setVideoProjectMode("video");
+    }
+    setPendingMediaAsset(null);
+    setStatus(`${importedRef.displayName} 적용 완료`);
+  }
+
+  function mediaAssetLabel(asset: MediaAssetRef): string {
+    const kindLabel = asset.kind === "video" ? "영상" : "이미지";
+    const duration = asset.durationMs ? ` · ${formatDuration(asset.durationMs)}` : "";
+    return `${kindLabel} · ${asset.displayName}${duration}`;
+  }
+
+  function updateSelectedScene(patch: Partial<CardSceneSettings>): void {
+    updateSelectedOverride({
+      scene: normalizeCardSceneSettings({ ...selectedScene, ...patch }, sceneDefaults)
+    });
+  }
+
+  function updateCardScene(cardNumber: number, patch: Partial<CardSceneSettings>): void {
+    updateOverrideForCard(cardNumber, (currentOverride) => ({
+      ...currentOverride,
+      scene: normalizeCardSceneSettings(
+        { ...normalizeCardSceneSettings(currentOverride.scene, sceneDefaults), ...patch },
+        sceneDefaults
+      )
+    }));
+  }
+
+  async function startVideoExport(): Promise<void> {
+    if (isVideoExporting) {
+      return;
+    }
+    const api = getM22OptionalApi();
+    if (!api.exportVideoMp4) {
+      setStatus("MP4 내보내기 API가 아직 연결되지 않았습니다.");
+      return;
+    }
+
+    setIsVideoExporting(true);
+    setActiveVideoExportJobId(null);
+    setVideoExportResult(null);
+    setVideoExportError(null);
+    setVideoExportProgress(null);
+    setStatus("MP4 내보내기를 준비합니다.");
+    const unsubscribeProgress = api.onVideoExportProgress?.((progress) => {
+      setActiveVideoExportJobId(progress.jobId);
+      setVideoExportProgress(progress);
+      setStatus(
+        `MP4 ${videoExportStageLabel(progress.stage)} ${Math.round(progress.percent)}% · ${formatElapsedMs(
+          progress.elapsedMs
+        )}`
+      );
+    });
+    try {
+      const result = await api.exportVideoMp4({ workspace: buildWorkspaceState() });
+      if (isMp4ExportError(result)) {
+        setVideoExportError(result);
+        setStatus(`MP4 실패: ${result.message}`);
+        return;
+      }
+      setVideoExportResult(result);
+      setActiveVideoExportJobId(result.jobId);
+      setVideoExportProgress({
+        jobId: result.jobId,
+        stage: "finalize",
+        percent: 100,
+        message: "MP4 저장을 완료했습니다."
+      });
+      setStatus(`MP4 저장: ${result.filePath}`);
+    } finally {
+      unsubscribeProgress?.();
+      setIsVideoExporting(false);
+    }
+  }
+
+  async function cancelVideoExport(): Promise<void> {
+    const api = getM22OptionalApi();
+    if (!api.cancelVideoExport) {
+      setStatus("MP4 취소 API가 아직 연결되지 않았습니다.");
+      return;
+    }
+    if (!activeVideoExportJobId) {
+      setStatus("취소할 MP4 작업 id를 아직 받지 못했습니다.");
+      return;
+    }
+    const result = await api.cancelVideoExport(activeVideoExportJobId);
+    setStatus(result.ok === false ? `MP4 취소 실패: ${result.message}` : "MP4 내보내기 취소를 요청했습니다.");
   }
 
   async function refreshImageLibraryWithPreviews(preferredId?: string | null): Promise<void> {
@@ -1443,12 +2644,64 @@ export function App(): ReactElement {
       return;
     }
 
-    const library = await window.cardnews.listBackgroundLibrary();
-    if (!isCardnewsError(library)) {
-      setBackgroundLibrary(library);
+    await refreshBackgroundLibraryWithPreviews(added.id);
+    await loadBackgroundPreview(added.id);
+    setBackgroundManagerSelectedId(added.id);
+    setStatus(`배경 추가: ${added.displayName} · 배경 관리에서 적용할 수 있습니다.`);
+  }
+
+  function openBackgroundManager(): void {
+    setBackgroundManagerSelectedId(backgroundId);
+    setBackgroundManagerSearch("");
+    setBackgroundManagerOpen(true);
+    void refreshBackgroundLibraryWithPreviews(backgroundId);
+  }
+
+  function closeBackgroundManager(): void {
+    setBackgroundManagerOpen(false);
+    setBackgroundManagerSelectedId(null);
+    setBackgroundManagerSearch("");
+    setBackgroundManagerBusy(false);
+  }
+
+  async function applyManagedBackground(): Promise<void> {
+    await applyBackgroundSelection(backgroundManagerSelectedId);
+    setStatus(backgroundManagerSelectedId ? "전역 배경을 적용했습니다." : "전역 배경을 해제했습니다.");
+    closeBackgroundManager();
+  }
+
+  async function deleteManagedBackground(): Promise<void> {
+    const selectedId = backgroundManagerSelectedId;
+    if (!selectedId) {
+      setStatus("삭제할 배경 이미지를 먼저 선택하세요.");
+      return;
+    }
+    if (backgroundManagerUsages.length > 0) {
+      setStatus(`배경 이미지가 사용 중입니다: ${backgroundManagerUsages.map((usage) => usage.label).join(", ")}`);
+      return;
     }
 
-    setStatus(`배경 추가: ${added.displayName} · 목록에서 선택하면 적용됩니다.`);
+    setBackgroundManagerBusy(true);
+    try {
+      const removed = await window.cardnews.removeBackgroundFromLibrary(selectedId);
+      if (isCardnewsError(removed)) {
+        setStatus(removed.message);
+        return;
+      }
+
+      setBackgroundPreviews((current) => {
+        const next = { ...current };
+        delete next[selectedId];
+        return next;
+      });
+      await refreshBackgroundLibraryWithPreviews(null);
+      setBackgroundManagerSelectedId(null);
+      setStatus(removed.removed ? "배경 이미지를 삭제했습니다." : "배경 이미지를 찾지 못했습니다.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "배경 이미지를 삭제하지 못했습니다.");
+    } finally {
+      setBackgroundManagerBusy(false);
+    }
   }
 
   async function addImageThroughPicker(): Promise<void> {
@@ -1474,6 +2727,7 @@ export function App(): ReactElement {
     setImagePickerTarget(null);
     setImagePickerSelectedId(null);
     setImagePickerBusy(false);
+    setImagePickerSearch("");
   }
 
   function applyImagePickerSelection(imageId: string | null): void {
@@ -1494,6 +2748,30 @@ export function App(): ReactElement {
 
     setStatus(imageId ? "이미지를 적용했습니다." : "이미지 선택을 해제했습니다.");
     closeImagePicker();
+  }
+
+  async function deleteSelectedPickerImage(): Promise<void> {
+    const imageId = imagePickerSelectedId;
+    if (!imageId) {
+      setStatus("삭제할 이미지를 먼저 선택하세요.");
+      return;
+    }
+    if (imagePickerUsages.length > 0) {
+      setStatus(`이미지가 사용 중입니다: ${imagePickerUsages.map((usage) => usage.label).join(", ")}`);
+      return;
+    }
+
+    setImagePickerBusy(true);
+    const removed = await removeEditionImage(imageId);
+    setImagePickerBusy(false);
+    if (isCardnewsError(removed)) {
+      setStatus(removed.message);
+      return;
+    }
+
+    await refreshImageLibraryWithPreviews(null);
+    setImagePickerSelectedId(null);
+    setStatus(removed.removed ? "이미지를 삭제했습니다." : "이미지를 찾지 못했습니다.");
   }
 
   async function removeSelectedPickerBackground(): Promise<void> {
@@ -1548,12 +2826,48 @@ export function App(): ReactElement {
   }
 
   function updateSelectedOverrideWith(updater: (currentOverride: CardOverride) => CardOverride): void {
-    const key = String(selectedCardNumber);
+    updateOverrideForCard(selectedCardNumber, updater);
+  }
+
+  function updateOverrideForCard(
+    cardNumber: number,
+    updater: (currentOverride: CardOverride) => CardOverride
+  ): void {
+    const key = String(cardNumber);
     setOverrides((current) => {
       const merged = updater(current[key] ?? {});
       const updated = { ...current, [key]: merged };
-      return removeEmptyOverrides(updated);
+      const normalized = removeEmptyOverrides(updated);
+      if (JSON.stringify(current) !== JSON.stringify(normalized)) {
+        overrideHistoryRef.current.past.push(current);
+        if (overrideHistoryRef.current.past.length > 100) {
+          overrideHistoryRef.current.past.shift();
+        }
+        overrideHistoryRef.current.future = [];
+      }
+      return normalized;
     });
+    setOverrideHistoryVersion((version) => version + 1);
+  }
+
+  function undoOverrideChange(): void {
+    setOverrides((current) => {
+      const previous = overrideHistoryRef.current.past.pop();
+      if (!previous) return current;
+      overrideHistoryRef.current.future.push(current);
+      return previous;
+    });
+    setOverrideHistoryVersion((version) => version + 1);
+  }
+
+  function redoOverrideChange(): void {
+    setOverrides((current) => {
+      const next = overrideHistoryRef.current.future.pop();
+      if (!next) return current;
+      overrideHistoryRef.current.past.push(current);
+      return next;
+    });
+    setOverrideHistoryVersion((version) => version + 1);
   }
 
   function updateSelectedAdjust(field: "brightness" | "contrast" | "saturation", value: number): void {
@@ -1577,21 +2891,55 @@ export function App(): ReactElement {
         offsetY: selectedOverride?.layout?.offsetY ?? 0,
         gapBadge: selectedOverride?.layout?.gapBadge ?? 1,
         gapSubtitle: selectedOverride?.layout?.gapSubtitle ?? 1,
+        ...(selectedOverride?.layout?.titlePlacement
+          ? { titlePlacement: selectedOverride.layout.titlePlacement }
+          : {}),
         [field]: value
       }
     });
   }
 
-  function updateSelectedTypography(
-    field: "sizeScale" | "weight" | "italic" | "letterSpacing" | "lineHeight" | "scope",
-    value: number | boolean | "all" | "title" | "body" | undefined
-  ): void {
+  function updateSelectedTitlePlacement(mode: "flow" | "card-y", y?: number): void {
     updateSelectedOverride({
-      typography: {
-        ...(selectedOverride?.typography ?? {}),
-        ...(value === undefined ? {} : { [field]: value })
+      layout: {
+        align: selectedOverride?.layout?.align ?? "left",
+        offsetY: selectedOverride?.layout?.offsetY ?? 0,
+        gapBadge: selectedOverride?.layout?.gapBadge ?? 1,
+        gapSubtitle: selectedOverride?.layout?.gapSubtitle ?? 1,
+        titlePlacement: mode === "flow" ? { mode: "flow" } : { mode: "card-y", y: Math.min(100, Math.max(0, y ?? 50)) }
       }
     });
+  }
+
+  function updateSelectedTypography(
+    field: keyof CardTypographyOverride,
+    value: number | boolean | string | undefined
+  ): void {
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      typography: {
+        ...(currentOverride.typography ?? {}),
+        ...(value === undefined ? {} : { [field]: value })
+      }
+    }));
+  }
+
+  function updateCardTypographyWithToolbar(patch: Parameters<typeof applyCardTypographyToolbarPatch>[1]): void {
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      typography: applyCardTypographyToolbarPatch(currentOverride.typography ?? {}, patch)
+    }));
+  }
+
+  function updateTextLayerWithToolbar(patch: Parameters<typeof applyTextLayerToolbarPatch>[1]): void {
+    updateSelectedLayer((layer) => (layer.kind === "text" ? applyTextLayerToolbarPatch(layer, patch) : layer));
+  }
+
+  function updateBodyNumberWithToolbar(patch: Parameters<typeof applyBodyNumberToolbarPatch>[1]): void {
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      bodyNumberStyle: applyBodyNumberToolbarPatch(currentOverride.bodyNumberStyle ?? {}, patch)
+    }));
   }
 
   function updateSelectedBadge(patch: CardBadgeOverride): void {
@@ -1722,13 +3070,98 @@ export function App(): ReactElement {
     }
   }
 
+  function deleteSemanticSlot(slotId: SemanticItemId): void {
+    if (!isBodyNumberSemanticItemId(slotId)) {
+      return;
+    }
+    updateSelectedOverrideWith((currentOverride) => deleteBodyNumber(currentOverride));
+    setSelectedSemanticSlotId(null);
+    setEditingSemanticSlotId(null);
+    setEditingSemanticText("");
+    setStatus("본문 번호를 삭제했습니다. 되돌리기로 복원할 수 있습니다.");
+  }
+
+  function resetSelectedBodyNumber(): void {
+    updateSelectedOverrideWith((currentOverride) => resetBodyNumberToAutomatic(currentOverride));
+    setStatus("본문 번호를 자동 번호로 되돌렸습니다.");
+  }
+
+  function duplicateSelectedBodyNumberAsTextLayer(): void {
+    if (!selectedBodyNumber?.visible) {
+      return;
+    }
+    const semanticSlot = selectedSemanticSlots.find((slot) => isBodyNumberSemanticItemId(slot.id));
+    const rect = semanticSlot
+      ? semanticSlotPlacementToRect(semanticSlot.placement)
+      : { x: 10, y: 18, width: 20, height: 10 };
+    const style = selectedOverride?.bodyNumberStyle;
+    const layer: CardTextBoxLayer = {
+      id: createUiId("layer-text"),
+      kind: "text",
+      text: selectedBodyNumber.text,
+      ...clampLayerRect(rect),
+      zIndex: style?.zIndex ?? 5,
+      color: style?.color ?? accentColor,
+      fontSize: style?.fontSize ?? 92,
+      fontWeight: style?.fontWeight ?? 900,
+      italic: style?.italic ?? false,
+      align: style?.textAlign ?? style?.align ?? "left",
+      textOpacity: style?.textOpacity ?? 100,
+      ...(style?.fontFamily ? { fontFamily: style.fontFamily } : {})
+    };
+    updateSelectedOverrideWith((currentOverride) => ({
+      ...currentOverride,
+      layers: [...(currentOverride.layers ?? []), layer]
+    }));
+    setSelectedSemanticSlotId(null);
+    setSelectedLayerId(layer.id);
+    setStatus("본문 번호를 자유 텍스트 레이어로 복제했습니다.");
+  }
+
+  function handleLayerClipboardCommand(command: LayerClipboardCommand): void {
+    const result =
+      command === "copy"
+        ? copyLayerToClipboard(selectedLayers, selectedLayerId ?? undefined, layerClipboardRef.current)
+        : command === "cut"
+          ? cutLayerToClipboard(selectedLayers, selectedLayerId ?? undefined, layerClipboardRef.current)
+          : pasteLayerFromClipboard({
+              layers: selectedLayers,
+              clipboard: layerClipboardRef.current,
+              bounds: { width: 100, height: 100 },
+              offset: 2,
+              idFactory: (source, pasteIndex) => `${source.id}-paste-${pasteIndex}-${crypto.randomUUID()}`
+            });
+    layerClipboardRef.current = result.clipboard;
+    if (result.status === "cut" || result.status === "pasted") updateSelectedLayers(result.layers);
+    if (result.selectedLayerId) setSelectedLayerId(result.selectedLayerId);
+    if (result.status === "copied") setStatus("레이어를 복사했습니다. 다른 페이지에서도 붙여넣을 수 있습니다.");
+    if (result.status === "cut") setStatus("레이어를 잘라냈습니다.");
+    if (result.status === "pasted") setStatus("레이어를 붙여넣었습니다.");
+  }
+
   function selectLayer(layerId: string | null): void {
     setSelectedLayerId(layerId);
     if (layerId) {
+      setSelectedSemanticSlotId(null);
+      setEditingSemanticSlotId(null);
+      setEditingSemanticText("");
       setEditMode(true);
     } else {
       setEditingLayerId(null);
       setEditingLayerText("");
+    }
+  }
+
+  function selectSemanticSlot(slotId: SemanticItemId | null): void {
+    setSelectedSemanticSlotId(slotId);
+    if (slotId) {
+      setSelectedLayerId(null);
+      setEditingLayerId(null);
+      setEditingLayerText("");
+      setEditMode(true);
+    } else {
+      setEditingSemanticSlotId(null);
+      setEditingSemanticText("");
     }
   }
 
@@ -1758,13 +3191,31 @@ export function App(): ReactElement {
     });
   }
 
+  function transformSemanticSlot(slotId: SemanticItemId, placement: SemanticSlotPlacement): void {
+    updateSelectedOverrideWith((currentOverride) =>
+      updateSemanticSlotPlacement(currentOverride, slotId, placement, selectedEditorCard, footerAccount)
+    );
+  }
+
   function startLayerTextEdit(layer: CardLayer): void {
     if (layer.kind !== "text") {
       return;
     }
     setSelectedLayerId(layer.id);
+    setSelectedSemanticSlotId(null);
+    setEditingSemanticSlotId(null);
+    setEditingSemanticText("");
     setEditingLayerId(layer.id);
     setEditingLayerText(layer.text);
+  }
+
+  function startSemanticTextEdit(slotId: SemanticItemId, text: string): void {
+    setSelectedSemanticSlotId(slotId);
+    setSelectedLayerId(null);
+    setEditingLayerId(null);
+    setEditingLayerText("");
+    setEditingSemanticSlotId(slotId);
+    setEditingSemanticText(text);
   }
 
   function commitLayerTextEdit(): void {
@@ -1780,6 +3231,39 @@ export function App(): ReactElement {
   function cancelLayerTextEdit(): void {
     setEditingLayerId(null);
     setEditingLayerText("");
+  }
+
+  function commitSemanticTextEdit(): void {
+    const slotId = editingSemanticSlotId;
+    if (!slotId) {
+      return;
+    }
+    const update = updateSemanticSlotText(
+      selectedEditorCard,
+      footerAccount,
+      slotId,
+      editingSemanticText,
+      selectedOverride
+    );
+    if (update.card) {
+      updateCard(selectedIndex, serializeCard(update.card));
+    }
+    if (update.footerAccount !== undefined) {
+      setFooterAccount(update.footerAccount);
+    }
+    if (update.headerLabel !== undefined) {
+      setHeaderLabel(update.headerLabel);
+    }
+    if (update.override) {
+      updateSelectedOverrideWith(() => update.override as CardOverride);
+    }
+    setEditingSemanticSlotId(null);
+    setEditingSemanticText("");
+  }
+
+  function cancelSemanticTextEdit(): void {
+    setEditingSemanticSlotId(null);
+    setEditingSemanticText("");
   }
 
   function changeLayerZ(direction: "back" | "forward"): void {
@@ -1845,6 +3329,21 @@ export function App(): ReactElement {
           backgroundId: imageLibrary[0]?.id ?? "",
           objectFit: "cover"
         };
+      case "video":
+        return {
+          id,
+          kind,
+          x: 12,
+          y: 18,
+          width: 76,
+          height: 42,
+          zIndex: 2,
+          mediaId: "",
+          objectFit: "cover",
+          clipStartMs: 0,
+          clipEndMs: null,
+          volume: 0
+        };
     }
   }
 
@@ -1883,6 +3382,14 @@ export function App(): ReactElement {
             override.dim !== undefined ||
             (override.badge !== undefined && !isEmptyBadgeOverride(override.badge)) ||
             override.typography !== undefined ||
+            override.backgroundMedia !== undefined ||
+            override.scene !== undefined ||
+            override.bodyNumberMode !== undefined ||
+            override.bodyNumberText !== undefined ||
+            override.bodyNumberStyle !== undefined ||
+            (override.semanticSlots !== undefined && Object.keys(override.semanticSlots).length > 0) ||
+            (override.semanticItemPlacements !== undefined && Object.keys(override.semanticItemPlacements).length > 0) ||
+            override.semanticContentKeys !== undefined ||
             (override.layers !== undefined && override.layers.length > 0)
         )
       )
@@ -1963,9 +3470,12 @@ export function App(): ReactElement {
   }
 
   async function savePixabayKey(): Promise<void> {
+    const trimmedApiKey = pixabayApiKeyDraft.trim();
     const nextSettings: AppSettings = {
-      ...(pixabayApiKeyDraft.trim() ? { pixabayApiKey: pixabayApiKeyDraft.trim() } : {}),
-      ...(settings.aiDefaultProviderId ? { aiDefaultProviderId: settings.aiDefaultProviderId } : {})
+      ...(settings.aiDefaultProviderId ? { aiDefaultProviderId: settings.aiDefaultProviderId } : {}),
+      ...(settings.aiDefaultInstruction ? { aiDefaultInstruction: settings.aiDefaultInstruction } : {}),
+      ...(settings.gptsTemplateBuilderUrl ? { gptsTemplateBuilderUrl: settings.gptsTemplateBuilderUrl } : {}),
+      ...(trimmedApiKey ? { pixabayApiKey: trimmedApiKey } : {})
     };
     const saved = await window.cardnews.saveSettings(nextSettings);
     if (isCardnewsError(saved)) {
@@ -1978,7 +3488,7 @@ export function App(): ReactElement {
   }
 
   async function refreshAiProviders(): Promise<void> {
-    const result = await listEditionAiProviders();
+    const result = await listEditionAiProviders(true);
     if (isCardnewsError(result)) {
       setAiStatus(result.message);
       setStatus(result.message);
@@ -1997,7 +3507,7 @@ export function App(): ReactElement {
   async function selectAiProvider(nextProviderId: AiProviderId): Promise<void> {
     setAiProviderId(nextProviderId);
     const nextSettings: AppSettings = {
-      ...(settings.pixabayApiKey ? { pixabayApiKey: settings.pixabayApiKey } : {}),
+      ...settings,
       aiDefaultProviderId: nextProviderId
     };
     const saved = await window.cardnews.saveSettings(nextSettings);
@@ -2011,137 +3521,63 @@ export function App(): ReactElement {
     setAiStatus(`기본 AI provider: ${nextProviderId}`);
   }
 
-  function buildAiPresetPrompt(kind: AiPresetKind): string {
-    switch (kind) {
-      case "topic":
-        return buildTopicPrompt(aiInput);
-      case "research":
-        return buildResearchPrompt(aiInput);
-      case "draft":
-        return buildDraftPrompt(aiInput, styleNameEntries);
-      case "image":
-        return buildImagePrompt(aiInput);
-    }
-  }
-
-  function fillAiPreset(kind: AiPresetKind): void {
-    setAiInput(buildAiPresetPrompt(kind));
-    window.setTimeout(() => aiInputRef.current?.focus(), 0);
-  }
-
-  function resetAiThread(): void {
-    setAiThread([]);
-    setAiDraftText("");
-    setAiStatus("새 AI 대화를 시작했습니다.");
-    window.setTimeout(() => aiInputRef.current?.focus(), 0);
-  }
-
-  async function sendAiMessage(promptOverride?: string): Promise<void> {
-    if (aiBusy) {
+  async function saveGptsTemplateBuilderUrl(): Promise<void> {
+    const trimmedUrl = gptsTemplateBuilderUrlDraft.trim();
+    if (!isAllowedGptsTemplateBuilderUrl(trimmedUrl)) {
+      setStatus("GPTs 링크는 chatgpt.com 또는 chat.openai.com의 https 주소만 저장할 수 있습니다.");
       return;
     }
 
-    const prompt = (promptOverride ?? aiInput).trim();
-    if (!prompt) {
-      setAiStatus("AI에 보낼 내용을 입력하세요.");
+    const nextSettings: AppSettings = {
+      ...(settings.pixabayApiKey ? { pixabayApiKey: settings.pixabayApiKey } : {}),
+      ...(settings.aiDefaultProviderId ? { aiDefaultProviderId: settings.aiDefaultProviderId } : {}),
+      ...(settings.aiDefaultInstruction ? { aiDefaultInstruction: settings.aiDefaultInstruction } : {}),
+      ...(trimmedUrl ? { gptsTemplateBuilderUrl: trimmedUrl } : {})
+    };
+
+    const saved = await window.cardnews.saveSettings(nextSettings);
+    if (isCardnewsError(saved)) {
+      setStatus(saved.message);
       return;
     }
 
-    const userMessage: AiThreadEntry = {
-      id: createUiId("ai-user"),
-      role: "user",
-      content: prompt
-    };
-    const assistantMessageId = createUiId("ai-assistant");
-    const loadingMessage: AiThreadEntry = {
-      id: assistantMessageId,
-      role: "assistant",
-      content: "응답을 기다리는 중...",
-      status: "loading"
-    };
-    const priorMessages: readonly AiChatMessage[] = aiThread
-      .filter((message) => message.status === undefined)
-      .map((message): AiChatMessage => ({ role: message.role, content: message.content }));
-    const userChatMessage: AiChatMessage = { role: "user", content: prompt };
-    const nextMessages: readonly AiChatMessage[] = [...priorMessages, userChatMessage].slice(-12);
-
-    try {
-      setAiBusy(true);
-      setAiStatus("AI 응답 대기 중...");
-      setAiThread((current) => [...current, userMessage, loadingMessage]);
-      const result = await runEditionAi(aiProviderId, nextMessages);
-      if (isCardnewsError(result)) {
-        updateAiAssistantMessage(assistantMessageId, {
-          content: result.message,
-          retryPrompt: prompt,
-          status: "error"
-        });
-        setStatus(`AI 오류: ${result.message}`);
-        return;
-      }
-
-      const detectedDraft = detectAiDraft(result.content);
-      updateAiAssistantMessage(assistantMessageId, {
-        content: result.content,
-        ...(detectedDraft ? { detectedDraft } : {})
-      });
-      if (detectedDraft) {
-        setAiDraftText(detectedDraft.templateText);
-      }
-      setAiStatus(`${result.providerId} 응답 완료`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "알 수 없는 AI 오류";
-      updateAiAssistantMessage(assistantMessageId, {
-        content: message,
-        retryPrompt: prompt,
-        status: "error"
-      });
-      setAiStatus(`AI 오류: ${message}`);
-      setStatus(`AI 오류: ${message}`);
-    } finally {
-      setAiBusy(false);
-    }
+    setSettings(nextSettings);
+    setStatus(trimmedUrl ? "GPTs 바로가기 링크를 저장했습니다." : "GPTs 바로가기 링크를 비웠습니다.");
   }
 
-  function updateAiAssistantMessage(
-    messageId: string,
-    patch: Pick<AiThreadEntry, "content"> &
-      Partial<Pick<AiThreadEntry, "detectedDraft" | "retryPrompt" | "status">>
-  ): void {
-    setAiThread((current) =>
-      current.map((message) =>
-        message.id === messageId
-          ? {
-              id: message.id,
-              role: message.role,
-              content: patch.content,
-              ...(patch.detectedDraft ? { detectedDraft: patch.detectedDraft } : {}),
-              ...(patch.retryPrompt ? { retryPrompt: patch.retryPrompt } : {}),
-              ...(patch.status ? { status: patch.status } : {})
-            }
-          : message
-      )
-    );
-    if (patch.status === "error") {
-      setAiStatus(`AI 오류: ${patch.content}`);
+  function openGptsTemplateBuilder(): void {
+    const url = settings.gptsTemplateBuilderUrl?.trim();
+    if (!url) {
+      setStatus("GPTs 링크가 아직 설정되지 않았습니다.");
+      return;
     }
+
+    void openExternalLink(url);
   }
 
-  function detectAiDraft(rawText: string): AiDetectedDraft | undefined {
-    const templateText = extractTemplateDocument(rawText);
-    if (!templateText.includes("유형:") || !templateText.includes("제목:")) {
-      return undefined;
-    }
-
-    const parsed = parseDeckDocument(templateText, styleNameEntries);
-    if (isCardnewsError(parsed)) {
-      return undefined;
-    }
-
-    return {
-      templateText,
-      cardCount: parsed.cards.length
+  async function saveAiDefaultInstruction(): Promise<void> {
+    const trimmedInstruction = aiDefaultInstructionDraft.trim();
+    const nextSettings: AppSettings = {
+      ...(settings.pixabayApiKey ? { pixabayApiKey: settings.pixabayApiKey } : {}),
+      ...(settings.aiDefaultProviderId ? { aiDefaultProviderId: settings.aiDefaultProviderId } : {}),
+      ...(settings.gptsTemplateBuilderUrl ? { gptsTemplateBuilderUrl: settings.gptsTemplateBuilderUrl } : {}),
+      ...(trimmedInstruction ? { aiDefaultInstruction: trimmedInstruction } : {})
     };
+    const saved = await window.cardnews.saveSettings(nextSettings);
+    if (isCardnewsError(saved)) {
+      setAiStatus(saved.message);
+      setStatus(saved.message);
+      return;
+    }
+    setSettings(nextSettings);
+    setAiDefaultInstructionDraft(trimmedInstruction);
+    setAiStatus(trimmedInstruction ? "AI 기본 지시문을 저장했습니다." : "AI 기본 지시문을 비웠습니다.");
+    setStatus(trimmedInstruction ? "AI 기본 지시문을 저장했습니다." : "AI 기본 지시문을 비웠습니다.");
+  }
+
+  function resetAiDefaultInstructionDraft(): void {
+    setAiDefaultInstructionDraft(defaultAiInstruction);
+    setAiStatus("AI 기본 지시문 초안을 기본값으로 되돌렸습니다. 저장을 누르면 적용됩니다.");
   }
 
   function applyAiDraft(rawText: string): void {
@@ -2160,20 +3596,6 @@ export function App(): ReactElement {
     setStatus(`AI 대본 적용: 카드 ${parsed.cards.length}장`);
   }
 
-  function applyMockAiDraft(): void {
-    const templateText = buildMockDraftDocument();
-    setAiThread((current) => [
-      ...current,
-      {
-        id: createUiId("ai-assistant"),
-        role: "assistant",
-        content: templateText,
-        detectedDraft: { templateText, cardCount: 10 }
-      }
-    ]);
-    applyAiDraft(templateText);
-  }
-
   async function copySelectedAiInstallHint(): Promise<void> {
     const command = selectedAiProvider?.installHint;
     if (!command) {
@@ -2186,6 +3608,23 @@ export function App(): ReactElement {
       setAiStatus("설치 명령을 클립보드에 복사했습니다.");
     } catch {
       setAiStatus(command);
+    }
+  }
+
+  async function installSelectedAiProvider(recipeId: string): Promise<void> {
+    if (!selectedAiProvider || selectedAiProvider.installed || aiInstallBusy) {
+      return;
+    }
+    setAiInstallBusy(true);
+    setAiStatus(`${selectedAiProvider.label} 설치 확인을 기다리는 중입니다.`);
+    try {
+      const result = await window.cardnews.installAiProvider(selectedAiProvider.id, recipeId);
+      setAiStatus(result.message);
+      if (result.ok) {
+        await refreshAiProviders();
+      }
+    } finally {
+      setAiInstallBusy(false);
     }
   }
 
@@ -2300,6 +3739,51 @@ export function App(): ReactElement {
     applyParsedDeckDocument(parsed, document.fileName);
   }
 
+  async function importTemplatePack(): Promise<void> {
+    const imported = await window.cardnews.importTemplatePack();
+    if (isCardnewsError(imported)) {
+      setStatus(imported.message);
+      return;
+    }
+
+    const [backgrounds, images, fonts, styles, nextPresets] = await Promise.all([
+      window.cardnews.listBackgroundLibrary(),
+      listEditionImages(),
+      window.cardnews.listFontLibrary(),
+      window.cardnews.listCustomStyles(),
+      window.cardnews.listDeckPresets()
+    ]);
+    if (!isCardnewsError(backgrounds)) {
+      setBackgroundLibrary(backgrounds);
+    }
+    if (!isCardnewsError(images)) {
+      setImageLibrary(images);
+    }
+    if (!isCardnewsError(fonts)) {
+      setFontLibrary(fonts);
+    }
+    if (!isCardnewsError(styles)) {
+      setCustomStyles(styles);
+    }
+    if (!isCardnewsError(nextPresets)) {
+      setPresets(nextPresets);
+      setSelectedPresetName(imported.presetName);
+      setPresetName(imported.presetName);
+    }
+
+    applySnapshot(imported.workspace);
+    await loadFontCss(imported.workspace.fontId ?? null);
+    await refreshImageLibraryWithPreviews(null);
+    setRenderResult(null);
+    setBulkResult(null);
+    setApprovedJobId(null);
+    setStatus(
+      imported.warnings.length > 0
+        ? `템플릿팩 적용: 카드 ${imported.cardCount}장 · 경고: ${imported.warnings[0]}`
+        : `템플릿팩 적용: 카드 ${imported.cardCount}장, 배경 ${imported.backgroundCount}개, 이미지 ${imported.assetCount}개`
+    );
+  }
+
   // ── 양식 프리셋 ──
   async function savePreset(): Promise<void> {
     const name = presetName.trim();
@@ -2315,12 +3799,18 @@ export function App(): ReactElement {
       chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
+      backgroundMedia,
+      mediaAssets,
+      videoProjectMode,
+      sceneDefaults,
+      bodyNumberDefault,
       nextHint: nextHintConfig,
       ...(customAccent ? { accentColor: customAccent } : {}),
       ...(customDim !== null ? { backgroundDim: customDim } : {}),
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
       ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+      ...(bulkBindings ? { bulkBindings } : {}),
       cards
     };
 
@@ -2449,13 +3939,7 @@ export function App(): ReactElement {
       setStatus(`카드는 최대 ${maxCards}장까지 만들 수 있습니다.`);
       return;
     }
-
-    const nextIndex = cards.length;
-    setCards((current) => [
-      ...current,
-      `유형: 본문\n제목: 카드 ${current.length + 1} 제목\n본문: 내용을 입력하세요.`
-    ]);
-    setSelectedIndex(nextIndex);
+    runPageOperation("insert-after", cards.length - 1);
   }
 
   function removeCard(): void {
@@ -2464,8 +3948,70 @@ export function App(): ReactElement {
       return;
     }
 
-    setCards((current) => current.filter((_, index) => index !== selectedIndex));
-    setSelectedIndex((current) => Math.max(0, Math.min(current, cards.length - 2)));
+    runPageOperation("delete", selectedIndex);
+  }
+
+  function applyPageOperationResult(result: PageOperationResult): void {
+    setCards(result.cards.map((card) => serializeCard(card)));
+    setOverrides(result.overrides ?? {});
+    setBulkBindings(result.bulkBindings);
+    setSelectedIndex(result.selectedIndex);
+    setSelectedLayerId(null);
+    setEditingLayerId(null);
+    setEditingLayerText("");
+    if (result.warnings.length > 0) setStatus(result.warnings.join(" "));
+  }
+
+  function runPageOperation(
+    operation: "insert-before" | "insert-after" | "duplicate" | "delete",
+    targetIndex: number
+  ): void {
+    if (operation !== "delete" && cards.length >= maxCards) {
+      setStatus(`카드는 최대 ${maxCards}장까지 만들 수 있습니다.`);
+      return;
+    }
+    if (operation === "delete" && cards.length <= 1) {
+      setStatus("카드는 최소 1장이 필요합니다.");
+      return;
+    }
+    if (
+      operation === "delete" &&
+      cards[targetIndex]?.trim() &&
+      !window.confirm(`${targetIndex + 1}페이지를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)
+    ) {
+      return;
+    }
+
+    const input = {
+      cards: parsedEntries.map((entry) => entry.card),
+      overrides,
+      ...(bulkBindings ? { bulkBindings } : {}),
+      idFactory: (sourceId: string) => `${sourceId}-copy-${crypto.randomUUID()}`,
+      bindingKeyFactory: (sourceKey: string, context: { readonly existingKeys: ReadonlySet<string> }) => {
+        const base = `${sourceKey}_copy`;
+        let candidate = base;
+        let suffix = 2;
+        while (context.existingKeys.has(candidate)) candidate = `${base}_${suffix++}`;
+        return candidate;
+      }
+    };
+    const result =
+      operation === "insert-before"
+        ? insertPageBefore(input, targetIndex)
+        : operation === "insert-after"
+          ? insertPageAfter(input, targetIndex)
+          : operation === "duplicate"
+            ? duplicatePage(input, targetIndex)
+            : deletePage(input, targetIndex);
+    applyPageOperationResult(result);
+    setPageContextMenu(null);
+    const focusIndex =
+      operation === "insert-before"
+        ? Math.min(targetIndex + 1, result.cards.length - 1)
+        : operation === "delete"
+          ? Math.min(targetIndex, result.cards.length - 1)
+          : targetIndex;
+    queueMicrotask(() => thumbnailRefs.current[focusIndex]?.focus());
   }
 
   function resetWorkspace(): void {
@@ -2483,8 +4029,16 @@ export function App(): ReactElement {
     setCustomDim(null);
     setSelectedFontId(null);
     setNextHintConfig({ kind: "arrows" });
+    setVideoProjectMode("cards");
+    setBackgroundMedia({ mode: "none" });
+    setMediaAssets([]);
+    setMediaPreviews({});
+    setSceneDefaults(defaultCardSceneSettings);
+    setTimelinePlayheadMs(0);
     void loadFontCss(null);
     setOverrides({});
+    setBulkBindings(undefined);
+    layerClipboardRef.current = createLayerClipboardState();
     setEditMode(false);
     setSelectedLayerId(null);
     setEditingLayerId(null);
@@ -2628,8 +4182,112 @@ export function App(): ReactElement {
     setStatus(`프로젝트 열기: ${imported.filePath}`);
   }
 
+  function getBulkBinding(target: BulkBindingTarget) {
+    const identity = JSON.stringify(target);
+    return bulkBindings?.bindings.find((binding) => JSON.stringify(binding.target) === identity);
+  }
+
+  function updateBulkBinding(
+    target: BulkBindingTarget,
+    patch: Partial<Pick<BulkBindingMetadata["bindings"][number], "key" | "label">>
+  ): void {
+    const identity = JSON.stringify(target);
+    setBulkBindings((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        templateRevision: current.templateRevision + 1,
+        bindings: current.bindings.map((binding) =>
+          JSON.stringify(binding.target) === identity ? { ...binding, ...patch } : binding
+        )
+      };
+    });
+  }
+
+  function toggleBulkBinding(target: BulkBindingTarget, label: string, defaultValue: string): void {
+    setBulkBindings((current) => {
+      const metadata: BulkBindingMetadata =
+        current ?? {
+          schemaVersion: 1,
+          templateId: `workspace-${crypto.randomUUID()}`,
+          templateRevision: 0,
+          bindings: []
+        };
+      const identity = JSON.stringify(target);
+      const existing = metadata.bindings.find((binding) => JSON.stringify(binding.target) === identity);
+      const bindings = existing
+        ? metadata.bindings.filter((binding) => binding !== existing)
+        : [
+            ...metadata.bindings,
+            {
+              key: createBulkBindingKey(target, metadata.bindings.map((binding) => binding.key)),
+              label,
+              required: false,
+              defaultValue,
+              target
+            }
+          ];
+      return { ...metadata, templateRevision: metadata.templateRevision + 1, bindings };
+    });
+  }
+
+  function renderBulkBindingControl(
+    target: BulkBindingTarget,
+    label: string,
+    defaultValue: string,
+    key: string
+  ): ReactElement {
+    const binding = getBulkBinding(target);
+    const duplicateKey =
+      binding !== undefined &&
+      (bulkBindings?.bindings.some((candidate) => candidate !== binding && candidate.key === binding.key) ?? false);
+    const invalidKey = binding !== undefined && !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(binding.key);
+    return (
+      <div className="bulk-binding-control" key={key}>
+        <label className="check-row compact">
+          <input
+            type="checkbox"
+            checked={binding !== undefined}
+            onChange={() => toggleBulkBinding(target, label, defaultValue)}
+          />
+          <span>{label}</span>
+        </label>
+        {binding ? (
+          <div className="bulk-binding-editor">
+            <label>
+              <span>CSV 변수 키</span>
+              <input
+                type="text"
+                value={binding.key}
+                aria-invalid={invalidKey || duplicateKey}
+                title="영문자로 시작하고 영문, 숫자, 밑줄만 사용할 수 있습니다."
+                onChange={(event) => updateBulkBinding(target, { key: event.target.value })}
+              />
+            </label>
+            <label>
+              <span>표시 이름</span>
+              <input
+                type="text"
+                value={binding.label}
+                aria-invalid={binding.label.trim().length === 0}
+                onChange={(event) => updateBulkBinding(target, { label: event.target.value })}
+              />
+            </label>
+            {invalidKey || duplicateKey ? (
+              <span className="field-error">{duplicateKey ? "중복된 변수 키입니다." : "영문자로 시작하는 키를 입력하세요."}</span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   async function exportBulkTemplate(): Promise<void> {
-    const saved = await saveEditionBulkTemplate(styleId, aspectRatioId);
+    if (!bulkBindings || bulkBindings.bindings.length === 0) {
+      setStatus("대량 생성에 사용할 항목을 먼저 선택하세요.");
+      return;
+    }
+    const saved = await saveEditionBulkTemplate(styleId, aspectRatioId, bulkBindings);
     setStatus(isCardnewsError(saved) ? saved.message : `CSV 템플릿 저장: ${saved}`);
   }
 
@@ -2653,7 +4311,16 @@ export function App(): ReactElement {
     try {
       setIsRendering(true);
       setStatus("CSV 대량 생성 중...");
-      const result = await runEditionBulkRender(bulkCsvText);
+      const isTemplateV2 = bulkCsvText.includes("kkongdon.cardnews.bulk.v2");
+      if (isTemplateV2 && (!bulkBindings || bulkBindings.bindings.length === 0)) {
+        setStatus("이 CSV에 연결된 양식 바인딩이 없습니다. 양식을 다시 적용하거나 항목을 선택하세요.");
+        return;
+      }
+      const result = await runEditionBulkRender(
+        bulkCsvText,
+        isTemplateV2 ? buildWorkspaceState() : undefined,
+        isTemplateV2 ? bulkBindings : undefined
+      );
       if (isCardnewsError(result)) {
         setStatus(`CSV 대량 생성 실패: ${result.message}`);
         return;
@@ -2684,6 +4351,11 @@ export function App(): ReactElement {
       accentColor,
       backgroundDim,
       aspectRatio: aspectRatioId,
+      backgroundMedia,
+      mediaAssets,
+      videoProjectMode,
+      sceneDefaults,
+      bodyNumberDefault,
       nextHint: nextHintConfig,
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
@@ -2702,12 +4374,18 @@ export function App(): ReactElement {
       chrome: chromeConfig,
       styleId,
       aspectRatio: aspectRatioId,
+      backgroundMedia,
+      mediaAssets,
+      videoProjectMode,
+      sceneDefaults,
+      bodyNumberDefault,
       nextHint: nextHintConfig,
       ...(customAccent ? { accentColor: customAccent } : {}),
       ...(customDim !== null ? { backgroundDim: customDim } : {}),
       ...(backgroundId ? { backgroundId } : {}),
       ...(selectedFontId ? { fontId: selectedFontId } : {}),
       ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+      ...(bulkBindings ? { bulkBindings } : {}),
       railWidth,
       cards,
       selectedIndex
@@ -2715,7 +4393,11 @@ export function App(): ReactElement {
   }
 
   return (
-    <main className="studio" data-smoke-edition={editionKind}>
+    <main
+      className="studio"
+      data-smoke-edition={editionKind}
+      data-smoke-workspace-ready={workspaceHydrated ? "true" : "false"}
+    >
       {fontCss ? <style>{fontCss}</style> : null}
       <header className="topbar">
         <button type="button" className="brand brand-button" onClick={() => setInfoOpen(true)}>
@@ -2751,9 +4433,9 @@ export function App(): ReactElement {
           <input value={headerLabel} onChange={(event) => setHeaderLabel(event.target.value)} />
         </label>
         <label className="topbar-field">
-          <span>멘션</span>
+          <span>푸터</span>
           <input
-            data-smoke-role="mention-input"
+            data-smoke-role="footer-input"
             value={footerAccount}
             onChange={(event) => setFooterAccount(event.target.value)}
           />
@@ -2763,8 +4445,9 @@ export function App(): ReactElement {
             type="button"
             className="credit-pill threads-pill"
             data-smoke-role="threads-link"
-            aria-label="Threads @kkongdon_story 열기"
-            title="Threads @kkongdon_story"
+            data-smoke-url={threadsUrl}
+            aria-label={`Threads ${threadsDisplay} 열기`}
+            title={`Threads ${threadsDisplay}`}
             onClick={() => void openExternalLink(threadsUrl)}
           >
             @
@@ -2796,11 +4479,11 @@ export function App(): ReactElement {
           <button
             type="button"
             className="primary"
-            onClick={runGenerate}
-            disabled={isRendering}
-            data-smoke-action="generate"
+            onClick={() => setExportDialogOpen(true)}
+            disabled={isRendering || isVideoExporting}
+            data-smoke-action="open-export-dialog"
           >
-            {isRendering ? "생성 중..." : "PNG 생성"}
+            {isRendering || isVideoExporting ? "내보내는 중..." : "내보내기"}
           </button>
         </div>
       </header>
@@ -2811,10 +4494,25 @@ export function App(): ReactElement {
             <button
               type="button"
               key={index}
+              ref={(element) => {
+                thumbnailRefs.current[index] = element;
+              }}
               className={`slide-thumb${index === selectedIndex ? " active" : ""}${
                 parsedEntries[index]?.error ? " has-error" : ""
               }`}
+              aria-haspopup="menu"
               onClick={() => setSelectedIndex(index)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setPageContextMenu({ index, x: event.clientX, y: event.clientY });
+              }}
+              onKeyDown={(event) => {
+                if ((event.shiftKey && event.key === "F10") || event.key === "ContextMenu") {
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setPageContextMenu({ index, x: rect.right - 8, y: rect.top + 24 });
+                }
+              }}
             >
               <span className="slide-no">{index + 1}</span>
               <span
@@ -2830,6 +4528,12 @@ export function App(): ReactElement {
                   srcDoc={html}
                   scrolling="no"
                   tabIndex={-1}
+                  onLoad={(event) => {
+                    const document = event.currentTarget.contentDocument;
+                    if (document) {
+                      void prepareSemanticItemPlacements(document);
+                    }
+                  }}
                   style={{
                     width: cardRatio.width,
                     height: cardRatio.height,
@@ -2843,6 +4547,37 @@ export function App(): ReactElement {
             + 카드 추가
           </button>
         </aside>
+        {pageContextMenu ? (
+          <div
+            className="page-context-menu"
+            role="menu"
+            aria-label={`${pageContextMenu.index + 1}페이지 메뉴`}
+            style={{
+              left: Math.max(8, Math.min(pageContextMenu.x, window.innerWidth - 210)),
+              top: Math.max(8, Math.min(pageContextMenu.y, window.innerHeight - 210))
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button type="button" role="menuitem" onClick={() => runPageOperation("insert-before", pageContextMenu.index)}>
+              앞에 페이지 추가
+            </button>
+            <button type="button" role="menuitem" onClick={() => runPageOperation("insert-after", pageContextMenu.index)}>
+              뒤에 페이지 추가
+            </button>
+            <button type="button" role="menuitem" onClick={() => runPageOperation("duplicate", pageContextMenu.index)}>
+              페이지 복제
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              disabled={cards.length <= 1}
+              onClick={() => runPageOperation("delete", pageContextMenu.index)}
+            >
+              페이지 삭제
+            </button>
+          </div>
+        ) : null}
         <div
           className="rail-resizer"
           role="separator"
@@ -2855,52 +4590,372 @@ export function App(): ReactElement {
           <div className="stage-toolbar">
             <button
               type="button"
-              className={hasProTools && editMode ? "active" : ""}
+              aria-label="되돌리기"
+              title="되돌리기 (Ctrl+Z)"
+              disabled={overrideHistoryRef.current.past.length === 0}
+              onClick={undoOverrideChange}
+            >
+              ↶
+            </button>
+            <button
+              type="button"
+              aria-label="다시 실행"
+              title="다시 실행 (Ctrl+Shift+Z)"
+              disabled={overrideHistoryRef.current.future.length === 0}
+              onClick={redoOverrideChange}
+            >
+              ↷
+            </button>
+            <button
+              type="button"
+              className={editMode ? "active" : ""}
               data-smoke-action="toggle-edit-mode"
-              onClick={() => {
-                if (hasProTools) {
-                  setEditMode((current) => !current);
-                  return;
-                }
-                void requestLockedFeature("overlay_edit");
-              }}
+              onClick={() => setEditMode((current) => !current)}
             >
               편집 모드
             </button>
           </div>
-          {hasProTools ? (
-            <StageCanvas
-              html={previewHtmls[selectedIndex] ?? ""}
-              cardWidth={cardRatio.width}
-              cardHeight={cardRatio.height}
-              editMode={editMode}
-              layers={selectedLayers}
-              selectedLayerId={selectedLayerId}
-              editingLayerId={editingLayerId}
-              editingText={editingLayerText}
-              onSelectLayer={selectLayer}
-              onTransformLayer={transformLayer}
-              onTransformLineLayer={transformLineLayer}
-              onNudgeLayer={nudgeLayer}
-              onDeleteLayer={removeLayer}
-              onStartTextEdit={startLayerTextEdit}
-              onEditingTextChange={setEditingLayerText}
-              onCommitTextEdit={commitLayerTextEdit}
-              onCancelTextEdit={cancelLayerTextEdit}
-            />
-          ) : (
-            <PreviewCanvas
-              html={previewHtmls[selectedIndex] ?? ""}
-              cardWidth={cardRatio.width}
-              cardHeight={cardRatio.height}
-            />
-          )}
+          <StageCanvas
+            html={previewHtmls[selectedIndex] ?? ""}
+            cardWidth={cardRatio.width}
+            cardHeight={cardRatio.height}
+            editMode={editMode}
+            layers={selectedLayers}
+            selectedLayerId={selectedLayerId}
+            semanticSlots={selectedSemanticSlots}
+            selectedSemanticSlotId={selectedSemanticSlotId}
+            editingLayerId={editingLayerId}
+            editingSemanticSlotId={editingSemanticSlotId}
+            editingText={editingLayerText}
+            editingSemanticText={editingSemanticText}
+            playheadMs={timelinePlayheadMs}
+            sceneStartMs={compiledTimeline.scenes.find((scene) => scene.cardIndex === selectedCardNumber)?.startMs ?? 0}
+            onSelectLayer={selectLayer}
+            onSelectSemanticSlot={selectSemanticSlot}
+            onTransformLayer={transformLayer}
+            onTransformLineLayer={transformLineLayer}
+            onTransformSemanticSlot={transformSemanticSlot}
+            onNudgeLayer={nudgeLayer}
+            onDeleteLayer={removeLayer}
+            onDeleteSemanticSlot={deleteSemanticSlot}
+            onClipboardCommand={handleLayerClipboardCommand}
+            onStartTextEdit={startLayerTextEdit}
+            onStartSemanticTextEdit={startSemanticTextEdit}
+            onEditingTextChange={setEditingLayerText}
+            onEditingSemanticTextChange={setEditingSemanticText}
+            onCommitTextEdit={commitLayerTextEdit}
+            onCommitSemanticTextEdit={commitSemanticTextEdit}
+            onCancelTextEdit={cancelLayerTextEdit}
+            onCancelSemanticTextEdit={cancelSemanticTextEdit}
+          />
+          <div className="video-project-mode">
+            <label>
+              <input
+                type="checkbox"
+                checked={videoProjectMode === "video"}
+                onChange={(event) => setVideoProjectMode(event.target.checked ? "video" : "cards")}
+              />
+              영상 만들기
+            </label>
+            <small>{videoProjectMode === "video" ? "카드별 시간과 전환을 사용합니다." : "PNG 카드 편집 모드입니다."}</small>
+          </div>
+          {videoProjectMode === "video" ? (
+          <section className="m23-timeline" data-smoke-role="m23-timeline" aria-label="영상 타임라인">
+            <div className="m23-timeline-heading">
+              <strong>타임라인</strong>
+              <span>{formatDuration(compiledTimeline.durationMs)} · {compiledTimeline.frameCount} 프레임</span>
+            </div>
+            <div className="m23-timeline-track" role="list" aria-label="카드 장면">
+              {compiledTimeline.scenes.map((scene) => (
+                <div
+                  key={scene.id}
+                  role="listitem"
+                  className={scene.cardIndex === selectedCardNumber ? "active" : ""}
+                  style={{
+                    width: `${Math.max(3, (scene.durationMs / Math.max(1, compiledTimeline.durationMs)) * 100)}%`
+                  }}
+                  onClick={() => {
+                    setSelectedIndex(Math.max(0, scene.cardIndex - 1));
+                    setTimelinePlayheadMs(scene.startMs);
+                  }}
+                >
+                  <span>{scene.cardIndex}</span>
+                  <label onClick={(event) => event.stopPropagation()}>
+                    <span className="sr-only">{scene.cardIndex}번 카드 노출 시간(초)</span>
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={180}
+                      step={0.1}
+                      value={Number((scene.durationMs / 1000).toFixed(1))}
+                      onChange={(event) =>
+                        updateCardScene(scene.cardIndex, {
+                          durationMode: "fixed",
+                          durationMs: Number(event.target.value) * 1000
+                        })
+                      }
+                    />
+                    <small>초</small>
+                  </label>
+                  {scene.transition !== "none" && scene.transitionMs > 0 ? (
+                    <i title={`${scene.transition} ${scene.transitionMs}ms`}>{scene.transition === "fade" ? "F" : "S"}</i>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <label className="m23-playhead">
+              <span>재생 위치 {formatDuration(timelinePlayheadMs)}</span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(1, compiledTimeline.durationMs)}
+                step={1000 / 30}
+                value={Math.min(timelinePlayheadMs, compiledTimeline.durationMs)}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setTimelinePlayheadMs(next);
+                  if (compiledTimeline.scenes.length > 0) {
+                    const scene = findCompiledSceneAt(compiledTimeline, next);
+                    setSelectedIndex(Math.max(0, scene.cardIndex - 1));
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Home") setTimelinePlayheadMs(0);
+                  if (event.key === "End") setTimelinePlayheadMs(compiledTimeline.durationMs);
+                }}
+              />
+            </label>
+          </section>
+          ) : null}
+          {isEditorToolbarVisible(editorToolbarTarget) ? (
+            <div className="floating-editor-toolbar" data-smoke-role="floating-editor-toolbar">
+              {editorToolbarTarget?.kind === "text-layer" && selectedTextLayer ? (
+                <div className="floating-editor-toolbar-content" data-toolbar-target="text-layer">
+                  <label className="toolbar-field">
+                    <span>글자색</span>
+                    <input
+                      type="color"
+                      value={selectedTextLayer.color ?? preset.ink}
+                      onChange={(event) => updateTextLayerWithToolbar({ color: event.target.value })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>글자 투명도</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selectedTextLayer.textOpacity ?? 100}
+                      onChange={(event) => updateTextLayerWithToolbar({ textOpacity: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>크기</span>
+                    <input
+                      type="number"
+                      min={8}
+                      max={220}
+                      value={Math.round(selectedTextLayer.fontSize ?? 40)}
+                      onChange={(event) => updateTextLayerWithToolbar({ fontSize: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>굵기</span>
+                    <input
+                      type="number"
+                      min={100}
+                      max={950}
+                      step={50}
+                      value={selectedTextLayer.fontWeight ?? 700}
+                      onChange={(event) => updateTextLayerWithToolbar({ fontWeight: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-check">
+                    <input
+                      type="checkbox"
+                      checked={selectedTextLayer.italic === true}
+                      onChange={(event) => updateTextLayerWithToolbar({ italic: event.target.checked })}
+                    />
+                    <span>기울임</span>
+                  </label>
+                  <select
+                    aria-label="텍스트 정렬"
+                    value={selectedTextLayer.align ?? "left"}
+                    onChange={(event) =>
+                      updateTextLayerWithToolbar({ align: event.target.value as "left" | "center" | "right" })
+                    }
+                  >
+                    <option value="left">왼쪽</option>
+                    <option value="center">가운데</option>
+                    <option value="right">오른쪽</option>
+                  </select>
+                </div>
+              ) : editorToolbarTarget?.kind === "body-number" ? (
+                <div className="floating-editor-toolbar-content" data-toolbar-target="body-number">
+                  <label className="toolbar-field">
+                    <span>번호 색상</span>
+                    <input
+                      type="color"
+                      value={normalizeHexColor(selectedOverride?.bodyNumberStyle?.color ?? accentColor) ?? "#000000"}
+                      onChange={(event) => updateBodyNumberWithToolbar({ color: event.target.value })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>투명도</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selectedOverride?.bodyNumberStyle?.textOpacity ?? 100}
+                      onChange={(event) => updateBodyNumberWithToolbar({ textOpacity: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>크기</span>
+                    <input
+                      type="number"
+                      min={8}
+                      max={220}
+                      value={Math.round(selectedOverride?.bodyNumberStyle?.fontSize ?? 92)}
+                      onChange={(event) => updateBodyNumberWithToolbar({ fontSize: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>굵기</span>
+                    <input
+                      type="number"
+                      min={100}
+                      max={950}
+                      step={50}
+                      value={selectedOverride?.bodyNumberStyle?.fontWeight ?? 900}
+                      onChange={(event) => updateBodyNumberWithToolbar({ fontWeight: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-check">
+                    <input
+                      type="checkbox"
+                      checked={selectedOverride?.bodyNumberStyle?.italic === true}
+                      onChange={(event) => updateBodyNumberWithToolbar({ italic: event.target.checked })}
+                    />
+                    <span>기울임</span>
+                  </label>
+                  <select
+                    aria-label="본문 번호 정렬"
+                    value={
+                      selectedOverride?.bodyNumberStyle?.textAlign ??
+                      selectedOverride?.bodyNumberStyle?.align ??
+                      "left"
+                    }
+                    onChange={(event) =>
+                      updateBodyNumberWithToolbar({
+                        textAlign: event.target.value as "left" | "center" | "right"
+                      })
+                    }
+                  >
+                    <option value="left">왼쪽</option>
+                    <option value="center">가운데</option>
+                    <option value="right">오른쪽</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="ghost"
+                    data-smoke-action="duplicate-body-number"
+                    onClick={duplicateSelectedBodyNumberAsTextLayer}
+                  >
+                    텍스트로 복제
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    data-smoke-action="reset-body-number-automatic"
+                    onClick={resetSelectedBodyNumber}
+                    disabled={selectedBodyNumber?.state === "automatic"}
+                  >
+                    자동 번호로
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    data-smoke-action="delete-body-number"
+                    onClick={() => {
+                      if (editorToolbarTarget.kind === "body-number") {
+                        deleteSemanticSlot(editorToolbarTarget.slotId);
+                      }
+                    }}
+                  >
+                    삭제
+                  </button>
+                </div>
+              ) : (
+                <div className="floating-editor-toolbar-content" data-toolbar-target="card-typography">
+                  <label className="toolbar-field">
+                    <span>글자색</span>
+                    <input
+                      type="color"
+                      value={selectedOverride?.typography?.color ?? preset.ink}
+                      onChange={(event) => updateCardTypographyWithToolbar({ color: event.target.value })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>글자 투명도</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selectedOverride?.typography?.textOpacity ?? 100}
+                      onChange={(event) => updateCardTypographyWithToolbar({ textOpacity: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>크기</span>
+                    <input
+                      type="number"
+                      min={65}
+                      max={135}
+                      value={Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}
+                      onChange={(event) =>
+                        updateCardTypographyWithToolbar({ sizeScale: Number(event.target.value) / 100 })
+                      }
+                    />
+                  </label>
+                  <label className="toolbar-field compact">
+                    <span>굵기</span>
+                    <input
+                      type="number"
+                      min={100}
+                      max={950}
+                      step={50}
+                      value={selectedOverride?.typography?.weight ?? 700}
+                      onChange={(event) => updateCardTypographyWithToolbar({ weight: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label className="toolbar-check">
+                    <input
+                      type="checkbox"
+                      checked={selectedOverride?.typography?.italic === true}
+                      onChange={(event) => updateCardTypographyWithToolbar({ italic: event.target.checked })}
+                    />
+                    <span>기울임</span>
+                  </label>
+                  <select
+                    aria-label="타이포 적용 범위"
+                    value={selectedOverride?.typography?.scope ?? "all"}
+                    onChange={(event) => updateCardTypographyWithToolbar({ scope: parseTypographyScope(event.target.value) })}
+                  >
+                    <option value="all">전체</option>
+                    <option value="title">제목</option>
+                    <option value="body">본문</option>
+                  </select>
+                </div>
+              )}
+            </div>
+          ) : null}
           <p className="stage-status">{status}</p>
         </section>
 
         <aside className="inspector" aria-label="editor controls">
           <div className="inspector-tabs">
-            {(["design", "content", "export"] as const).map((tab) => (
+            {(["content", "design", "media", "export"] as const).map((tab) => (
               <button
                 type="button"
                 key={tab}
@@ -2908,12 +4963,13 @@ export function App(): ReactElement {
                 data-smoke-action={`inspector-${tab}`}
                 onClick={() => setInspectorTab(tab)}
               >
-                {tab === "design" ? "디자인" : tab === "content" ? "콘텐츠" : "내보내기"}
+                {tab === "design" ? "디자인" : tab === "content" ? "콘텐츠" : tab === "media" ? "미디어" : "내보내기"}
               </button>
             ))}
           </div>
           <section className="panel" hidden={inspectorTab !== "design"}>
-            <p className="panel-title">양식</p>
+            <p className="panel-title">양식 관리</p>
+            <small className="hint">카드 수, 문구, 배지, 배경, 레이어 배치를 저장하거나 GPTs 템플릿팩으로 불러옵니다.</small>
             <select
               value={selectedPresetName}
               onChange={(event) => applyPresetByName(event.target.value)}
@@ -2925,7 +4981,7 @@ export function App(): ReactElement {
                 </option>
               ))}
             </select>
-            <div className="row">
+            <div className="inspector-action-grid template-save">
               <input
                 placeholder="양식 이름"
                 value={presetName}
@@ -2938,7 +4994,7 @@ export function App(): ReactElement {
                 삭제
               </button>
             </div>
-            <div className="row">
+            <div className="inspector-action-grid two">
               <button type="button" onClick={exportTemplate}>
                 양식.md 내보내기
               </button>
@@ -2946,6 +5002,9 @@ export function App(): ReactElement {
                 작성한 파일 불러오기
               </button>
             </div>
+            <button type="button" className="ghost wide-action" data-smoke-action="import-template-pack" onClick={importTemplatePack}>
+              템플릿팩 ZIP 불러오기
+            </button>
           </section>
 
           <section className="panel" hidden={inspectorTab !== "design"}>
@@ -2962,6 +5021,37 @@ export function App(): ReactElement {
                 />
               ))}
             </div>
+            <div className="accent-custom-row">
+              <input
+                type="color"
+                aria-label="사용자 지정 포인트 색상"
+                value={normalizeHexColor(accentColor) ?? "#6C5CE7"}
+                onChange={(event) => setCustomAccent(event.target.value.toUpperCase())}
+              />
+              <input
+                type="text"
+                aria-label="포인트 색상 HEX"
+                value={accentDraft}
+                placeholder="#6C5CE7"
+                onChange={(event) => setAccentDraft(event.target.value)}
+                onBlur={() => {
+                  const normalized = normalizeHexColor(accentDraft);
+                  if (normalized) setCustomAccent(normalized);
+                  else {
+                    setAccentDraft(accentColor);
+                    setStatus("포인트 색상은 #RRGGBB 형식으로 입력하세요.");
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  const normalized = normalizeHexColor(accentDraft);
+                  if (normalized) {
+                    setCustomAccent(normalized);
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            </div>
             <button type="button" className="ghost" onClick={() => setCustomAccent(null)}>
               스타일 기본값
             </button>
@@ -2969,6 +5059,7 @@ export function App(): ReactElement {
 
           <section className="panel" hidden={inspectorTab !== "design"}>
             <p className="panel-title">스타일 관리</p>
+            <small className="hint">색상, 폰트, 배경 분위기, 테두리 같은 시각 스타일 JSON을 등록합니다.</small>
             <div className="row">
               <button type="button" onClick={exportDesignContract}>
                 design.md 내보내기
@@ -2993,6 +5084,28 @@ export function App(): ReactElement {
             <button type="button" className="ghost" onClick={importCustomStyleFromFile}>
               .json 파일 열기
             </button>
+            <div className="gpts-shortcut" data-smoke-role="gpts-shortcut">
+              <small className="hint">GPTs 바로가기 링크</small>
+              <input
+                placeholder="https://chatgpt.com/g/..."
+                value={gptsTemplateBuilderUrlDraft}
+                onChange={(event) => setGptsTemplateBuilderUrlDraft(event.target.value)}
+                spellCheck={false}
+              />
+              <div className="row">
+                <button type="button" className="ghost" onClick={saveGptsTemplateBuilderUrl}>
+                  링크 저장
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={openGptsTemplateBuilder}
+                  disabled={!settings.gptsTemplateBuilderUrl}
+                >
+                  GPTs 열기
+                </button>
+              </div>
+            </div>
             {styleWarnings.length > 0 ? (
               <ul className="warning-list">
                 {styleWarnings.slice(0, 3).map((warning) => (
@@ -3038,6 +5151,7 @@ export function App(): ReactElement {
             <p className="panel-title">배경 이미지</p>
             <div className="row">
               <select
+                data-smoke-role="global-background-select"
                 value={backgroundId ?? ""}
                 onChange={(event) =>
                   void applyBackgroundSelection(event.target.value === "" ? null : event.target.value)
@@ -3046,12 +5160,15 @@ export function App(): ReactElement {
                 <option value="">없음</option>
                 {backgroundLibrary.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.displayName}
+                    {item.displayName} · {item.id.slice(-6)}
                   </option>
                 ))}
               </select>
               <button type="button" onClick={addBackground}>
                 파일 추가
+              </button>
+              <button type="button" data-smoke-action="background-manager-open" onClick={openBackgroundManager}>
+                배경 관리
               </button>
               <button type="button" onClick={() => setStockSearchOpen(true)}>
                 무료 이미지 검색
@@ -3100,6 +5217,7 @@ export function App(): ReactElement {
               <button
                 type="button"
                 className={cardEditorTab === "content" ? "active" : ""}
+                data-smoke-action="card-content-tab"
                 onClick={() => setCardEditorTab("content")}
               >
                 내용
@@ -3150,6 +5268,7 @@ export function App(): ReactElement {
                       <span>소제목</span>
                       <textarea
                         rows={2}
+                        data-smoke-role="content-subtitle"
                         value={selectedEditorCard.subtitle ?? ""}
                         onChange={(event) => updateStructuredOptionalField("subtitle", event.target.value)}
                       />
@@ -3233,7 +5352,7 @@ export function App(): ReactElement {
                   <span>*단어* → 포인트색 강조</span>
                 </div>
               </>
-            ) : hasProTools ? (
+            ) : (
               <div className="card-design-controls">
                 <div className="chrome-controls">
                   <p className="panel-title">상단/하단 바</p>
@@ -3245,10 +5364,11 @@ export function App(): ReactElement {
                     />
                     <span>헤더 표시</span>
                   </label>
-                  <div className="layer-field-grid three">
+                  <div className="layer-field-grid two">
                     <label>
                       <span>헤더 색</span>
                       <input
+                        data-smoke-role="chrome-header-color"
                         type="color"
                         value={chromeConfig.header.color}
                         onChange={(event) => updateChromeSlot("header", { color: event.target.value })}
@@ -3276,7 +5396,7 @@ export function App(): ReactElement {
                       />
                     </label>
                   </div>
-                  <div className="layer-field-grid two">
+                  <div className="layer-field-grid three">
                     <label>
                       <span>헤더 X</span>
                       <input
@@ -3306,14 +5426,39 @@ export function App(): ReactElement {
                     />
                     <span>페이지 번호 표시</span>
                   </label>
-                  <div className="layer-field-grid two">
+                  <div className="layer-field-grid three">
                     <label>
                       <span>페이지 형식</span>
-                      <input
+                      <select
                         data-smoke-role="chrome-page-template"
-                        value={chromeConfig.pageNumber.template}
-                        onChange={(event) => updateChromePageNumber({ template: event.target.value })}
-                      />
+                        value={resolvePageNumberTemplateValue(chromeConfig.pageNumber.template)}
+                        onChange={(event) => {
+                          if (event.target.value !== customPageNumberTemplateValue) {
+                            updateChromePageNumber({ template: event.target.value });
+                          }
+                        }}
+                      >
+                        {pageNumberTemplatePresets.map((preset) => (
+                          <option key={preset.template} value={preset.template}>
+                            {preset.label}
+                          </option>
+                        ))}
+                        {resolvePageNumberTemplateValue(chromeConfig.pageNumber.template) ===
+                        customPageNumberTemplateValue ? (
+                          <option value={customPageNumberTemplateValue}>직접 입력</option>
+                        ) : null}
+                      </select>
+                      <small>
+                        예: {renderPageNumber(chromeConfig.pageNumber.template, selectedCardNumber, cards.length)}
+                      </small>
+                      {resolvePageNumberTemplateValue(chromeConfig.pageNumber.template) ===
+                      customPageNumberTemplateValue ? (
+                        <input
+                          data-smoke-role="chrome-page-template-custom"
+                          value={chromeConfig.pageNumber.template}
+                          onChange={(event) => updateChromePageNumber({ template: event.target.value })}
+                        />
+                      ) : null}
                     </label>
                     <label>
                       <span>페이지 색</span>
@@ -3359,9 +5504,20 @@ export function App(): ReactElement {
                     <label>
                       <span>푸터 색</span>
                       <input
+                        data-smoke-role="chrome-footer-color"
                         type="color"
                         value={chromeConfig.footer.color}
                         onChange={(event) => updateChromeSlot("footer", { color: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>푸터 X</span>
+                      <input
+                        type="number"
+                        min={-40}
+                        max={40}
+                        value={chromeConfig.footer.offsetX}
+                        onChange={(event) => updateChromeSlot("footer", { offsetX: Number(event.target.value) })}
                       />
                     </label>
                     <label>
@@ -3395,11 +5551,147 @@ export function App(): ReactElement {
                     <option value="__none__">배경 없음</option>
                     {backgroundLibrary.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.displayName}
+                        {item.displayName} · {item.id.slice(-6)}
                       </option>
                     ))}
                   </select>
                 </label>
+                <div className="m22-media-panel" data-smoke-role="card-media-panel">
+                  <p className="panel-title">이 카드 이미지/영상 배경</p>
+                  <div className="segmented">
+                    {(["inherit", "asset", "none"] as const).map((mode) => (
+                      <button
+                        type="button"
+                        key={mode}
+                        className={selectedBackgroundMedia.mode === mode ? "active" : ""}
+                        data-smoke-action={`card-media-${mode}`}
+                        onClick={() =>
+                          updateSelectedOverride({
+                            backgroundMedia: setBackgroundMediaMode(
+                              selectedBackgroundMedia,
+                              mode,
+                              mediaAssets[0]?.id
+                            )
+                          })
+                        }
+                      >
+                        {mode === "inherit" ? "전역 따름" : mode === "asset" ? "로컬" : "없음"}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedBackgroundMedia.mode === "asset" ? (
+                    <label className="stack-field">
+                      <span>로컬 미디어</span>
+                      <select
+                        data-smoke-role="card-media-select"
+                        value={selectedBackgroundMedia.mediaId}
+                        onChange={(event) =>
+                          updateSelectedOverride({ backgroundMedia: assignBackgroundMediaAsset(event.target.value) })
+                        }
+                      >
+                        <option value="">선택</option>
+                        {mediaAssets.map((asset) => (
+                          <option key={asset.id} value={asset.id}>
+                            {mediaAssetLabel(asset)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <div className="row">
+                    <button type="button" className="ghost" onClick={() => setInspectorTab("media")}>
+                      미디어에서 가져오기
+                    </button>
+                  </div>
+                  {selectedCardMediaAsset ? <small className="hint">{mediaAssetLabel(selectedCardMediaAsset)}</small> : null}
+                </div>
+                <div className="m22-scene-panel" data-smoke-role="scene-controls">
+                  <p className="panel-title">영상 장면</p>
+                  <div className="layer-field-grid two">
+                    <label>
+                      <span>장면 길이 방식</span>
+                      <select
+                        data-smoke-role="scene-duration-mode"
+                        value={selectedScene.durationMode ?? "fixed"}
+                        onChange={(event) =>
+                          updateSelectedScene({
+                            durationMode:
+                              event.target.value === "fit-primary-video" ? "fit-primary-video" : "fixed"
+                          })
+                        }
+                      >
+                        <option value="fixed">직접 지정</option>
+                        <option value="fit-primary-video">영상 길이에 맞춤</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>길이(초)</span>
+                      <input
+                        data-smoke-role="scene-duration-ms"
+                        type="number"
+                        min={0.5}
+                        max={180}
+                        step={0.1}
+                        disabled={selectedScene.durationMode === "fit-primary-video"}
+                        value={Number((selectedScene.durationMs / 1000).toFixed(1))}
+                        onChange={(event) =>
+                          updateSelectedScene({ durationMs: Number(event.target.value) * 1000 })
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>전환</span>
+                      <select
+                        data-smoke-role="scene-transition"
+                        value={selectedScene.transition}
+                        onChange={(event) =>
+                          updateSelectedScene({
+                            transition:
+                              event.target.value === "fade" ||
+                              event.target.value === "slide-left" ||
+                              event.target.value === "slide-up"
+                                ? event.target.value
+                                : "none"
+                          })
+                        }
+                      >
+                        <option value="none">없음</option>
+                        <option value="fade">페이드</option>
+                        <option value="slide-left">왼쪽 슬라이드</option>
+                        <option value="slide-up">위 슬라이드</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>전환(ms)</span>
+                      <input
+                        data-smoke-role="scene-transition-ms"
+                        type="number"
+                        min={0}
+                        max={5000}
+                        step={100}
+                        value={selectedScene.transitionMs}
+                        onChange={(event) => updateSelectedScene({ transitionMs: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>대표 오디오</span>
+                      <select
+                        data-smoke-role="scene-primary-audio"
+                        value={selectedScene.primaryAudioSourceId ?? ""}
+                        onChange={(event) =>
+                          updateSelectedScene({ primaryAudioSourceId: event.target.value || null })
+                        }
+                      >
+                        <option value="">없음</option>
+                        {selectedAudioCandidates.map((candidate) => (
+                          <option key={candidate.sourceId} value={candidate.sourceId}>
+                            {candidate.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                </div>
                 <div className="badge-controls" data-smoke-role="badge-controls">
                   <p className="panel-title">배지</p>
                   <label className="stack-field">
@@ -3485,7 +5777,7 @@ export function App(): ReactElement {
                     <small>{selectedOverride?.badge?.imageHeight ?? 96}px</small>
                   </label>
                   <label className="dim-row">
-                    <span>누끼 허용치</span>
+                    <span>배경 제거 허용치</span>
                     <input
                       type="range"
                       min={1}
@@ -3549,72 +5841,99 @@ export function App(): ReactElement {
                     </>
                   ) : null}
                 </div>
-                <label className="dim-row">
-                  <span>텍스트 크기</span>
-                  <input
-                    type="range"
-                    min={65}
-                    max={135}
-                    value={Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}
-                    onChange={(event) => updateSelectedTypography("sizeScale", Number(event.target.value) / 100)}
-                  />
-                  <small>{Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}%</small>
-                </label>
-                <label className="dim-row">
-                  <span>굵기</span>
-                  <input
-                    type="range"
-                    min={100}
-                    max={950}
-                    step={50}
-                    value={selectedOverride?.typography?.weight ?? 700}
-                    onChange={(event) => updateSelectedTypography("weight", Number(event.target.value))}
-                  />
-                  <small>{selectedOverride?.typography?.weight ?? 700}</small>
-                </label>
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={selectedOverride?.typography?.italic === true}
-                    onChange={(event) => updateSelectedTypography("italic", event.target.checked)}
-                  />
-                  <span>기울임</span>
-                </label>
-                <label className="stack-field">
-                  <span>타이포 적용 범위</span>
-                  <select
-                    value={selectedOverride?.typography?.scope ?? "all"}
-                    onChange={(event) => updateSelectedTypography("scope", parseTypographyScope(event.target.value))}
-                  >
-                    <option value="all">전체</option>
-                    <option value="title">제목</option>
-                    <option value="body">본문</option>
-                  </select>
-                </label>
-                <label className="dim-row">
-                  <span>자간</span>
-                  <input
-                    data-smoke-role="typography-letter-spacing"
-                    type="range"
-                    min={-5}
-                    max={10}
-                    value={Math.round((selectedOverride?.typography?.letterSpacing ?? 0) * 100)}
-                    onChange={(event) => updateSelectedTypography("letterSpacing", Number(event.target.value) / 100)}
-                  />
-                  <small>{(selectedOverride?.typography?.letterSpacing ?? 0).toFixed(2)}em</small>
-                </label>
-                <label className="dim-row">
-                  <span>행간</span>
-                  <input
-                    data-smoke-role="typography-line-height"
-                    type="range"
-                    min={110}
-                    max={200}
-                    value={Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}
-                    onChange={(event) => updateSelectedTypography("lineHeight", Number(event.target.value) / 100)}
-                  />
-                  <small>{Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}%</small>
-                </label>
+                <div className="typography-controls" data-smoke-role="typography-controls">
+                  <p className="panel-title">타이포그래피</p>
+                  <div className="toolbar-color-row" data-smoke-role="typography-color-control">
+                    <label className="stack-field">
+                      <span>글자색</span>
+                      <input
+                        type="color"
+                        value={selectedOverride?.typography?.color ?? preset.ink}
+                        onChange={(event) => updateSelectedTypography("color", event.target.value)}
+                      />
+                    </label>
+                    <button type="button" className="ghost" onClick={() => updateSelectedTypography("color", undefined)}>
+                      스타일 기본값
+                    </button>
+                  </div>
+                  <label className="dim-row">
+                    <span>글자 투명도</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selectedOverride?.typography?.textOpacity ?? 100}
+                      onChange={(event) => updateSelectedTypography("textOpacity", Number(event.target.value))}
+                    />
+                    <small>{selectedOverride?.typography?.textOpacity ?? 100}%</small>
+                  </label>
+                  <label className="dim-row">
+                    <span>텍스트 크기</span>
+                    <input
+                      type="range"
+                      min={65}
+                      max={135}
+                      value={Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}
+                      onChange={(event) => updateSelectedTypography("sizeScale", Number(event.target.value) / 100)}
+                    />
+                    <small>{Math.round((selectedOverride?.typography?.sizeScale ?? 1) * 100)}%</small>
+                  </label>
+                  <label className="dim-row">
+                    <span>굵기</span>
+                    <input
+                      type="range"
+                      min={100}
+                      max={950}
+                      step={50}
+                      value={selectedOverride?.typography?.weight ?? 700}
+                      onChange={(event) => updateSelectedTypography("weight", Number(event.target.value))}
+                    />
+                    <small>{selectedOverride?.typography?.weight ?? 700}</small>
+                  </label>
+                  <label className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedOverride?.typography?.italic === true}
+                      onChange={(event) => updateSelectedTypography("italic", event.target.checked)}
+                    />
+                    <span>기울임</span>
+                  </label>
+                  <label className="stack-field">
+                    <span>타이포 적용 범위</span>
+                    <select
+                      value={selectedOverride?.typography?.scope ?? "all"}
+                      onChange={(event) => updateSelectedTypography("scope", parseTypographyScope(event.target.value))}
+                    >
+                      <option value="all">전체</option>
+                      <option value="title">제목</option>
+                      <option value="body">본문</option>
+                    </select>
+                  </label>
+                  <label className="dim-row">
+                    <span>자간</span>
+                    <input
+                      data-smoke-role="typography-letter-spacing"
+                      type="range"
+                      min={-5}
+                      max={10}
+                      value={Math.round((selectedOverride?.typography?.letterSpacing ?? 0) * 100)}
+                      onChange={(event) => updateSelectedTypography("letterSpacing", Number(event.target.value) / 100)}
+                    />
+                    <small>{(selectedOverride?.typography?.letterSpacing ?? 0).toFixed(2)}em</small>
+                  </label>
+                  <label className="dim-row">
+                    <span>행간</span>
+                    <input
+                      data-smoke-role="typography-line-height"
+                      type="range"
+                      min={110}
+                      max={200}
+                      value={Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}
+                      onChange={(event) => updateSelectedTypography("lineHeight", Number(event.target.value) / 100)}
+                    />
+                    <small>{Math.round((selectedOverride?.typography?.lineHeight ?? 1.1) * 100)}%</small>
+                  </label>
+                </div>
                 <label className="dim-row">
                   <span>밝기</span>
                   <input
@@ -3664,8 +5983,31 @@ export function App(): ReactElement {
                     중앙
                   </button>
                 </div>
+                <label className="stack-field">
+                  <span>제목 배치</span>
+                  <select
+                    value={selectedOverride?.layout?.titlePlacement?.mode ?? "flow"}
+                    onChange={(event) => updateSelectedTitlePlacement(event.target.value === "card-y" ? "card-y" : "flow")}
+                  >
+                    <option value="flow">콘텐츠 흐름에 맞춤</option>
+                    <option value="card-y">카드 전체에서 직접 배치</option>
+                  </select>
+                </label>
+                {selectedOverride?.layout?.titlePlacement?.mode === "card-y" ? (
+                  <label className="dim-row">
+                    <span>제목 Y</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={selectedOverride.layout.titlePlacement.y}
+                      onChange={(event) => updateSelectedTitlePlacement("card-y", Number(event.target.value))}
+                    />
+                    <small>{selectedOverride.layout.titlePlacement.y}%</small>
+                  </label>
+                ) : null}
                 <label className="dim-row">
-                  <span>세로 위치</span>
+                  <span>콘텐츠 묶음 위치</span>
                   <input
                     type="range"
                     min={-20}
@@ -3709,9 +6051,9 @@ export function App(): ReactElement {
                   />
                   <small>{Math.round((selectedOverride?.dim ?? backgroundDim) * 100)}%</small>
                 </label>
-                <div className="layer-controls">
+                <div className="layer-controls" data-smoke-role="layer-controls">
                   <p className="panel-title">레이어</p>
-                  <div className="row">
+                  <div className="inspector-action-grid four">
                     <button type="button" data-smoke-action="add-text-layer" onClick={() => addLayer("text")}>
                       텍스트 박스
                     </button>
@@ -3723,6 +6065,16 @@ export function App(): ReactElement {
                     </button>
                     <button type="button" onClick={() => addLayer("image")}>
                       이미지
+                    </button>
+                    <button type="button" data-smoke-action="add-video-layer" onClick={() => addLayer("video")}>
+                      영상
+                    </button>
+                    <button
+                      type="button"
+                      data-smoke-action="import-video-layer"
+                      onClick={() => void importMediaForSelection("video")}
+                    >
+                      영상 파일
                     </button>
                   </div>
                   {selectedLayer ? (
@@ -3762,6 +6114,21 @@ export function App(): ReactElement {
                               )
                             }
                           />
+                          <label className="dim-row">
+                            <span>글자 투명도</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={selectedLayer.textOpacity ?? 100}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "text" ? { ...layer, textOpacity: Number(event.target.value) } : layer
+                                )
+                              }
+                            />
+                            <small>{selectedLayer.textOpacity ?? 100}%</small>
+                          </label>
                           <div className="layer-field-grid three">
                             <label>
                               <span>글자 색</span>
@@ -3987,6 +6354,105 @@ export function App(): ReactElement {
                             <option value="cover">채우기</option>
                             <option value="contain">맞추기</option>
                           </select>
+                        </div>
+                      ) : null}
+                      {selectedLayer.kind === "video" ? (
+                        <div className="selected-layer-fields" data-smoke-role="video-layer-controls">
+                          <label className="stack-field">
+                            <span>영상 파일</span>
+                            <select
+                              data-smoke-role="video-layer-media-select"
+                              value={selectedLayer.mediaId}
+                              onChange={(event) =>
+                                updateSelectedLayer((layer) =>
+                                  layer.kind === "video" ? { ...layer, mediaId: event.target.value } : layer
+                                )
+                              }
+                            >
+                              <option value="">선택</option>
+                              {mediaAssets
+                                .filter((asset) => asset.kind === "video")
+                                .map((asset) => (
+                                  <option key={asset.id} value={asset.id}>
+                                    {mediaAssetLabel(asset)}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <button type="button" className="ghost" onClick={() => setInspectorTab("media")}>
+                            미디어 탭 열기
+                          </button>
+                          <div className="layer-field-grid two">
+                            <label>
+                              <span>맞춤</span>
+                              <select
+                                value={selectedLayer.objectFit}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "video"
+                                      ? { ...layer, objectFit: event.target.value === "contain" ? "contain" : "cover" }
+                                      : layer
+                                  )
+                                }
+                              >
+                                <option value="cover">채우기</option>
+                                <option value="contain">맞추기</option>
+                              </select>
+                            </label>
+                            <label>
+                              <span>볼륨</span>
+                              <input
+                                data-smoke-role="video-layer-volume"
+                                type="number"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={selectedLayer.volume}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "video" ? { ...layer, volume: Number(event.target.value) } : layer
+                                  )
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>시작(ms)</span>
+                              <input
+                                data-smoke-role="video-layer-clip-start"
+                                type="number"
+                                min={0}
+                                step={100}
+                                value={selectedLayer.clipStartMs}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "video"
+                                      ? { ...layer, clipStartMs: Math.max(0, Number(event.target.value)) }
+                                      : layer
+                                  )
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>끝(ms)</span>
+                              <input
+                                data-smoke-role="video-layer-clip-end"
+                                type="number"
+                                min={0}
+                                step={100}
+                                value={selectedLayer.clipEndMs ?? ""}
+                                onChange={(event) =>
+                                  updateSelectedLayer((layer) =>
+                                    layer.kind === "video"
+                                      ? {
+                                          ...layer,
+                                          clipEndMs: event.target.value === "" ? null : Math.max(0, Number(event.target.value))
+                                        }
+                                      : layer
+                                  )
+                                }
+                              />
+                            </label>
+                          </div>
                         </div>
                       ) : null}
                     </div>
@@ -4256,22 +6722,114 @@ export function App(): ReactElement {
                   전역 설정으로 초기화
                 </button>
               </div>
-            ) : (
-              <div className="card-design-controls">
-                {renderEditionLock("card_design", "카드 디자인", "레이어, 카드별 색감/레이아웃, 타이포 미세 조정은 Pro에서 열립니다.")}
-                {renderEditionLock("chrome_style", "상단/하단 바 스타일", "헤더, 멘션, 페이지 번호의 색상·위치·표시 설정은 Pro에서 열립니다.")}
-                {renderEditionLock("overlay_edit", "편집 오버레이", "스테이지 위 직접 선택, 이동, 끝점 편집은 Pro에서 열립니다.")}
-                {renderEditionLock("badge_image", "이미지 배지", "이미지 배지, 배지 모양, 배경 제거는 Pro에서 열립니다.")}
-                {renderEditionLock("next_hint_image", "넘김 기호 이미지", "넘김 기호 이미지 선택과 높이 조정은 Pro에서 열립니다.")}
-              </div>
             )}
             <div className="row">
-              <button type="button" onClick={addCard}>
+              <button type="button" data-smoke-action="design-panel-add-card" onClick={addCard}>
                 카드 추가
               </button>
-              <button type="button" className="ghost" onClick={removeCard}>
+              <button type="button" className="ghost" data-smoke-action="design-panel-remove-card" onClick={removeCard}>
                 이 카드 삭제
               </button>
+            </div>
+          </section>
+
+          <section className="panel media-panel" hidden={inspectorTab !== "media"}>
+            <p className="panel-title">미디어</p>
+            <ol className="media-workflow">
+              <li>이미지 또는 영상을 라이브러리로 가져옵니다.</li>
+              <li>적용할 위치를 현재 카드, 모든 카드, 영상 레이어 중에서 선택합니다.</li>
+            </ol>
+            <div className="inspector-action-grid two">
+              <button
+                type="button"
+                data-smoke-action="import-media-image"
+                onClick={() => void importMediaForSelection("image")}
+              >
+                이미지 가져오기
+              </button>
+              <button
+                type="button"
+                data-smoke-action="import-media-video"
+                onClick={() => void importMediaForSelection("video")}
+              >
+                영상 가져오기
+              </button>
+            </div>
+            <button type="button" className="ghost wide-action" onClick={() => void refreshMediaAssets()}>
+              라이브러리 새로고침
+            </button>
+
+            <div className="media-scope-summary">
+              <strong>현재 적용 상태</strong>
+              <span>
+                모든 카드: {selectedGlobalMediaAsset ? mediaAssetLabel(selectedGlobalMediaAsset) : "미디어 없음"}
+              </span>
+              <span>
+                카드 {selectedCardNumber}: {selectedCardMediaAsset ? mediaAssetLabel(selectedCardMediaAsset) : "전역 따름"}
+              </span>
+            </div>
+
+            <div className="m22-media-panel" data-smoke-role="global-media-panel">
+              <p className="panel-title">모든 카드 배경</p>
+              <div className="segmented">
+                {(["inherit", "asset", "none"] as const).map((mode) => (
+                  <button
+                    type="button"
+                    key={mode}
+                    className={backgroundMedia.mode === mode ? "active" : ""}
+                    data-smoke-action={`global-media-${mode}`}
+                    onClick={() =>
+                      setBackgroundMedia(setBackgroundMediaMode(backgroundMedia, mode, mediaAssets[0]?.id))
+                    }
+                  >
+                    {mode === "inherit" ? "기본 배경" : mode === "asset" ? "라이브러리" : "미디어 없음"}
+                  </button>
+                ))}
+              </div>
+              {backgroundMedia.mode === "asset" ? (
+                <label className="stack-field">
+                  <span>전역 미디어</span>
+                  <select
+                    data-smoke-role="global-media-select"
+                    value={backgroundMedia.mediaId}
+                    onChange={(event) => setBackgroundMedia(assignBackgroundMediaAsset(event.target.value))}
+                  >
+                    <option value="">선택</option>
+                    {mediaAssets.map((asset) => (
+                      <option key={asset.id} value={asset.id}>
+                        {mediaAssetLabel(asset)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </div>
+
+            <div className="media-library" data-smoke-role="media-library">
+              <div className="section-row">
+                <strong>가져온 파일</strong>
+                <small>{mediaAssets.length}개</small>
+              </div>
+              {mediaAssets.length === 0 ? (
+                <p className="hint">아직 가져온 미디어가 없습니다.</p>
+              ) : (
+                <div className="media-library-list">
+                  {mediaAssets.map((asset) => (
+                    <button
+                      type="button"
+                      className="media-library-item"
+                      key={asset.id}
+                      onClick={() => {
+                        setPendingMediaAsset(asset);
+                        void loadMediaPreview(asset.id);
+                      }}
+                    >
+                      <span>{mediaAssetLabel(asset)}</span>
+                      <small>적용 위치 선택</small>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
 
@@ -4317,8 +6875,62 @@ export function App(): ReactElement {
                 </div>
               </div>
             ) : (
-              <span className="hint">PNG 생성 버튼을 누르면 전체 카드를 렌더링합니다.</span>
+              <span className="hint">상단 내보내기에서 PNG 또는 MP4를 선택하세요.</span>
             )}
+            <div className="video-export-panel" data-smoke-role="mp4-export-panel">
+              <p className="panel-title">MP4 영상 내보내기</p>
+              <small className="hint">
+                {videoExportSummary.label}
+                {videoExportSummary.warningCount > 0 ? ` · 경고 ${videoExportSummary.warningCount}` : ""}
+              </small>
+              <div className="row">
+                <button
+                  type="button"
+                  className="ghost"
+                  data-smoke-action="cancel-video-export"
+                  onClick={() => void cancelVideoExport()}
+                  disabled={!isVideoExporting || !activeVideoExportJobId}
+                >
+                  취소
+                </button>
+              </div>
+              {videoExportProgress ? (
+                <div className="video-export-progress" data-smoke-role="mp4-export-progress">
+                  <progress value={Math.round(videoExportProgress.percent)} max={100} />
+                  <strong>
+                    {videoExportStageLabel(videoExportProgress.stage)} ·{" "}
+                    {Math.round(videoExportProgress.percent)}%
+                  </strong>
+                  <span>
+                    경과 {formatElapsedMs(videoExportProgress.elapsedMs)}
+                    {videoExportProgress.totalFrames
+                      ? ` · 프레임 ${videoExportProgress.completedFrames ?? 0}/${videoExportProgress.totalFrames}`
+                      : ""}
+                  </span>
+                  {videoExportProgress.message ? <span>{videoExportProgress.message}</span> : null}
+                </div>
+              ) : null}
+              {videoExportError ? (
+                <div className="video-export-error" role="alert" data-smoke-role="mp4-export-error">
+                  <strong>내보내기를 완료하지 못했습니다.</strong>
+                  <span>{videoExportError.message}</span>
+                  <small>오류 코드: {videoExportError.code}</small>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void startVideoExport()}
+                    disabled={isVideoExporting}
+                  >
+                    다시 시도
+                  </button>
+                </div>
+              ) : null}
+              {videoExportResult ? (
+                <small className="hint" data-smoke-role="mp4-export-result">
+                  저장됨: {videoExportResult.filePath} · {videoExportResult.framesWritten} frames
+                </small>
+              ) : null}
+            </div>
             {hasProTools ? (
             <div className="project-panel">
               <p className="panel-title">프로젝트</p>
@@ -4337,6 +6949,53 @@ export function App(): ReactElement {
             {hasProTools ? (
             <div className="bulk-panel">
               <p className="panel-title">CSV 대량 생성</p>
+              <details className="bulk-binding-manager">
+                <summary>양식 변수 연결 ({bulkBindings?.bindings.length ?? 0})</summary>
+                <p className="hint">CSV 열로 바꿀 항목을 선택하세요. 텍스트 레이어도 페이지별로 연결됩니다.</p>
+                <div className="bulk-binding-list">
+                  {([
+                    ["header", "공통 헤더", headerLabel],
+                    ["footer", "공통 푸터", footerAccount]
+                  ] as const).map(([field, label, value]) => {
+                    const target: BulkBindingTarget = { kind: "deck", field };
+                    return renderBulkBindingControl(target, label, value, field);
+                  })}
+                  {parsedEntries.map((entry, cardIndex) => (
+                    <div className="bulk-binding-card" key={`bulk-card-${cardIndex + 1}`}>
+                      <strong>{cardIndex + 1}페이지</strong>
+                      {cardStandardBindingEntries(entry.card).map((option) => {
+                        const target: BulkBindingTarget = {
+                          kind: "standard",
+                          cardNumber: cardIndex + 1,
+                          field: option.field
+                        };
+                        return renderBulkBindingControl(
+                          target,
+                          `${cardIndex + 1}페이지 ${option.label}`,
+                          option.value,
+                          `${cardIndex + 1}-${option.field}`
+                        );
+                      })}
+                      {(overrides[String(cardIndex + 1)]?.layers ?? [])
+                        .filter((layer): layer is CardTextBoxLayer => layer.kind === "text")
+                        .map((layer, layerIndex) => {
+                          const target: BulkBindingTarget = {
+                            kind: "layer-text",
+                            cardNumber: cardIndex + 1,
+                            layerId: layer.id,
+                            property: "text"
+                          };
+                          return renderBulkBindingControl(
+                            target,
+                            `${cardIndex + 1}페이지 텍스트 ${layerIndex + 1}`,
+                            layer.text,
+                            `${cardIndex + 1}-${layer.id}`
+                          );
+                        })}
+                    </div>
+                  ))}
+                </div>
+              </details>
               <div className="row">
                 <button type="button" onClick={exportBulkTemplate}>
                   CSV 템플릿
@@ -4421,17 +7080,82 @@ export function App(): ReactElement {
                   </button>
                 </div>
                 {selectedAiProvider && !selectedAiProvider.installed ? (
-                  <div className="ai-install-hint">
-                    <span>{selectedAiProvider.installHint}</span>
-                    <button type="button" className="ghost" onClick={copySelectedAiInstallHint}>
-                      복사
-                    </button>
+                  <div className="ai-install-panel" data-smoke-role="ai-install-panel">
+                    <strong>{selectedAiProvider.label} 설치</strong>
+                    {selectedAiProvider.installRecipes?.length ? (
+                      selectedAiProvider.installRecipes.map((recipe) => (
+                        <div className="ai-install-recipe" key={recipe.id}>
+                          <div>
+                            <span>
+                              {recipe.method}
+                              {recipe.recommended ? " · 권장" : " · 대안"}
+                            </span>
+                            <code>{recipe.commandDisplay}</code>
+                            <small>{recipe.prerequisites.join(" ")}</small>
+                          </div>
+                          <div className="ai-install-actions">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void openExternalLink(recipe.officialUrl)}
+                            >
+                              공식 안내
+                            </button>
+                            <button
+                              type="button"
+                              disabled={aiInstallBusy}
+                              onClick={() => void installSelectedAiProvider(recipe.id)}
+                            >
+                              {aiInstallBusy ? "설치 확인 중..." : "설치"}
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="ai-install-hint">
+                        <span>{selectedAiProvider.installHint}</span>
+                        <button type="button" className="ghost" onClick={copySelectedAiInstallHint}>
+                          복사
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : null}
                 <small className="hint">{aiStatus}</small>
+                <div className="ai-default-instruction" data-smoke-role="ai-default-instruction-editor">
+                  <label className="stack-field">
+                    <span>AI 기본 지시문</span>
+                    <textarea
+                      value={aiDefaultInstructionDraft}
+                      onChange={(event) => setAiDefaultInstructionDraft(event.target.value)}
+                      placeholder={defaultAiInstruction}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <div className="ai-composer-actions">
+                    <button
+                      type="button"
+                      className="ghost"
+                      data-smoke-action="reset-ai-default-instruction"
+                      onClick={resetAiDefaultInstructionDraft}
+                    >
+                      기본값
+                    </button>
+                    <button
+                      type="button"
+                      data-smoke-action="save-ai-default-instruction"
+                      onClick={() => void saveAiDefaultInstruction()}
+                    >
+                      지시문 저장
+                    </button>
+                  </div>
+                </div>
                 <div className="ai-thread" data-smoke-role="ai-thread">
                   {aiThread.length === 0 ? (
-                    <p className="hint">AI와 대화하며 카드뉴스 대본을 만들 수 있습니다.</p>
+                    <div className="ai-welcome ai-bubble assistant">
+                      <strong>안녕하세요. 꽁돈 AI입니다.</strong>
+                      <p>아이디어 탐색부터 정보 정리, 문구와 카드 구성까지 편하게 대화로 함께 만들어요.</p>
+                    </div>
                   ) : (
                     aiThread.map((message) => (
                       <div
@@ -4440,11 +7164,18 @@ export function App(): ReactElement {
                         data-smoke-role={message.role === "assistant" ? "ai-assistant-bubble" : "ai-user-bubble"}
                       >
                         {message.status === "loading" ? (
-                          <span className="ai-loading">작성 중...</span>
+                          <p className="ai-loading" data-smoke-role="ai-progress">
+                            {message.content}
+                          </p>
                         ) : message.detectedDraft ? (
                           <p>양식.md 응답을 감지했습니다.</p>
                         ) : (
-                          <p>{message.content}</p>
+                          <>
+                            {message.capabilityNote ? (
+                              <span className="ai-capability-note">{message.capabilityNote}</span>
+                            ) : null}
+                            <p>{message.content}</p>
+                          </>
                         )}
                         {message.detectedDraft ? (
                           <div className="ai-draft-detection">
@@ -4464,33 +7195,49 @@ export function App(): ReactElement {
                             </button>
                           </div>
                         ) : null}
-                        {message.status === "error" && message.retryPrompt ? (
+                        {message.status === "error" && message.retryRequest ? (
                           <button
                             type="button"
                             className="ghost"
                             data-smoke-action="ai-retry"
-                            onClick={() => void sendAiMessage(message.retryPrompt)}
+                            onClick={() => retryAiMessage(message.retryRequest)}
                             disabled={aiBusy}
                           >
                             다시 시도
                           </button>
+                        ) : null}
+                        {message.nextActions && message.nextActions.length > 0 ? (
+                          <div className="ai-next-actions">
+                            {message.nextActions.map((action) => (
+                              <button
+                                type="button"
+                                className="ghost"
+                                key={`${message.id}-${action.kind}-${action.label}`}
+                                data-smoke-action={aiNextActionSmokeId(action)}
+                                onClick={() => handleAiNextAction(action)}
+                                disabled={aiBusy}
+                              >
+                                {action.label}
+                              </button>
+                            ))}
+                          </div>
                         ) : null}
                       </div>
                     ))
                   )}
                 </div>
                 <div className="ai-preset-chips">
-                  <button type="button" onClick={() => fillAiPreset("topic")}>
-                    주제
+                  <button type="button" data-smoke-action="ai-preset-topic" onClick={() => runAiPreset("topic")}>
+                    주제 아이디어
                   </button>
-                  <button type="button" onClick={() => fillAiPreset("research")}>
-                    리서치
+                  <button type="button" data-smoke-action="ai-preset-research" onClick={() => runAiPreset("research")}>
+                    자료 정리
                   </button>
-                  <button type="button" data-smoke-action="ai-preset-draft" onClick={() => fillAiPreset("draft")}>
-                    대본
+                  <button type="button" data-smoke-action="ai-preset-draft" onClick={() => runAiPreset("draft")}>
+                    카드 구성
                   </button>
-                  <button type="button" onClick={() => fillAiPreset("image")}>
-                    이미지
+                  <button type="button" data-smoke-action="ai-preset-image" onClick={() => runAiPreset("image")}>
+                    이미지 방향
                   </button>
                 </div>
                 <textarea
@@ -4505,15 +7252,12 @@ export function App(): ReactElement {
                       void sendAiMessage();
                     }
                   }}
-                  placeholder="메시지를 입력하세요."
+                  placeholder="무엇을 만들고 싶은지 편하게 말씀해주세요. Shift+Enter로 줄바꿈할 수 있어요."
                   spellCheck={false}
                 />
                 <div className="ai-composer-actions">
-                  <button type="button" className="ghost" onClick={resetAiThread}>
+                  <button type="button" className="ghost" data-smoke-action="ai-reset-thread" onClick={resetAiThread}>
                     새 대화
-                  </button>
-                  <button type="button" className="ghost" onClick={applyMockAiDraft}>
-                    샘플 적용
                   </button>
                   <button
                     type="button"
@@ -4532,11 +7276,192 @@ export function App(): ReactElement {
           </aside>
         </div>
       ) : null}
+      {exportDialogOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="export-dialog-title">
+           <div
+             ref={exportDialogRef}
+             className="export-dialog"
+             data-smoke-role="export-dialog"
+             tabIndex={-1}
+           >
+            <div className="modal-header">
+              <strong id="export-dialog-title">내보내기</strong>
+              <button type="button" className="ghost" onClick={() => setExportDialogOpen(false)}>
+                닫기
+              </button>
+            </div>
+            <p className="hint">카드 이미지 묶음 또는 세로형 영상을 선택하세요.</p>
+            <div className="export-choice-grid">
+              <button
+                type="button"
+                data-smoke-action="export-png-choice"
+                onClick={() => {
+                  setExportDialogOpen(false);
+                  void runGenerate();
+                }}
+              >
+                <strong>PNG 카드</strong>
+                <span>전체 카드를 렌더링한 뒤 현재 PNG 또는 ZIP으로 저장</span>
+              </button>
+              <button
+                type="button"
+                data-smoke-action="export-mp4-choice"
+                onClick={() => {
+                  setVideoProjectMode("video");
+                  setExportDialogOpen(false);
+                  void startVideoExport();
+                }}
+              >
+                <strong>MP4 영상</strong>
+                <span>카드별 시간과 전환을 적용한 1080×1920 영상</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {pendingMediaAsset ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="media-assignment-title">
+          <div className="media-assignment-dialog" data-smoke-role="media-assignment-dialog">
+            <div className="modal-header">
+              <strong id="media-assignment-title">가져온 미디어 적용</strong>
+              <button type="button" className="ghost" onClick={() => setPendingMediaAsset(null)}>
+                나중에
+              </button>
+            </div>
+            <p>{mediaAssetLabel(pendingMediaAsset)}</p>
+            {mediaPreviews[pendingMediaAsset.id] ? (
+              pendingMediaAsset.kind === "video" ? (
+                <video src={mediaPreviews[pendingMediaAsset.id]} controls muted playsInline />
+              ) : (
+                <img src={mediaPreviews[pendingMediaAsset.id]} alt="" />
+              )
+            ) : null}
+             <div className="media-assignment-grid">
+               <button type="button" onClick={() => assignImportedMedia("card")}>
+                 현재 카드 배경
+               </button>
+              <button type="button" onClick={() => assignImportedMedia("global")}>
+                모든 카드 배경
+              </button>
+              <button
+                type="button"
+                disabled={pendingMediaAsset.kind !== "video"}
+                onClick={() => assignImportedMedia("video-layer")}
+               >
+                 현재 카드 영상 레이어
+               </button>
+               <button
+                 type="button"
+                 className="ghost"
+                 onClick={() => {
+                   setPendingMediaAsset(null);
+                   setStatus("미디어를 보관함에 추가했습니다. 카드에는 아직 적용하지 않았습니다.");
+                 }}
+               >
+                 보관함에만 추가
+               </button>
+             </div>
+          </div>
+        </div>
+      ) : null}
+      {backgroundManagerOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="background manager">
+          <div className="image-picker-modal" data-smoke-role="background-manager-modal">
+            <div className="modal-header">
+              <strong>배경 이미지 관리</strong>
+              <button type="button" className="ghost" onClick={closeBackgroundManager}>
+                닫기
+              </button>
+            </div>
+            <div className="image-picker-toolbar">
+              <button type="button" data-smoke-action="background-manager-add" onClick={addBackground}>
+                파일 추가
+              </button>
+              <input
+                className="image-picker-search"
+                data-smoke-role="background-manager-search"
+                value={backgroundManagerSearch}
+                onChange={(event) => setBackgroundManagerSearch(event.target.value)}
+                placeholder="파일 이름 또는 ID 검색"
+              />
+              <button
+                type="button"
+                className="ghost danger"
+                data-smoke-action="background-manager-delete"
+                onClick={() => void deleteManagedBackground()}
+                disabled={backgroundManagerDeleteDisabled}
+                title={
+                  backgroundManagerUsages.length > 0
+                    ? "사용 중인 배경은 전역/카드/레이어에서 먼저 해제해야 합니다."
+                    : "선택한 배경 이미지를 삭제합니다."
+                }
+              >
+                {backgroundManagerBusy ? "처리 중" : "삭제"}
+              </button>
+            </div>
+            {backgroundManagerSelectedId && backgroundPreviews[backgroundManagerSelectedId] ? (
+              <div className="image-picker-preview" data-smoke-role="background-manager-selected-preview">
+                <img src={backgroundPreviews[backgroundManagerSelectedId]} alt="" />
+              </div>
+            ) : null}
+            {backgroundManagerUsages.length > 0 ? (
+              <small className="hint danger-hint">
+                사용 중: {backgroundManagerUsages.map((usage) => usage.label).join(", ")}
+              </small>
+            ) : null}
+            <div className="image-picker-grid" data-smoke-role="background-manager-grid">
+              {filteredBackgroundLibrary.map((item) => (
+                <button
+                  type="button"
+                  key={item.id}
+                  className={`image-picker-item${backgroundManagerSelectedId === item.id ? " active" : ""}`}
+                  data-smoke-action="background-manager-select"
+                  data-smoke-background-id={item.id}
+                  onClick={() => {
+                    setBackgroundManagerSelectedId(item.id);
+                    void loadBackgroundPreview(item.id);
+                  }}
+                >
+                  {backgroundPreviews[item.id] ? <img src={backgroundPreviews[item.id]} alt="" /> : <span>미리보기</span>}
+                  <small title={`${item.displayName} · ${item.id}`}>
+                    <span>{item.displayName}</span>
+                    <span className="image-picker-id">{item.id.slice(-6)}</span>
+                  </small>
+                </button>
+              ))}
+            </div>
+            <div className="image-picker-actions">
+              <button
+                type="button"
+                className="ghost"
+                data-smoke-action="background-manager-clear"
+                onClick={() => setBackgroundManagerSelectedId(null)}
+              >
+                배경 없음
+              </button>
+              <button
+                type="button"
+                className="primary"
+                data-smoke-action="background-manager-apply"
+                onClick={() => void applyManagedBackground()}
+              >
+                전역 배경으로 적용
+              </button>
+            </div>
+            {backgroundManagerSelectedItem ? (
+              <small className="hint">
+                {backgroundManagerSelectedItem.displayName} · {backgroundManagerSelectedItem.id}
+                {backgroundManagerSelectedItem.attribution ? ` · ${backgroundManagerSelectedItem.attribution}` : ""}
+              </small>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {imagePickerTarget ? (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="image picker">
           <div className="image-picker-modal" data-smoke-role="image-picker-modal">
             <div className="modal-header">
-              <strong>이미지 선택</strong>
+              <strong>이미지 관리</strong>
               <button type="button" className="ghost" onClick={closeImagePicker}>
                 닫기
               </button>
@@ -4545,8 +7470,15 @@ export function App(): ReactElement {
               <button type="button" data-smoke-action="image-picker-add" onClick={addImageThroughPicker}>
                 파일 추가
               </button>
+              <input
+                className="image-picker-search"
+                data-smoke-role="image-picker-search"
+                value={imagePickerSearch}
+                onChange={(event) => setImagePickerSearch(event.target.value)}
+                placeholder="이름 또는 ID 검색"
+              />
               <label className="dim-row">
-                <span>배경 제거</span>
+                <span>다음 배경 제거에 적용</span>
                 <input
                   type="range"
                   min={1}
@@ -4564,14 +7496,27 @@ export function App(): ReactElement {
               >
                 {imagePickerBusy ? "처리 중" : "배경 제거"}
               </button>
+              <button
+                type="button"
+                className="ghost danger"
+                data-smoke-action="image-picker-delete"
+                onClick={() => void deleteSelectedPickerImage()}
+                disabled={imagePickerDeleteDisabled}
+                title={imagePickerUsages.length > 0 ? "사용 중인 이미지는 먼저 카드에서 해제해야 합니다." : "선택한 이미지를 삭제합니다."}
+              >
+                삭제
+              </button>
             </div>
             {imagePickerSelectedId && imagePreviews[imagePickerSelectedId] ? (
               <div className="image-picker-preview checkerboard" data-smoke-role="image-picker-selected-preview">
                 <img src={imagePreviews[imagePickerSelectedId]} alt="" />
               </div>
             ) : null}
+            {imagePickerUsages.length > 0 ? (
+              <small className="hint danger-hint">사용 중: {imagePickerUsages.map((usage) => usage.label).join(", ")}</small>
+            ) : null}
             <div className="image-picker-grid" data-smoke-role="image-picker-grid">
-              {imageLibrary.map((item) => (
+              {filteredImageLibrary.map((item) => (
                 <button
                   type="button"
                   key={item.id}
@@ -4584,7 +7529,10 @@ export function App(): ReactElement {
                   }}
                 >
                   {imagePreviews[item.id] ? <img src={imagePreviews[item.id]} alt="" /> : <span>미리보기</span>}
-                  <small>{item.displayName}</small>
+                  <small title={item.id}>
+                    <span>{item.displayName}</span>
+                    <span className="image-picker-id">{item.id.slice(-6)}</span>
+                  </small>
                 </button>
               ))}
             </div>
@@ -4655,7 +7603,7 @@ export function App(): ReactElement {
             </div>
             <p>Creator credit</p>
             <button type="button" className="credit-link" onClick={() => void openExternalLink(threadsUrl)}>
-              Threads @
+              Threads {threadsDisplay}
             </button>
             <button type="button" className="ghost" onClick={() => void openExternalLink(kakaoInquiryUrl)}>
               AX문의/강의 문의

@@ -112,9 +112,13 @@ describe("parseDeckDocument", () => {
   });
 
   it("round-trips its own template document", () => {
-    const doc = expectDocument(parseDeckDocument(buildTemplateDocument(styleNames), styleNames));
+    const template = buildTemplateDocument(styleNames);
+    const doc = expectDocument(parseDeckDocument(template, styleNames));
 
     expect(doc.headerLabel).toBe("MONEY NOTE");
+    expect(template).toContain("푸터: @kkongdon_story");
+    expect(template).not.toContain("멘션: @kkongdon_story");
+    expect(doc.footerAccount).toBe("@kkongdon_story");
     expect(doc.styleId).toBe("newsprint");
     expect(doc.cards.length).toBeGreaterThanOrEqual(3);
     expect(doc.warnings).toHaveLength(0);
@@ -128,8 +132,14 @@ describe("parseDeckDocument (비율)", () => {
     );
     expect(ok.aspectRatio).toBe("16:9");
 
+    const vertical = expectDocument(
+      parseDeckDocument("비율: 9:16\n---\n제목: 세로 카드", styleNames)
+    );
+    expect(vertical.aspectRatio).toBe("9:16");
+    expect(vertical.warnings).toHaveLength(0);
+
     const bad = expectDocument(
-      parseDeckDocument("비율: 9:16\n---\n제목: 카드", styleNames)
+      parseDeckDocument("비율: 3:2\n---\n제목: 카드", styleNames)
     );
     expect(bad.aspectRatio).toBeUndefined();
     expect(bad.warnings).toHaveLength(1);

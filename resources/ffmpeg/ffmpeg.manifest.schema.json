@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://story.kkongdon.cardnews/schemas/ffmpeg.manifest.schema.json",
+  "title": "Cardnews Studio trusted FFmpeg manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "binaryPresent",
+    "trustStatus",
+    "executableRelativePath",
+    "sha256",
+    "versionPattern",
+    "requiredEncoders",
+    "forbiddenBuildConfigurationTokens",
+    "licenseNotice",
+    "sourceOfferUrl",
+    "buildRecipeUrl",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "binaryPresent": {
+      "type": "boolean",
+      "description": "True only when the reviewed, hash-pinned release binaries are present."
+    },
+    "trustStatus": {
+      "enum": ["placeholder-only-not-approved", "trusted-pinned-lgpl-build"]
+    },
+    "executableRelativePath": {
+      "type": "string",
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+\\.exe$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "probeRelativePath": {
+      "type": "string",
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+\\.exe$"
+    },
+    "probeSha256": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "versionPattern": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requiredEncoders": {
+      "type": "array",
+      "uniqueItems": true,
+      "contains": {
+        "const": "h264_mf"
+      },
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbiddenBuildConfigurationTokens": {
+      "type": "array",
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "const": "--enable-gpl"
+          }
+        },
+        {
+          "contains": {
+            "const": "--enable-nonfree"
+          }
+        },
+        {
+          "contains": {
+            "const": "--enable-libx264"
+          }
+        }
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "licenseNotice": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceOfferUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "buildRecipeUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewedBy", "reviewedAt", "upstreamVersion", "downloadUrl", "notes"],
+      "properties": {
+        "reviewedBy": {
+          "type": "string"
+        },
+        "reviewedAt": {
+          "type": "string"
+        },
+        "upstreamVersion": {
+          "type": "string"
+        },
+        "downloadUrl": {
+          "type": "string"
+        },
+        "archiveSha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

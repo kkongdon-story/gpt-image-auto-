@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Card, Deck } from "../domain/types.js";
+import { aspectRatios } from "../domain/aspectRatios.js";
+import type { Card, CardOverride, Deck } from "../domain/types.js";
 import { buildCardHtml, buildFontFaceCss } from "./cardTemplate.js";
 import { findStylePreset, stylePresets } from "./stylePresets.js";
 
@@ -28,6 +29,33 @@ function sampleDeck(overrides: Partial<Deck> = {}): Deck {
 }
 
 describe("buildCardHtml (style presets)", () => {
+  it("uses the card viewport as the containing block for saved semantic item geometry", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        semanticItemPlacements: {
+          title: {
+            mode: "card",
+            x: 10,
+            y: 12,
+            width: 70,
+            height: 20,
+            anchor: "top-left"
+          }
+        }
+      }
+    });
+
+    expect(html).toContain("position: absolute !important");
+    expect(html).not.toContain("position: fixed !important");
+    expect(html).toContain("--editor-card-left: 10.000");
+    expect(html).toContain("window.__CARDNEWS_SYNC_SEMANTIC_PLACEMENTS__");
+    expect(html).toContain("height: 20.000% !important");
+    expect(html).toContain("transform: none !important");
+  });
+
   it("renders *단어* emphasis as an accent highlight, not literal asterisks", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,
@@ -89,6 +117,56 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).toContain("letter-spacing: 0.000em");
   });
 
+  it("applies typography color overrides by scope without touching badge or emphasis color", () => {
+    const all = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        badge: { textColor: "#0f172a" },
+        typography: { color: "#112233", scope: "all" }
+      }
+    });
+    const titleOnly = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        typography: { color: "#445566", scope: "title" }
+      }
+    });
+    const bodyOnly = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        typography: { color: "#778899", scope: "body" }
+      }
+    });
+
+    expect(all).toContain("--ink-title: #112233;");
+    expect(all).toContain("--ink-body: #112233;");
+    expect(all).toContain("color: #0f172a");
+    expect(all).toContain("<em class=\"hl\">연결</em>");
+    expect(titleOnly).toContain("--ink-title: #445566;");
+    expect(titleOnly).not.toContain("--ink-body: #445566;");
+    expect(bodyOnly).toContain("--ink-body: #778899;");
+    expect(bodyOnly).not.toContain("--ink-title: #778899;");
+  });
+
+  it("drops malformed typography colors before emitting CSS", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        typography: { color: "var(--unsafe)", scope: "all" }
+      }
+    });
+
+    expect(html).not.toContain("var(--unsafe)");
+  });
+
   it("renders badge shape overrides and image badges from the shared asset map", () => {
     const rectBadge = buildCardHtml({
       backgroundCssUrl: undefined,
@@ -129,6 +207,20 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).toContain("color: #0f172a");
     expect(html).toContain('data-slot="badge"');
     expect(html).toContain('data-background-color="');
+  });
+
+  it("uses an opaque metric backdrop for translucent photo-style badges", () => {
+    const preset = findStylePreset("cinematic");
+    const html = buildCardHtml({
+      backgroundCssUrl: "file:///C:/tmp/photo.png",
+      card: sampleCard,
+      deck: sampleDeck({ styleId: "cinematic" })
+    });
+
+    const metricBackdrop = html.match(/class="badge"[^>]*data-background-color="([^"]+)"/)?.[1];
+
+    expect(metricBackdrop).toBe(preset.textBackdrop);
+    expect(metricBackdrop).not.toContain("rgba(");
   });
 
   it("renders deck-level next hint images and suppresses hints on the last card", () => {
@@ -177,6 +269,166 @@ describe("buildCardHtml (style presets)", () => {
     expect(html).toContain("2 / 3");
     expect(html).toContain("@kkongdon_story");
     expect(html).toContain("&gt;&gt;&gt;&gt;");
+  });
+
+  it("emits stable M23 semantic item ids and applies persisted normalized placement", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        semanticItemPlacements: {
+          "card-2:title": {
+            mode: "card",
+            x: 15,
+            y: 20,
+            width: 60,
+            height: 12,
+            anchor: "top-left"
+          }
+        }
+      }
+    });
+
+    expect(html).toContain('data-semantic-item-id="card-2:header"');
+    expect(html).toContain('data-semantic-item-id="card-2:page-number"');
+    expect(html).toContain('data-semantic-item-id="card-2:title"');
+    expect(html).toMatch(/data-semantic-item-id="card-2:paragraph:p-[^"]+"/);
+    expect(html).toMatch(/data-semantic-item-id="card-2:bullet:b-[^"]+"/);
+    expect(html).toContain('data-semantic-item-id="card-2:badge-text"');
+    expect(html).toContain('data-semantic-item-id="card-2:footer"');
+    expect(html).toContain('data-semantic-item-id="card-2:source"');
+    expect(html).toContain('data-semantic-item-id="card-2:body-number"');
+    expect(html).toContain('data-semantic-item-id="card-2:next-hint"');
+    expect(html).toContain('[data-semantic-item-id="card-2:title"]');
+    expect(html).toContain("--editor-card-left: 15.000");
+    expect(html).toContain("--editor-card-top: 20.000");
+  });
+
+  it("renders the automatic body number when no custom or deleted state exists", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck()
+    });
+
+    expect(html).toMatch(/data-slot="body-number"[^>]*>01<\/div>/);
+  });
+
+  it.each(["99", "A", "첫 번째", ""])(
+    "renders the persisted custom body-number text %j without falling back to 01",
+    (bodyNumberText) => {
+      const override = {
+        bodyNumberMode: "show",
+        bodyNumberText
+      } as CardOverride & { readonly bodyNumberText: string };
+      const html = buildCardHtml({
+        backgroundCssUrl: undefined,
+        card: sampleCard,
+        deck: sampleDeck(),
+        override
+      });
+      const bodyNumberMarkup = html.match(/<div class="big-number"[^>]*>(.*?)<\/div>/)?.[1];
+
+      expect(bodyNumberMarkup).toBe(bodyNumberText);
+    }
+  );
+
+  it("fully omits a deleted body number even when custom text remains recoverable in the override", () => {
+    const override = {
+      bodyNumberMode: "hide",
+      bodyNumberText: "첫 번째"
+    } as CardOverride & { readonly bodyNumberText: string };
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override
+    });
+
+    expect(html).not.toContain('data-slot="body-number"');
+  });
+
+  it.each(["1:1", "4:5", "9:16"] as const)(
+    "preserves custom and deleted body-number state at %s",
+    (aspectRatio) => {
+      const customHtml = buildCardHtml({
+        backgroundCssUrl: undefined,
+        card: sampleCard,
+        deck: sampleDeck({ aspectRatio }),
+        override: {
+          bodyNumberMode: "show",
+          bodyNumberText: "A"
+        }
+      });
+      const deletedHtml = buildCardHtml({
+        backgroundCssUrl: undefined,
+        card: sampleCard,
+        deck: sampleDeck({ aspectRatio }),
+        override: {
+          bodyNumberMode: "hide",
+          bodyNumberText: "A"
+        }
+      });
+
+      expect(customHtml).toMatch(/data-slot="body-number"[^>]*>A<\/div>/);
+      expect(deletedHtml).not.toContain('data-slot="body-number"');
+    }
+  );
+
+  it("plays only selected-card video nodes and does not loop trimmed media", () => {
+    const videoDeck = sampleDeck({
+      mediaAssets: [
+        {
+          id: "video-card-2",
+          kind: "video",
+          displayName: "card-2.mp4",
+          relativePath: "media/video-card-2/card-2.mp4",
+          mimeType: "video/mp4",
+          bytes: 1000,
+          sha256: "video-hash",
+          width: 1080,
+          height: 1920,
+          durationMs: 5000,
+          hasAudio: false
+        }
+      ],
+      overrides: {
+        "2": {
+          backgroundMedia: { mode: "asset", mediaId: "video-card-2" }
+        }
+      }
+    });
+    const cardOverride = videoDeck.overrides?.["2"];
+    if (!cardOverride) {
+      throw new Error("video fixture override is missing");
+    }
+    const input = {
+      assetCssUrls: { "video-card-2": "cardnews-media://video-card-2" },
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: videoDeck,
+      override: cardOverride
+    };
+    const selected = buildCardHtml({ ...input, liveVideo: true });
+    const inactive = buildCardHtml(input);
+
+    expect(selected).toContain('<video class="photo live-card-video"');
+    expect(selected).toContain('src="cardnews-media://video-card-2"');
+    expect(selected).not.toMatch(/<video[^>]+\sloop(?:\s|>)/);
+    expect(inactive).not.toContain("<video");
+    expect(inactive).toContain('class="photo video-poster"');
+  });
+
+  it("preserves badge casing instead of forcing uppercase in CSS", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: { ...sampleCard, badge: "Kkongdon cardnews" },
+      deck: sampleDeck()
+    });
+
+    expect(html).toContain("Kkongdon cardnews");
+    expect(html).not.toMatch(/\.badge\s*\{[^}]*text-transform:\s*uppercase/s);
   });
 
   it("applies deck chrome slot styles and visibility through the shared template", () => {
@@ -366,6 +618,61 @@ describe("buildCardHtml (style presets)", () => {
   });
 });
 
+describe("buildCardHtml (M21 editor contracts)", () => {
+  it("renders direct title placement once at a full-card Y coordinate", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        layout: {
+          align: "left",
+          offsetY: 0,
+          gapBadge: 1,
+          gapSubtitle: 1,
+          titlePlacement: { mode: "card-y", y: 8 }
+        }
+      }
+    });
+
+    expect(html).toContain('class="title-direct"');
+    expect(html).toContain("top: 8.00%");
+    expect(html).toContain('class="title-placeholder" aria-hidden="true"');
+    expect(html.match(/정보는 쌓이는데/g)).toHaveLength(2);
+  });
+
+  it("keeps text foreground opacity separate from transparent layer background", () => {
+    const html = buildCardHtml({
+      backgroundCssUrl: undefined,
+      card: sampleCard,
+      deck: sampleDeck(),
+      override: {
+        typography: { textOpacity: 42 },
+        layers: [
+          {
+            id: "custom-text",
+            kind: "text",
+            x: 10,
+            y: 20,
+            width: 50,
+            height: 12,
+            text: "한 번만 보이는 글자",
+            backgroundColor: "transparent",
+            textOpacity: 35
+          }
+        ]
+      }
+    });
+
+    expect(html).toContain('data-layer-text="custom-text"');
+    expect(html).toContain('data-editor-layer-id="custom-text"');
+    expect(html).toContain("background: transparent");
+    expect(html).toContain("opacity: 0.350");
+    expect(html).toContain("42.0%, transparent");
+    expect(html.match(/한 번만 보이는 글자/g)).toHaveLength(1);
+  });
+});
+
 describe("buildCardHtml (aspect ratio + font)", () => {
   it("emits stable font-face descriptors for imported static fonts", () => {
     const css = buildFontFaceCss("file:///C:/fonts/custom.ttf", {
@@ -399,11 +706,25 @@ describe("buildCardHtml (aspect ratio + font)", () => {
     expect(wide).toContain("height: 1080px");
   });
 
+  it("pins every supported card frame to its documented pixel dimensions", () => {
+    for (const ratio of aspectRatios) {
+      const html = buildCardHtml({
+        backgroundCssUrl: undefined,
+        card: sampleCard,
+        deck: sampleDeck({ aspectRatio: ratio.id })
+      });
+
+      expect(html).toContain("body { margin: 0; overflow: hidden; }");
+      expect(html).toContain(`width: ${ratio.width}px`);
+      expect(html).toContain(`height: ${ratio.height}px`);
+    }
+  });
+
   it("falls back to 4:5 for unknown ratios and injects fontCss when given", () => {
     const html = buildCardHtml({
       backgroundCssUrl: undefined,
       card: sampleCard,
-      deck: sampleDeck({ aspectRatio: "9:16" }),
+      deck: sampleDeck({ aspectRatio: "3:2" }),
       fontCss: '@font-face { font-family: "Pretendard"; src: url("blob:x"); }'
     });
 
@@ -535,7 +856,9 @@ describe("buildCardHtml (aspect ratio + font)", () => {
 
     expect(html).toContain("brightness(1.25) contrast(0.90) saturate(1.40)");
     expect(html).toContain("text-align: center");
-    expect(html).toContain("transform: translateY(-8.00%)");
+    expect(html).toContain("top: -8.00%");
+    expect(html).toContain("bottom: 8.00%");
+    expect(html).not.toContain("transform: translateY(-8.00%)");
     expect(html).toContain("--gap-badge-scale: 1.500");
     expect(html).toContain("--gap-subtitle-scale: 0.750");
     expect(html).toContain("display: block;");

@@ -1,0 +1,44 @@
+{
+  "active": false,
+  "current_phase": "complete",
+  "interview_id": "m22-media-video-canvas-ai-20260716T021954Z",
+  "profile": "standard",
+  "type": "brownfield",
+  "initial_idea": "Card-first image/video media, sequential 1080x1920 MP4 export, semantic direct canvas editing, footer/body-number controls, and editable Pro AI default instruction.",
+  "rounds": 8,
+  "current_ambiguity": 0.07,
+  "threshold": 0.2,
+  "max_rounds": 12,
+  "challenge_modes_used": [
+    "simplifier",
+    "contrarian"
+  ],
+  "codebase_context": "M21 Electron/React app with static HTML/PNG renderer, global/card background inheritance, custom image/text/shape/line layers, Pro-only CLI AI, and no video/timeline/MP4 contracts.",
+  "current_stage": "handoff-ready",
+  "current_focus": "complete",
+  "context_snapshot_path": ".omx/context/m22-media-video-canvas-ai-20260716-103438.md",
+  "clarity": {
+    "intent": 0.94,
+    "outcome": 0.93,
+    "scope": 0.94,
+    "constraints": 0.89,
+    "success": 0.88,
+    "context": 0.98
+  },
+  "readiness": {
+    "non_goals": "resolved",
+    "decision_boundaries": "resolved",
+    "pressure_pass": "complete"
+  },
+  "completed_at": "2026-07-16T03:00:00Z",
+  "auto_completed_reason": null,
+  "completion_note": "M22 interview crystallized into approved requirements, PRD, and test specification.",
+  "transition_source": null,
+  "transition_target_mode": null,
+  "run_outcome": "finish",
+  "transcript_path": ".omx/interviews/m22-media-video-canvas-ai-20260716T021954Z.md",
+  "spec_path": ".omx/specs/deep-interview-m22-media-video-canvas-ai.md",
+  "prd_path": ".omx/plans/prd-v6-m22-media-video-canvas-ai.md",
+  "test_spec_path": ".omx/plans/test-spec-v6-m22-media-video-canvas-ai.md",
+  "lifecycle_outcome": "finished"
+}

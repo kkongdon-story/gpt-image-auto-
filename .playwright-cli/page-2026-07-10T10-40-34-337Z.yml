@@ -1,0 +1,345 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]:
+      - strong [ref=e5]: Cardnews Studio Lite
+      - text: 초보자 사용설명서
+    - navigation "목차" [ref=e6]:
+      - link "배포 파일" [ref=e7] [cursor=pointer]:
+        - /url: "#package"
+      - link "설치하기" [ref=e8] [cursor=pointer]:
+        - /url: "#install"
+      - link "화면 익히기" [ref=e9] [cursor=pointer]:
+        - /url: "#screen"
+      - link "첫 카드 만들기" [ref=e10] [cursor=pointer]:
+        - /url: "#first"
+      - link "글자 꾸미기" [ref=e11] [cursor=pointer]:
+        - /url: "#text"
+      - link "배경 관리" [ref=e12] [cursor=pointer]:
+        - /url: "#background"
+      - link "PNG 저장" [ref=e13] [cursor=pointer]:
+        - /url: "#export"
+      - link "Lite 기능 범위" [ref=e14] [cursor=pointer]:
+        - /url: "#edition"
+      - link "문제 해결" [ref=e15] [cursor=pointer]:
+        - /url: "#faq"
+  - main [ref=e16]:
+    - generic [ref=e17]:
+      - generic [ref=e18]: C
+      - paragraph [ref=e19]: Cardnews Studio Lite 2.0.0
+      - heading "처음 시작하는 카드뉴스 제작 가이드" [level=1] [ref=e20]: 처음 시작하는카드뉴스 제작 가이드
+      - paragraph [ref=e21]: 설치부터 문구 수정, 배경 관리, PNG 저장까지 실제 Lite 화면을 따라가며 설명합니다.
+      - paragraph [ref=e22]: 문서 갱신일 2026-07-10 · Windows 10/11 기준
+    - generic [ref=e23]:
+      - heading "배포할 파일" [level=2] [ref=e24]
+      - paragraph [ref=e25]: 일반 사용자에게는 아래 3개를 한 폴더에 담아 전달하면 됩니다. 프로그램 설치에 꼭 필요한 것은 첫 번째 EXE 하나입니다.
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - generic [ref=e28]: EXE
+          - generic [ref=e29]:
+            - strong [ref=e30]: Cardnews-Studio-Lite-Setup-2.0.0.exe
+            - paragraph [ref=e31]: 실제 설치 파일입니다. 받는 사람이 이 파일을 실행합니다.
+        - generic [ref=e32]:
+          - generic [ref=e33]: HTML
+          - generic [ref=e34]:
+            - strong [ref=e35]: Cardnews-Studio-Lite-사용설명서.html
+            - paragraph [ref=e36]: 지금 보고 있는 설명서입니다. 인터넷 없이 더블클릭으로 열립니다.
+        - generic [ref=e37]:
+          - generic [ref=e38]: "#"
+          - generic [ref=e39]:
+            - strong [ref=e40]: SHA256SUMS.txt
+            - paragraph [ref=e41]: 전송 중 파일이 손상되거나 바뀌지 않았는지 확인하는 해시값입니다.
+      - generic [ref=e42]:
+        - strong [ref=e43]: 폴더 전체를 보내야 하나요?
+        - text: 설치형 배포는 EXE만으로 설치됩니다. 개발 프로젝트 폴더나
+        - code [ref=e44]: win-unpacked
+        - text: 폴더를 함께 보낼 필요가 없습니다.
+    - generic [ref=e45]:
+      - heading "1. 설치하기" [level=2] [ref=e46]
+      - list [ref=e47]:
+        - listitem [ref=e48]:
+          - generic [ref=e49]: "1"
+          - generic [ref=e50]:
+            - strong [ref=e51]: 설치 파일 실행
+            - paragraph [ref=e52]:
+              - code [ref=e53]: Cardnews-Studio-Lite-Setup-2.0.0.exe
+              - text: 를 더블클릭합니다.
+        - listitem [ref=e54]:
+          - generic [ref=e55]: "2"
+          - generic [ref=e56]:
+            - strong [ref=e57]: Windows 경고 확인
+            - paragraph [ref=e58]:
+              - text: SmartScreen이 표시되면 공식 게시글이나 배포자와의 별도 메시지처럼 신뢰할 수 있는 경로에서 받은 SHA-256 값과 설치 파일을 비교합니다. 값과 출처를 모두 확인한 경우에만
+              - code [ref=e59]: 추가 정보
+              - text: →
+              - code [ref=e60]: 실행
+              - text: 을 누릅니다.
+        - listitem [ref=e61]:
+          - generic [ref=e62]: "3"
+          - generic [ref=e63]:
+            - strong [ref=e64]: 설치 위치 선택
+            - paragraph [ref=e65]: 기본 위치를 그대로 사용하거나 원하는 폴더를 선택한 뒤 설치를 완료합니다.
+        - listitem [ref=e66]:
+          - generic [ref=e67]: "4"
+          - generic [ref=e68]:
+            - strong [ref=e69]: 앱 실행
+            - paragraph [ref=e70]:
+              - text: 바탕화면의
+              - code [ref=e71]: Cardnews Studio Lite
+              - text: 바로가기를 더블클릭합니다.
+      - generic [ref=e72]:
+        - strong [ref=e73]: 처음 실행할 때 알아둘 점
+        - text: 이 배포판은 개인 배포용으로 코드 서명이 없어 Windows 경고가 나올 수 있습니다. EXE와 같은 폴더의 해시 파일은 전송 오류 확인에는 도움이 되지만 배포자의 신원까지 증명하지는 않습니다. 공식 채널에 게시된 해시값을 별도로 확인할 수 없거나 출처가 불분명하면 실행하지 마세요.
+    - generic [ref=e74]:
+      - heading "2. 화면 익히기" [level=2] [ref=e75]
+      - figure "실제 Lite 앱을 실행해 캡처한 기본 화면입니다." [ref=e76]:
+        - generic [ref=e77]:
+          - img "Cardnews Studio Lite 전체 화면" [ref=e78]
+          - generic:
+            - generic: "1"
+            - generic: 카드 목록
+          - generic:
+            - generic: "2"
+            - generic: 미리보기
+          - generic:
+            - generic: "3"
+            - generic: 편집 패널
+          - generic:
+            - generic: "4"
+            - generic: PNG 생성
+      - generic [ref=e80]:
+        - generic [ref=e81]:
+          - generic [ref=e82]: "1"
+          - text: 카드를 고르고 순서를 확인합니다.
+        - generic [ref=e83]:
+          - generic [ref=e84]: "2"
+          - text: 완성 모습을 실시간으로 확인합니다.
+        - generic [ref=e85]:
+          - generic [ref=e86]: "3"
+          - text: 내용과 디자인을 수정합니다.
+        - generic [ref=e87]:
+          - generic [ref=e88]: "4"
+          - text: 완성본을 PNG로 저장합니다.
+    - generic [ref=e89]:
+      - heading "3. 첫 카드 만들기" [level=2] [ref=e90]
+      - list [ref=e91]:
+        - listitem [ref=e92]:
+          - generic [ref=e93]: "1"
+          - generic [ref=e94]:
+            - strong [ref=e95]: 스타일과 비율 선택
+            - paragraph [ref=e96]:
+              - text: 화면 위쪽에서 카드 스타일과 비율을 선택합니다. 인스타그램 세로형은
+              - code [ref=e97]: 4:5
+              - text: 가 기본입니다.
+        - listitem [ref=e98]:
+          - generic [ref=e99]: "2"
+          - generic [ref=e100]:
+            - strong [ref=e101]: 수정할 카드 선택
+            - paragraph [ref=e102]: 왼쪽 카드 목록에서 원하는 썸네일을 클릭합니다.
+        - listitem [ref=e103]:
+          - generic [ref=e104]: "3"
+          - generic [ref=e105]:
+            - strong [ref=e106]: 내용 탭 작성
+            - paragraph [ref=e107]:
+              - text: 오른쪽
+              - code [ref=e108]: 콘텐츠 → 내용
+              - text: 에서 배지, 제목, 소제목, 본문을 입력합니다. 입력하는 즉시 가운데 미리보기가 바뀝니다.
+        - listitem [ref=e109]:
+          - generic [ref=e110]: "4"
+          - generic [ref=e111]:
+            - strong [ref=e112]: 디자인 탭 조절
+            - paragraph [ref=e113]:
+              - code [ref=e114]: 콘텐츠 → 디자인
+              - text: 에서 글자 크기, 굵기, 정렬, 간격과 배경을 조절합니다.
+        - listitem [ref=e115]:
+          - generic [ref=e116]: "5"
+          - generic [ref=e117]:
+            - strong [ref=e118]: 카드 추가
+            - paragraph [ref=e119]:
+              - text: 오른쪽 패널 아래
+              - code [ref=e120]: 카드 추가
+              - text: 를 누르고 같은 방식으로 다음 장을 작성합니다.
+      - generic [ref=e121]:
+        - strong [ref=e122]: 입력이 갑자기 안 될 때
+        - text: 다른 카드나 탭을 한 번 클릭한 뒤 다시 입력창을 선택하세요. 제목 끝에서 줄바꿈할 때는
+        - code [ref=e123]: Shift + Enter
+        - text: 가 아니라 일반
+        - code [ref=e124]: Enter
+        - text: 를 사용합니다.
+    - generic [ref=e125]:
+      - heading "4. 글자 빠르게 꾸미기" [level=2] [ref=e126]
+      - paragraph [ref=e127]: 미리보기에서 텍스트 레이어를 클릭하거나 글자를 드래그하면 화면 아래에 빠른 편집 도구가 나타납니다.
+      - figure "색상, 크기, 굵기, 기울기와 정렬을 선택한 자리에서 바로 바꿀 수 있습니다." [ref=e128]:
+        - generic [ref=e129]:
+          - img "선택 텍스트용 플로팅 툴바" [ref=e130]
+          - generic:
+            - generic: "1"
+            - generic: 선택한 글자
+          - generic:
+            - generic: "2"
+            - generic: 빠른 편집 도구
+          - generic:
+            - generic: "3"
+            - generic: 세부 디자인
+      - list [ref=e132]:
+        - listitem [ref=e133]:
+          - strong [ref=e134]: "일반 글자색:"
+          - text: 드래그하지 않은 전체 텍스트 색상을 바꿉니다.
+        - listitem [ref=e135]:
+          - strong [ref=e136]: "선택 글자색:"
+          - text: 드래그한 글자만 다른 색으로 꾸밉니다.
+        - listitem [ref=e137]:
+          - strong [ref=e138]: "크기와 굵기:"
+          - text: 숫자를 조절한 뒤 미리보기에서 줄바꿈과 잘림을 확인합니다.
+        - listitem [ref=e139]:
+          - strong [ref=e140]: "정렬:"
+          - text: 왼쪽, 가운데, 오른쪽 정렬을 아이콘으로 선택합니다.
+    - generic [ref=e141]:
+      - heading "5. 배경 이미지 추가와 정리" [level=2] [ref=e142]
+      - paragraph [ref=e143]:
+        - code [ref=e144]: 배경 이미지 관리
+        - text: 에서는 파일 추가, 검색, 미리보기, 적용, 삭제를 한곳에서 처리합니다.
+      - figure "추가한 이미지는 앱 전용 라이브러리로 복사됩니다. 원본 파일은 이동하거나 삭제하지 않습니다." [ref=e145]:
+        - generic [ref=e146]:
+          - img "배경 이미지 관리 창" [ref=e147]
+          - generic:
+            - generic: "1"
+            - generic: 추가·검색
+          - generic:
+            - generic: "2"
+            - generic: 이미지 목록
+          - generic:
+            - generic: "3"
+            - generic: 적용·삭제
+      - list [ref=e149]:
+        - listitem [ref=e150]:
+          - generic [ref=e151]: "1"
+          - generic [ref=e152]:
+            - strong [ref=e153]: 파일 추가
+            - paragraph [ref=e154]:
+              - code [ref=e155]: 파일 추가
+              - text: 를 누르고 JPG, PNG 또는 WEBP 이미지를 선택합니다.
+        - listitem [ref=e156]:
+          - generic [ref=e157]: "2"
+          - generic [ref=e158]:
+            - strong [ref=e159]: 이미지 찾기
+            - paragraph [ref=e160]: 검색창에 파일명 일부를 입력하면 많이 쌓인 이미지도 빠르게 찾을 수 있습니다.
+        - listitem [ref=e161]:
+          - generic [ref=e162]: "3"
+          - generic [ref=e163]:
+            - strong [ref=e164]: 배경 적용
+            - paragraph [ref=e165]: 이미지를 선택하고 현재 카드 또는 전체 카드에 적용합니다.
+        - listitem [ref=e166]:
+          - generic [ref=e167]: "4"
+          - generic [ref=e168]:
+            - strong [ref=e169]: 사용하지 않는 이미지 삭제
+            - paragraph [ref=e170]: 삭제 버튼을 누르면 앱이 보관한 복사본과 목록 항목만 삭제됩니다. 어떤 카드가 사용 중이면 먼저 다른 배경으로 바꾸라는 안내가 표시됩니다.
+      - generic [ref=e171]:
+        - strong [ref=e172]: 다른 컴퓨터로 옮길 때
+        - text: 설치 파일에는 기본 프리셋과 기본 폰트가 들어가지만, 사용자가 나중에 추가한 배경은 들어가지 않습니다. 원본 이미지 파일을 함께 옮긴 뒤 새 PC에서 다시
+        - code [ref=e173]: 파일 추가
+        - text: 하세요.
+      - heading "프로그램을 삭제할 때" [level=3] [ref=e174]
+      - paragraph [ref=e175]:
+        - text: 앱을 제거해도 사용자가 선택했던 원본 이미지 파일은 삭제되지 않습니다. 다만 앱이 관리하는 배경 복사본, 설정, 작업 기록과 렌더 결과는
+        - code [ref=e176]: "%APPDATA%\\gpt-cardnews-auto\\gpt-cardnews-auto"
+        - text: 아래에 남을 수 있습니다. 완전히 정리하려면 필요한 결과물을 먼저 백업한 뒤 이 사용자 데이터 폴더를 직접 확인하세요.
+    - generic [ref=e177]:
+      - heading "6. PNG로 저장하기" [level=2] [ref=e178]
+      - list [ref=e179]:
+        - listitem [ref=e180]:
+          - generic [ref=e181]: "1"
+          - generic [ref=e182]:
+            - strong [ref=e183]: 최종 미리보기
+            - paragraph [ref=e184]: 카드별로 글자 잘림, 배경, 푸터와 페이지 번호를 확인합니다.
+        - listitem [ref=e185]:
+          - generic [ref=e186]: "2"
+          - generic [ref=e187]:
+            - strong [ref=e188]: PNG 생성
+            - paragraph [ref=e189]:
+              - text: 오른쪽 위의 보라색
+              - code [ref=e190]: PNG 생성
+              - text: 버튼을 누릅니다.
+        - listitem [ref=e191]:
+          - generic [ref=e192]: "3"
+          - generic [ref=e193]:
+            - strong [ref=e194]: 결과 확인
+            - paragraph [ref=e195]: 생성 결과에서 현재 카드 PNG 또는 전체 ZIP을 선택합니다.
+        - listitem [ref=e196]:
+          - generic [ref=e197]: "4"
+          - generic [ref=e198]:
+            - strong [ref=e199]: 폴더 열기
+            - paragraph [ref=e200]:
+              - code [ref=e201]: 폴더 열기
+              - text: 를 누르면 저장된 HTML과 PNG 위치를 바로 확인할 수 있습니다.
+      - generic [ref=e202]:
+        - strong [ref=e203]: HTML은 보이는데 PNG가 비어 있다면
+        - text: 앱을 완전히 종료한 뒤 다시 실행하고 생성하세요. 사용자 폰트나 배경 파일이 삭제되지 않았는지도 확인합니다.
+    - generic [ref=e204]:
+      - heading "7. Lite에서 가능한 기능" [level=2] [ref=e205]
+      - table [ref=e206]:
+        - rowgroup [ref=e207]:
+          - row [ref=e208]:
+            - columnheader "기능" [ref=e209]
+            - columnheader "Lite" [ref=e210]
+            - columnheader "설명" [ref=e211]
+        - rowgroup [ref=e212]:
+          - row [ref=e213]:
+            - cell "카드 내용 작성" [ref=e214]
+            - cell "사용 가능" [ref=e215]
+            - cell "제목, 소제목, 배지, 본문, 출처, 강조 문구" [ref=e216]
+          - row [ref=e217]:
+            - cell "디자인 편집" [ref=e218]
+            - cell "사용 가능" [ref=e219]
+            - cell "폰트, 색상, 크기, 정렬, 간격, 레이어, 배경" [ref=e220]
+          - row [ref=e221]:
+            - cell "양식·스타일 관리" [ref=e222]
+            - cell "사용 가능" [ref=e223]
+            - cell "저장된 양식과 스타일 불러오기 및 적용" [ref=e224]
+          - row [ref=e225]:
+            - cell "PNG 생성" [ref=e226]
+            - cell "사용 가능" [ref=e227]
+            - cell "현재 카드 PNG와 전체 카드 ZIP" [ref=e228]
+          - row [ref=e229]:
+            - cell "AI 도우미" [ref=e230]
+            - cell "Pro 전용" [ref=e231]
+            - cell "외부 AI CLI와 대화, 리서치, 대본 생성" [ref=e232]
+          - row [ref=e233]:
+            - cell "CSV 대량 생성" [ref=e234]
+            - cell "Pro 전용" [ref=e235]
+            - cell "CSV 기반 여러 카드뉴스 일괄 생성" [ref=e236]
+      - figure "잠금 화면은 오류가 아닙니다. AI와 대량 생성은 Pro 버전에서 사용할 수 있습니다." [ref=e237]:
+        - generic [ref=e238]:
+          - img "Lite의 Pro 기능 잠금 안내" [ref=e239]
+          - generic:
+            - generic: "1"
+            - generic: AI 버튼
+          - generic:
+            - generic: "2"
+            - generic: Pro 안내
+    - generic [ref=e241]:
+      - heading "자주 묻는 문제" [level=2] [ref=e242]
+      - group [ref=e243]:
+        - generic "Windows가 앱 실행을 차단합니다." [ref=e244] [cursor=pointer]
+        - paragraph [ref=e245]:
+          - text: 공식 배포자가 제공한 EXE인지 먼저 확인하세요. 해시는 EXE 옆 파일만 믿지 말고 공식 게시글이나 별도 메시지로 받은 기대값과 비교해야 합니다. 출처와 값이 모두 확인된 경우에만 SmartScreen의
+          - code [ref=e246]: 추가 정보
+          - text: 에서 실행하세요.
+      - group [ref=e247]:
+        - generic "배경 목록에 같은 이름이 여러 개 보입니다." [ref=e248] [cursor=pointer]
+      - group [ref=e249]:
+        - generic "다른 PC에 설치했더니 내가 추가한 배경이 없습니다." [ref=e250] [cursor=pointer]
+      - group [ref=e251]:
+        - generic "AI 버튼을 누르니 Pro 안내가 나옵니다." [ref=e252] [cursor=pointer]
+      - group [ref=e253]:
+        - generic "프로그램을 삭제하면 원본 이미지도 사라지나요?" [ref=e254] [cursor=pointer]
+    - generic [ref=e255]:
+      - generic [ref=e256]:
+        - heading "문의" [level=2] [ref=e257]
+        - paragraph [ref=e258]:
+          - text: "AX 문의·강의 문의:"
+          - link "카카오톡 오픈채팅" [ref=e259] [cursor=pointer]:
+            - /url: https://open.kakao.com/me/kkongdon
+        - paragraph [ref=e260]:
+          - text: "Threads:"
+          - strong [ref=e261]: "@kkongdon_story"
+      - generic [ref=e262]: Cardnews Studio Lite · by kkongdon · 이 문서는 설치 파일과 함께 배포할 수 있는 단일 HTML 파일입니다.

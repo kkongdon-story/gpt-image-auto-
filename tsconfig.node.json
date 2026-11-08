@@ -19,14 +19,22 @@
   },
   "include": [
     "electron/main.ts",
+    "electron/ffmpegPreflight.ts",
+    "electron/videoMediaProbe.ts",
+    "electron/videoExporter.ts",
+    "electron/videoFrameProducer.ts",
+    "electron/mediaProtocol.ts",
     "electron/ai/**/*.ts",
+    "electron/backgroundManagerSmoke.ts",
+    "electron/templatePackImporter.ts",
     "electron/preload.cts",
     "electron/preload-lite.cts",
     "electron/lite-main.ts",
+    "electron/stockImageDownload.ts",
     "src/domain/**/*.ts",
     "src/edition/pro/ai/aiPrompts.ts",
     "src/render-engine/**/*.ts",
     "src/storage/**/*.ts"
   ],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "electron/**/*.test.ts"]
 }

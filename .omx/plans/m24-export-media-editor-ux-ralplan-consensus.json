@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "milestone": "M24",
+  "title": "Export, Media, Editor Geometry, and UX Hardening",
+  "complete": true,
+  "status": "approved",
+  "planner": {
+    "agentId": "019f6f0b-d1d9-7381-9747-82ab7e2d1def",
+    "verdict": "recommend-existing-dom-hardening"
+  },
+  "architect": {
+    "agentId": "019f6f1a-4bad-7e91-b522-475ee983791c",
+    "verdict": "APPROVE",
+    "revisionApplied": true
+  },
+  "critic": {
+    "agentId": "019f6f36-ace7-7470-8eef-1ef352e56b28",
+    "verdict": "APPROVE"
+  },
+  "artifacts": {
+    "context": ".omx/context/m24-export-media-editor-ux-hardening-20260717T074510Z.md",
+    "plannerDraft": ".omx/plans/m24-export-media-editor-ux-planner-draft.md",
+    "prd": ".omx/plans/prd-v6-m24-export-media-editor-ux-hardening.md",
+    "testSpec": ".omx/plans/test-spec-v6-m24-export-media-editor-ux-hardening.md",
+    "architectReview": ".omx/plans/m24-export-media-editor-ux-architect-review.md",
+    "criticReview": ".omx/plans/m24-export-media-editor-ux-critic-review.md"
+  },
+  "releaseRule": "No artifact may be staged when any mandatory G0-G13 result is failed, blocked, skipped, stale, or missing.",
+  "approvedAt": "2026-07-17T17:40:00+09:00"
+}

@@ -4,13 +4,16 @@ import type {
   AiChatResult,
   AiProviderId,
   AiProviderStatus,
+  BulkBindingMetadata,
   BulkRenderResult,
   CardnewsResult,
   ImageLibraryItem,
   ProjectArchiveResult,
-  ProjectImportResult
+  ProjectImportResult,
+  WorkspaceState
 } from "../../domain/types";
 import { buildBulkCsvTemplate } from "../../domain/csvBulk";
+import { buildTemplateBulkSampleCsv } from "../../domain/templateBulkBindings";
 import {
   buildDraftPrompt,
   buildMockDraftDocument,
@@ -54,6 +57,12 @@ export function getEditionImagePreview(imageId: string): Promise<CardnewsResult<
   return window.cardnews.getImagePreview(imageId);
 }
 
+export function removeEditionImage(imageId: string): Promise<
+  CardnewsResult<{ readonly id: string; readonly removed: boolean }>
+> {
+  return window.cardnews.removeImageFromLibrary(imageId);
+}
+
 export function removeEditionImageBackdrop(
   imageId: string,
   tolerance: number
@@ -65,11 +74,24 @@ export function loadEditionBulkInput(): Promise<CardnewsResult<{ readonly fileNa
   return window.cardnews.importBulkCsvFile();
 }
 
-export function saveEditionBulkTemplate(styleId: string, aspectRatioId: string): Promise<CardnewsResult<string>> {
+export function saveEditionBulkTemplate(
+  styleId: string,
+  aspectRatioId: string,
+  metadata?: BulkBindingMetadata
+): Promise<CardnewsResult<string>> {
+  if (metadata) {
+    const csv = buildTemplateBulkSampleCsv(metadata);
+    return typeof csv === "string" ? window.cardnews.exportBulkCsvTemplate(csv) : Promise.resolve(csv);
+  }
   return window.cardnews.exportBulkCsvTemplate(buildBulkCsvTemplate(styleId, aspectRatioId));
 }
 
-export function runEditionBulkRender(csvText: string): Promise<CardnewsResult<BulkRenderResult>> {
+export function runEditionBulkRender(
+  csvText: string,
+  workspace?: WorkspaceState,
+  metadata?: BulkBindingMetadata
+): Promise<CardnewsResult<BulkRenderResult>> {
+  if (workspace && metadata) return window.cardnews.renderTemplateBulkCsv(csvText, workspace, metadata);
   return window.cardnews.renderBulkCsv(csvText);
 }
 
@@ -81,8 +103,8 @@ export function loadEditionProject(): Promise<CardnewsResult<ProjectImportResult
   return window.cardnews.importProject();
 }
 
-export function listEditionAiProviders(): Promise<CardnewsResult<readonly AiProviderStatus[]>> {
-  return window.cardnews.listAiProviders();
+export function listEditionAiProviders(forceRefresh = false): Promise<CardnewsResult<readonly AiProviderStatus[]>> {
+  return window.cardnews.listAiProviders(forceRefresh);
 }
 
 export function runEditionAi(

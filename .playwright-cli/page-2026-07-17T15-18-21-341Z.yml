@@ -1,0 +1,357 @@
+- main [ref=f12e3]:
+  - generic [ref=f12e4]:
+    - button "Cardnews Studio Pro 정보형 카드뉴스 제작기" [ref=f12e5] [cursor=pointer]:
+      - strong [ref=f12e6]: Cardnews Studio Pro
+      - generic [ref=f12e7]: 정보형 카드뉴스 제작기
+    - generic [ref=f12e8]:
+      - generic [ref=f12e9]: 스타일
+      - combobox "스타일" [ref=f12e10]:
+        - option "기본 · 신문 오버레이 (사진)" [selected]
+        - option "기본 · 시네마틱 (사진)"
+        - option "기본 · 매거진 형광 (사진)"
+        - option "기본 · 웜 스튜디오 (사진)"
+        - option "기본 · 볼드 옐로우 캐러셀 (사진)"
+        - option "기본 · 오렌지 체크 카드"
+        - option "기본 · 블루 체크 리스트"
+        - option "기본 · 솔로프리너 블랙 (사진)"
+        - option "기본 · 화이트 & 블루"
+        - option "기본 · 미니멀 화이트"
+        - option "기본 · 다크 인포"
+    - generic [ref=f12e11]:
+      - generic [ref=f12e12]: 비율
+      - combobox "비율" [ref=f12e13]:
+        - option "세로형 4:5 (인스타)" [selected]
+        - option "정방형 1:1"
+        - option "가로형 16:9"
+        - option "가로형 4:3"
+    - generic [ref=f12e14]:
+      - generic [ref=f12e15]: 헤더
+      - textbox "헤더" [ref=f12e16]: MONEY NOTE
+    - generic [ref=f12e17]:
+      - generic [ref=f12e18]: 푸터
+      - textbox "푸터" [ref=f12e19]: kkongdon_story
+    - generic [ref=f12e20]:
+      - button "Threads @kkongdon_story 열기" [ref=f12e21] [cursor=pointer]: "@"
+      - button "AX문의/강의 문의" [ref=f12e22] [cursor=pointer]
+      - button "AI" [ref=f12e23] [cursor=pointer]
+      - button "초기화" [ref=f12e24] [cursor=pointer]
+      - button "내보내기" [ref=f12e25] [cursor=pointer]
+  - generic [ref=f12e26]:
+    - complementary "slide thumbnails" [ref=f12e27]:
+      - button "1 card-1" [ref=f12e28] [cursor=pointer]:
+        - generic [ref=f12e29]: "1"
+        - iframe [ref=f12e30]:
+          - article [ref=f13e2]:
+            - generic [ref=f13e3]:
+              - generic [ref=f13e4]: MONEY NOTE
+              - generic [ref=f13e5]: 1 / 10
+            - generic [ref=f13e7]:
+              - generic [ref=f13e8]: MONEY NOTE
+              - heading [level=1] [ref=f13e9]:
+                - text: 돈 이야기를
+                - emphasis [ref=f13e10]: 다시
+                - text: 배워야 하는 이유
+              - generic [ref=f13e11]: 숫자보다 먼저 보는 관점
+            - generic [ref=f13e12]:
+              - generic [ref=f13e13]: kkongdon_story
+              - generic [ref=f13e14]: ">>>>"
+      - button "2 card-2" [ref=f12e31] [cursor=pointer]:
+        - generic [ref=f12e32]: "2"
+        - iframe [ref=f12e33]:
+          - article [ref=f14e2]:
+            - generic [ref=f14e3]:
+              - generic [ref=f14e4]: MONEY NOTE
+              - generic [ref=f14e5]: 2 / 10
+            - generic [ref=f14e7]:
+              - generic [ref=f14e8]: "01"
+              - heading [level=1] [ref=f14e9]:
+                - text: 카드 2의
+                - emphasis [ref=f14e10]: 핵심
+                - text: 문장
+              - generic [ref=f14e11]:
+                - paragraph [ref=f14e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f14e14]:
+                  - listitem [ref=f14e15]: 자동 불릿 예시
+                  - listitem [ref=f14e16]: 두 번째 불릿 예시
+              - generic [ref=f14e17]: "출처: 내부 메모"
+            - generic [ref=f14e18]:
+              - generic [ref=f14e19]: kkongdon_story
+              - generic [ref=f14e20]: ">>>>"
+      - button "3 card-3" [ref=f12e34] [cursor=pointer]:
+        - generic [ref=f12e35]: "3"
+        - iframe [ref=f12e36]:
+          - article [ref=f15e2]:
+            - generic [ref=f15e3]:
+              - generic [ref=f15e4]: MONEY NOTE
+              - generic [ref=f15e5]: 3 / 10
+            - generic [ref=f15e7]:
+              - generic [ref=f15e8]: "02"
+              - heading [level=1] [ref=f15e9]:
+                - text: 카드 3의
+                - emphasis [ref=f15e10]: 핵심
+                - text: 문장
+              - generic [ref=f15e11]:
+                - paragraph [ref=f15e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f15e14]:
+                  - listitem [ref=f15e15]: 자동 불릿 예시
+                  - listitem [ref=f15e16]: 두 번째 불릿 예시
+              - generic [ref=f15e17]: "출처: 내부 메모"
+            - generic [ref=f15e18]:
+              - generic [ref=f15e19]: kkongdon_story
+              - generic [ref=f15e20]: ">>>>"
+      - button "4 card-4" [ref=f12e37] [cursor=pointer]:
+        - generic [ref=f12e38]: "4"
+        - iframe [ref=f12e39]:
+          - article [ref=f16e2]:
+            - generic [ref=f16e3]:
+              - generic [ref=f16e4]: MONEY NOTE
+              - generic [ref=f16e5]: 4 / 10
+            - generic [ref=f16e7]:
+              - generic [ref=f16e8]: "03"
+              - heading [level=1] [ref=f16e9]:
+                - text: 카드 4의
+                - emphasis [ref=f16e10]: 핵심
+                - text: 문장
+              - generic [ref=f16e11]:
+                - paragraph [ref=f16e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f16e14]:
+                  - listitem [ref=f16e15]: 자동 불릿 예시
+                  - listitem [ref=f16e16]: 두 번째 불릿 예시
+              - generic [ref=f16e17]: "출처: 내부 메모"
+            - generic [ref=f16e18]:
+              - generic [ref=f16e19]: kkongdon_story
+              - generic [ref=f16e20]: ">>>>"
+      - button "5 card-5" [ref=f12e40] [cursor=pointer]:
+        - generic [ref=f12e41]: "5"
+        - iframe [ref=f12e42]:
+          - article [ref=f17e2]:
+            - generic [ref=f17e3]:
+              - generic [ref=f17e4]: MONEY NOTE
+              - generic [ref=f17e5]: 5 / 10
+            - generic [ref=f17e7]:
+              - generic [ref=f17e8]: "04"
+              - heading [level=1] [ref=f17e9]:
+                - text: 카드 5의
+                - emphasis [ref=f17e10]: 핵심
+                - text: 문장
+              - generic [ref=f17e11]:
+                - paragraph [ref=f17e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f17e14]:
+                  - listitem [ref=f17e15]: 자동 불릿 예시
+                  - listitem [ref=f17e16]: 두 번째 불릿 예시
+              - generic [ref=f17e17]: "출처: 내부 메모"
+            - generic [ref=f17e18]:
+              - generic [ref=f17e19]: kkongdon_story
+              - generic [ref=f17e20]: ">>>>"
+      - button "6 card-6" [ref=f12e43] [cursor=pointer]:
+        - generic [ref=f12e44]: "6"
+        - iframe [ref=f12e45]:
+          - article [ref=f18e2]:
+            - generic [ref=f18e3]:
+              - generic [ref=f18e4]: MONEY NOTE
+              - generic [ref=f18e5]: 6 / 10
+            - generic [ref=f18e7]:
+              - generic [ref=f18e8]: "05"
+              - heading [level=1] [ref=f18e9]:
+                - text: 카드 6의
+                - emphasis [ref=f18e10]: 핵심
+                - text: 문장
+              - generic [ref=f18e11]:
+                - paragraph [ref=f18e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f18e14]:
+                  - listitem [ref=f18e15]: 자동 불릿 예시
+                  - listitem [ref=f18e16]: 두 번째 불릿 예시
+              - generic [ref=f18e17]: "출처: 내부 메모"
+            - generic [ref=f18e18]:
+              - generic [ref=f18e19]: kkongdon_story
+              - generic [ref=f18e20]: ">>>>"
+      - button "7 card-7" [ref=f12e46] [cursor=pointer]:
+        - generic [ref=f12e47]: "7"
+        - iframe [ref=f12e48]:
+          - article [ref=f19e2]:
+            - generic [ref=f19e3]:
+              - generic [ref=f19e4]: MONEY NOTE
+              - generic [ref=f19e5]: 7 / 10
+            - generic [ref=f19e7]:
+              - generic [ref=f19e8]: "06"
+              - heading [level=1] [ref=f19e9]:
+                - text: 카드 7의
+                - emphasis [ref=f19e10]: 핵심
+                - text: 문장
+              - generic [ref=f19e11]:
+                - paragraph [ref=f19e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f19e14]:
+                  - listitem [ref=f19e15]: 자동 불릿 예시
+                  - listitem [ref=f19e16]: 두 번째 불릿 예시
+              - generic [ref=f19e17]: "출처: 내부 메모"
+            - generic [ref=f19e18]:
+              - generic [ref=f19e19]: kkongdon_story
+              - generic [ref=f19e20]: ">>>>"
+      - button "8 card-8" [ref=f12e49] [cursor=pointer]:
+        - generic [ref=f12e50]: "8"
+        - iframe [ref=f12e51]:
+          - article [ref=f20e2]:
+            - generic [ref=f20e3]:
+              - generic [ref=f20e4]: MONEY NOTE
+              - generic [ref=f20e5]: 8 / 10
+            - generic [ref=f20e7]:
+              - generic [ref=f20e8]: "07"
+              - heading [level=1] [ref=f20e9]:
+                - text: 카드 8의
+                - emphasis [ref=f20e10]: 핵심
+                - text: 문장
+              - generic [ref=f20e11]:
+                - paragraph [ref=f20e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f20e14]:
+                  - listitem [ref=f20e15]: 자동 불릿 예시
+                  - listitem [ref=f20e16]: 두 번째 불릿 예시
+              - generic [ref=f20e17]: "출처: 내부 메모"
+            - generic [ref=f20e18]:
+              - generic [ref=f20e19]: kkongdon_story
+              - generic [ref=f20e20]: ">>>>"
+      - button "9 card-9" [ref=f12e52] [cursor=pointer]:
+        - generic [ref=f12e53]: "9"
+        - iframe [ref=f12e54]:
+          - article [ref=f21e2]:
+            - generic [ref=f21e3]:
+              - generic [ref=f21e4]: MONEY NOTE
+              - generic [ref=f21e5]: 9 / 10
+            - generic [ref=f21e7]:
+              - generic [ref=f21e8]: "08"
+              - heading [level=1] [ref=f21e9]:
+                - text: 카드 9의
+                - emphasis [ref=f21e10]: 핵심
+                - text: 문장
+              - generic [ref=f21e11]:
+                - paragraph [ref=f21e13]: 첫 번째 문단을 여기에 씁니다.
+                - list [ref=f21e14]:
+                  - listitem [ref=f21e15]: 자동 불릿 예시
+                  - listitem [ref=f21e16]: 두 번째 불릿 예시
+              - generic [ref=f21e17]: "출처: 내부 메모"
+            - generic [ref=f21e18]:
+              - generic [ref=f21e19]: kkongdon_story
+              - generic [ref=f21e20]: ">>>>"
+      - button "10 card-10" [ref=f12e55] [cursor=pointer]:
+        - generic [ref=f12e56]: "10"
+        - iframe [ref=f12e57]:
+          - article [ref=f22e2]:
+            - generic [ref=f22e3]:
+              - generic [ref=f22e4]: MONEY NOTE
+              - generic [ref=f22e5]: 10 / 10
+            - generic [ref=f22e7]:
+              - heading "오늘의 질문" [level=1] [ref=f22e8]
+              - list [ref=f22e10]:
+                - listitem [ref=f22e11]: 지금 내 소비에서 반복되는 감정은?
+                - listitem [ref=f22e12]: 다음 카드뉴스 주제로 남길 것은?
+              - generic [ref=f22e13]: 저장하고 다시 보기
+            - generic [ref=f22e14]: kkongdon_story
+      - button "+ 카드 추가" [ref=f12e58] [cursor=pointer]
+    - separator "thumbnail rail resize" [ref=f12e59]
+    - region "live preview" [ref=f12e60]:
+      - generic [ref=f12e61]:
+        - button "되돌리기" [disabled] [ref=f12e62]: ↶
+        - button "다시 실행" [disabled] [ref=f12e63]: ↷
+        - button "편집 모드" [ref=f12e64] [cursor=pointer]
+      - iframe [ref=f12e66]:
+        - article [ref=f23e2]:
+          - generic [ref=f23e3]:
+            - generic [ref=f23e4]: MONEY NOTE
+            - generic [ref=f23e5]: 1 / 10
+          - generic [ref=f23e7]:
+            - generic [ref=f23e8]: MONEY NOTE
+            - heading [level=1] [ref=f23e9]:
+              - text: 돈 이야기를
+              - emphasis [ref=f23e10]: 다시
+              - text: 배워야 하는 이유
+            - generic [ref=f23e11]: 숫자보다 먼저 보는 관점
+          - generic [ref=f23e12]:
+            - generic [ref=f23e13]: kkongdon_story
+            - generic [ref=f23e14]: ">>>>"
+      - generic [ref=f12e67]:
+        - generic [ref=f12e68]:
+          - checkbox "영상 만들기" [ref=f12e69]
+          - text: 영상 만들기
+        - generic [ref=f12e70]: PNG 카드 편집 모드입니다.
+      - paragraph [ref=f12e71]: 카드를 입력하면 미리보기가 실시간으로 갱신됩니다.
+    - complementary "editor controls" [ref=f12e72]:
+      - generic [ref=f12e73]:
+        - button "콘텐츠" [ref=f12e74] [cursor=pointer]
+        - button "디자인" [ref=f12e75] [cursor=pointer]
+        - button "미디어" [ref=f12e76] [cursor=pointer]
+        - button "내보내기" [ref=f12e77] [cursor=pointer]
+      - generic [ref=f12e78]:
+        - paragraph [ref=f12e79]: 양식 관리
+        - generic [ref=f12e80]: 카드 수, 문구, 배지, 배경, 레이어 배치를 저장하거나 GPTs 템플릿팩으로 불러옵니다.
+        - combobox [ref=f12e81]:
+          - option "— 저장된 양식 선택 —" [selected]
+        - generic [ref=f12e82]:
+          - textbox "양식 이름" [ref=f12e83]
+          - button "저장" [ref=f12e84] [cursor=pointer]
+          - button "삭제" [ref=f12e85] [cursor=pointer]
+        - generic [ref=f12e86]:
+          - button "양식.md 내보내기" [ref=f12e87] [cursor=pointer]
+          - button "작성한 파일 불러오기" [ref=f12e88] [cursor=pointer]
+        - button "템플릿팩 ZIP 불러오기" [ref=f12e89] [cursor=pointer]
+      - generic [ref=f12e90]:
+        - paragraph [ref=f12e91]: 포인트 색상
+        - generic [ref=f12e92]:
+          - 'button "포인트 색상 #3557e8" [ref=f12e93] [cursor=pointer]'
+          - 'button "포인트 색상 #7c5cff" [ref=f12e94] [cursor=pointer]'
+          - 'button "포인트 색상 #e8447c" [ref=f12e95] [cursor=pointer]'
+          - 'button "포인트 색상 #e0342c" [ref=f12e96] [cursor=pointer]'
+          - 'button "포인트 색상 #f07c22" [ref=f12e97] [cursor=pointer]'
+          - 'button "포인트 색상 #f2b705" [ref=f12e98] [cursor=pointer]'
+          - 'button "포인트 색상 #1faa59" [ref=f12e99] [cursor=pointer]'
+          - 'button "포인트 색상 #0fb5c9" [ref=f12e100] [cursor=pointer]'
+          - 'button "포인트 색상 #123c3a" [ref=f12e101] [cursor=pointer]'
+          - 'button "포인트 색상 #a53d2d" [ref=f12e102] [cursor=pointer]'
+        - generic [ref=f12e103]:
+          - textbox "사용자 지정 포인트 색상" [ref=f12e104]: "#a53d2d"
+          - textbox "포인트 색상 HEX" [ref=f12e105]:
+            - /placeholder: "#6C5CE7"
+            - text: "#a53d2d"
+        - button "스타일 기본값" [ref=f12e106] [cursor=pointer]
+      - generic [ref=f12e107]:
+        - paragraph [ref=f12e108]: 스타일 관리
+        - generic [ref=f12e109]: 색상, 폰트, 배경 분위기, 테두리 같은 시각 스타일 JSON을 등록합니다.
+        - generic [ref=f12e110]:
+          - button "design.md 내보내기" [ref=f12e111] [cursor=pointer]
+          - button "샘플 JSON" [ref=f12e112] [cursor=pointer]
+          - button "내 스타일 삭제" [ref=f12e113] [cursor=pointer]
+        - textbox "외부 AI가 만든 스타일 JSON을 붙여넣으세요." [ref=f12e114]
+        - button "JSON 스타일 등록" [ref=f12e115] [cursor=pointer]
+        - button ".json 파일 열기" [ref=f12e116] [cursor=pointer]
+        - generic [ref=f12e117]:
+          - text: GPTs 바로가기 링크
+          - textbox "https://chatgpt.com/g/..." [ref=f12e118]
+          - generic [ref=f12e119]:
+            - button "링크 저장" [ref=f12e120] [cursor=pointer]
+            - button "GPTs 열기" [disabled] [ref=f12e121]
+      - generic [ref=f12e122]:
+        - paragraph [ref=f12e123]: 폰트
+        - generic [ref=f12e124]:
+          - combobox [ref=f12e125]:
+            - option "번들 Pretendard" [selected]
+          - button "ttf/otf 추가" [ref=f12e126] [cursor=pointer]
+        - generic [ref=f12e127]:
+          - generic [ref=f12e128]: 가나다 ABC
+          - generic [ref=f12e129]: Pretendard
+      - generic [ref=f12e130]:
+        - paragraph [ref=f12e131]: 배경 이미지
+        - generic [ref=f12e132]:
+          - combobox [ref=f12e133]:
+            - option "없음" [selected]
+          - button "파일 추가" [ref=f12e134] [cursor=pointer]
+          - button "배경 관리" [ref=f12e135] [cursor=pointer]
+          - button "무료 이미지 검색" [ref=f12e136] [cursor=pointer]
+        - generic [ref=f12e137]:
+          - generic [ref=f12e138]: 하단 어둡기
+          - slider "하단 어둡기 85%" [ref=f12e139]: "85"
+          - generic [ref=f12e140]: 85%
+        - generic [ref=f12e141]: 선택한 배경은 모든 스타일의 미리보기와 PNG 렌더에 반영됩니다.
+        - generic [ref=f12e142]:
+          - generic [ref=f12e143]: Pixabay API 키
+          - generic [ref=f12e144]:
+            - textbox "키 없이도 브라우저 검색 가능" [ref=f12e145]
+            - button "저장" [ref=f12e146] [cursor=pointer]
+          - generic [ref=f12e147]: "키 미입력: 브라우저 폴백 사용"

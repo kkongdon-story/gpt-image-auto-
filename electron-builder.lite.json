@@ -4,6 +4,7 @@
   "directories": {
     "output": "release"
   },
+  "publish": null,
   "files": [
     "dist/**",
     "dist-electron/electron/**",
@@ -11,6 +12,19 @@
     "usage.html",
     "THIRD_PARTY_NOTICES.md",
     "fonts/**"
+  ],
+  "extraResources": [
+    {
+      "from": "resources/ffmpeg",
+      "to": "ffmpeg",
+      "filter": [
+        "ffmpeg.exe",
+        "ffprobe.exe",
+        "ffmpeg.manifest.json",
+        "LICENSE.txt",
+        "README.md"
+      ]
+    }
   ],
   "win": {
     "target": [

@@ -7,10 +7,43 @@
   "files": [
     "dist/**",
     "dist-electron/**",
+    "!dist-electron/electron/lite-main.js",
+    "!dist-electron/electron/preload-lite.*",
+    "!dist-electron/**/*.tsbuildinfo",
+    "!dist-electron/**/*.d.ts",
+    "!dist-electron/**/*.d.cts",
+    "!dist-electron/**/*.map",
+    "!dist-electron/electron/ai/smoke/**",
+    "!dist-electron/**/*.test.js",
+    "!dist-electron/**/cliTestHelpers.js",
+    "!dist-electron/**/cliMock.js",
+    "!dist-electron/**/*Smoke.js",
     "package.json",
-    "usage.html",
     "THIRD_PARTY_NOTICES.md",
     "fonts/**"
+  ],
+  "extraFiles": [
+    {
+      "from": "docs/Cardnews-Studio-Pro-사용설명서.html",
+      "to": "Cardnews-Studio-Pro-사용설명서.html"
+    },
+    {
+      "from": "THIRD_PARTY_NOTICES.md",
+      "to": "THIRD_PARTY_NOTICES.md"
+    }
+  ],
+  "extraResources": [
+    {
+      "from": "resources/ffmpeg",
+      "to": "ffmpeg",
+      "filter": [
+        "ffmpeg.exe",
+        "ffprobe.exe",
+        "ffmpeg.manifest.json",
+        "LICENSE.txt",
+        "README.md"
+      ]
+    }
   ],
   "win": {
     "target": [

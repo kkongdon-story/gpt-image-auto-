@@ -90,7 +90,7 @@ async function listFiles(targetPath) {
 
 async function expandScanPath(targetPath, tempRoots) {
   if (!(await pathExists(targetPath))) {
-    return [];
+    throw new Error(`Scan target does not exist: ${targetPath}`);
   }
 
   if (targetPath.endsWith(".asar")) {

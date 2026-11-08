@@ -30,8 +30,9 @@ export function evaluateQualityGates(
   dimensions: CardDimensions = defaultDimensions
 ): QualityGateReport {
   const issues: QualityGateIssue[] = [];
+  const evaluableMetrics = metrics.filter((metric) => !isAggregateBodyMetric(metric, metrics));
 
-  for (const metric of metrics) {
+  for (const metric of evaluableMetrics) {
     if (!isImageSlot(metric.slot)) {
       const contrastRatio = calculateContrastRatio(metric.color, metric.backgroundColor);
       if (contrastRatio < minimumContrastRatio) {
@@ -97,13 +98,27 @@ export function evaluateQualityGates(
     }
   }
 
-  issues.push(...evaluateCardLevelWarnings(metrics));
-  issues.push(...evaluateSlotOverlapFailures(metrics));
+  issues.push(...evaluateCardLevelWarnings(evaluableMetrics));
+  issues.push(...evaluateSlotOverlapFailures(evaluableMetrics));
 
   return {
     status: reportStatus(issues),
     issues
   };
+}
+
+function isAggregateBodyMetric(
+  metric: RenderSlotMetric,
+  metrics: readonly RenderSlotMetric[]
+): boolean {
+  return (
+    metric.slot === "body" &&
+    metrics.some(
+      (candidate) =>
+        candidate.cardIndex === metric.cardIndex &&
+        (candidate.slot === "paragraph" || candidate.slot === "bullet")
+    )
+  );
 }
 
 function isImageSlot(slot: string): boolean {
@@ -236,7 +251,34 @@ function parseColor(value: string): RgbColor | undefined {
     return parseRgbColor(normalized);
   }
 
+  if (normalized.startsWith("color(srgb ")) {
+    return parseSrgbColor(normalized);
+  }
+
   return undefined;
+}
+
+function parseSrgbColor(value: string): RgbColor | undefined {
+  const match = /^color\(srgb\s+([^)]*)\)$/.exec(value);
+  if (!match?.[1]) {
+    return undefined;
+  }
+
+  const components = match[1]
+    .split("/")[0]
+    ?.trim()
+    .split(/\s+/)
+    .slice(0, 3)
+    .map(Number);
+  if (!components || components.length !== 3 || components.some((component) => !Number.isFinite(component))) {
+    return undefined;
+  }
+
+  return buildRgbColor(
+    Math.round(components[0]! * 255),
+    Math.round(components[1]! * 255),
+    Math.round(components[2]! * 255)
+  );
 }
 
 function parseHexColor(value: string): RgbColor | undefined {

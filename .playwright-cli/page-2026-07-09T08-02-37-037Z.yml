@@ -1,0 +1,236 @@
+- main [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - generic [ref=f2e4]:
+      - paragraph [ref=f2e5]: Cardnews Studio Lite / Pro Guide
+      - heading "카드뉴스 제작기 사용설명서" [level=1] [ref=f2e6]
+      - paragraph [ref=f2e7]: 설치, 첫 작성, 디자인 조절, PNG 생성, Lite/Pro 기능 차이를 한 번에 확인하는 안내서입니다. 화면 이미지는 Playwright로 실제 앱을 열어 캡처했습니다.
+      - navigation "문서 목차" [ref=f2e8]:
+        - link "설치" [ref=f2e9] [cursor=pointer]:
+          - /url: "#install"
+        - link "Lite/Pro 차이" [ref=f2e10] [cursor=pointer]:
+          - /url: "#matrix"
+        - link "작성 방법" [ref=f2e11] [cursor=pointer]:
+          - /url: "#write"
+        - link "디자인" [ref=f2e12] [cursor=pointer]:
+          - /url: "#design"
+        - link "내보내기" [ref=f2e13] [cursor=pointer]:
+          - /url: "#export"
+        - link "Pro 활용" [ref=f2e14] [cursor=pointer]:
+          - /url: "#pro"
+        - link "문제 해결" [ref=f2e15] [cursor=pointer]:
+          - /url: "#trouble"
+    - complementary [ref=f2e16]:
+      - strong [ref=f2e17]: 배포 파일
+      - paragraph [ref=f2e18]: 일반 사용자에게는 설치 파일 EXE 하나만 전달하면 됩니다.
+      - code [ref=f2e20]: "Lite: release\\Cardnews-Studio-Lite-Setup-2.0.0.exe Pro : release\\Cardnews-Studio-Pro-Setup-2.0.0.exe"
+  - generic [ref=f2e21]:
+    - heading "1. 설치와 실행" [level=2] [ref=f2e22]
+    - generic [ref=f2e23]:
+      - article [ref=f2e24]:
+        - generic [ref=f2e25]: "1"
+        - paragraph [ref=f2e26]:
+          - text: 사용자에게 Lite 또는 Pro 설치 파일 하나를 전달합니다. 폴더 전체가 아니라
+          - code [ref=f2e27]: Cardnews-Studio-...-Setup-2.0.0.exe
+          - text: 파일만 보내면 됩니다.
+      - article [ref=f2e28]:
+        - generic [ref=f2e29]: "2"
+        - paragraph [ref=f2e30]:
+          - text: Windows SmartScreen이 뜨면
+          - code [ref=f2e31]: 추가 정보
+          - text: 를 누른 뒤
+          - code [ref=f2e32]: 실행
+          - text: 을 선택합니다. 코드 서명이 없는 개인 배포 EXE에서 흔히 보이는 경고입니다.
+      - article [ref=f2e33]:
+        - generic [ref=f2e34]: "3"
+        - paragraph [ref=f2e35]: 설치 위치를 선택하고 설치를 완료합니다. 설치 후 바탕화면 바로가기 또는 시작 메뉴에서 앱을 실행합니다.
+      - article [ref=f2e36]:
+        - generic [ref=f2e37]: "4"
+        - paragraph [ref=f2e38]: 처음 실행하면 사용자 데이터 폴더가 새로 만들어집니다. 기존 PC에서 추가한 배경 이미지와 사용자 폰트는 자동으로 따라가지 않습니다.
+    - generic [ref=f2e39]:
+      - text: 무설치 버전을 배포할 때는 EXE 하나만 보내면 안 됩니다.
+      - code [ref=f2e40]: release\win-unpacked-lite-2.0.0\
+      - text: 또는
+      - code [ref=f2e41]: release\win-unpacked-pro-2.0.0\
+      - text: 폴더 전체를 ZIP으로 압축해서 전달해야 합니다.
+  - generic [ref=f2e42]:
+    - heading "2. Lite와 Pro 기능 차이" [level=2] [ref=f2e43]
+    - table [ref=f2e44]:
+      - rowgroup [ref=f2e45]:
+        - row "기능 Lite Pro 설명" [ref=f2e46]:
+          - columnheader "기능" [ref=f2e47]
+          - columnheader "Lite" [ref=f2e48]
+          - columnheader "Pro" [ref=f2e49]
+          - columnheader "설명" [ref=f2e50]
+      - rowgroup [ref=f2e51]:
+        - row "기본 카드 작성 가능 가능 카드별 제목, 소제목, 배지, 본문, 출처, 강조 문구를 작성합니다." [ref=f2e52]:
+          - rowheader "기본 카드 작성" [ref=f2e53]
+          - cell "가능" [ref=f2e54]
+          - cell "가능" [ref=f2e55]
+          - cell "카드별 제목, 소제목, 배지, 본문, 출처, 강조 문구를 작성합니다." [ref=f2e56]
+        - row "스타일/비율 선택 가능 가능 신문 오버레이, 시네마틱, 매거진, 체크리스트 등 기본 스타일과 4:5, 1:1, 16:9, 4:3 비율을 선택합니다." [ref=f2e57]:
+          - rowheader "스타일/비율 선택" [ref=f2e58]
+          - cell "가능" [ref=f2e59]
+          - cell "가능" [ref=f2e60]
+          - cell "신문 오버레이, 시네마틱, 매거진, 체크리스트 등 기본 스타일과 4:5, 1:1, 16:9, 4:3 비율을 선택합니다." [ref=f2e61]
+        - row "폰트/배경 추가 가능 가능 로컬 폰트와 배경 이미지를 사용자 라이브러리에 추가해 렌더링에 적용합니다." [ref=f2e62]:
+          - rowheader "폰트/배경 추가" [ref=f2e63]
+          - cell "가능" [ref=f2e64]
+          - cell "가능" [ref=f2e65]
+          - cell "로컬 폰트와 배경 이미지를 사용자 라이브러리에 추가해 렌더링에 적용합니다." [ref=f2e66]
+        - row "PNG 생성 가능 가능 현재 카드 PNG와 전체 ZIP 내보내기를 사용합니다." [ref=f2e67]:
+          - rowheader "PNG 생성" [ref=f2e68]
+          - cell "가능" [ref=f2e69]
+          - cell "가능" [ref=f2e70]
+          - cell "현재 카드 PNG와 전체 ZIP 내보내기를 사용합니다." [ref=f2e71]
+        - row "AI 대화/대본 생성 잠금 가능 Claude Code, Codex CLI, Gemini CLI 같은 외부 CLI와 연결해 주제, 리서치, 카드 대본을 만듭니다." [ref=f2e72]:
+          - rowheader "AI 대화/대본 생성" [ref=f2e73]
+          - cell "잠금" [ref=f2e74]
+          - cell "가능" [ref=f2e75]
+          - cell "Claude Code, Codex CLI, Gemini CLI 같은 외부 CLI와 연결해 주제, 리서치, 카드 대본을 만듭니다." [ref=f2e76]
+        - row "이미지 라이브러리/누끼 잠금 가능 배지 이미지, 넘김 기호 이미지, 배경 제거 이미지를 관리합니다." [ref=f2e77]:
+          - rowheader "이미지 라이브러리/누끼" [ref=f2e78]
+          - cell "잠금" [ref=f2e79]
+          - cell "가능" [ref=f2e80]
+          - cell "배지 이미지, 넘김 기호 이미지, 배경 제거 이미지를 관리합니다." [ref=f2e81]
+        - row "CSV 대량 생성 잠금 가능 CSV 템플릿으로 여러 카드뉴스를 한 번에 렌더링합니다." [ref=f2e82]:
+          - rowheader "CSV 대량 생성" [ref=f2e83]
+          - cell "잠금" [ref=f2e84]
+          - cell "가능" [ref=f2e85]
+          - cell "CSV 템플릿으로 여러 카드뉴스를 한 번에 렌더링합니다." [ref=f2e86]
+        - row "프로젝트 내보내기/가져오기 잠금 가능 작업 덱과 관련 배경 asset을 archive로 옮길 때 사용합니다." [ref=f2e87]:
+          - rowheader "프로젝트 내보내기/가져오기" [ref=f2e88]
+          - cell "잠금" [ref=f2e89]
+          - cell "가능" [ref=f2e90]
+          - cell "작업 덱과 관련 배경 asset을 archive로 옮길 때 사용합니다." [ref=f2e91]
+    - generic [ref=f2e92]:
+      - figure "Lite 기본 화면. 기본 작성과 PNG 생성 중심으로 사용할 수 있습니다." [ref=f2e93]:
+        - img "Cardnews Studio Lite 기본 화면" [ref=f2e94]
+        - generic [ref=f2e95]: Lite 기본 화면. 기본 작성과 PNG 생성 중심으로 사용할 수 있습니다.
+      - figure "Lite에서 Pro 전용 기능을 누르면 잠금 안내가 표시됩니다." [ref=f2e96]:
+        - img "Lite Pro 기능 잠금 안내 화면" [ref=f2e97]
+        - generic [ref=f2e98]: Lite에서 Pro 전용 기능을 누르면 잠금 안내가 표시됩니다.
+  - generic [ref=f2e99]:
+    - heading "3. 첫 카드뉴스 작성 방법" [level=2] [ref=f2e100]
+    - generic [ref=f2e101]:
+      - article [ref=f2e102]:
+        - generic [ref=f2e103]: 스타일
+        - paragraph [ref=f2e104]:
+          - text: 상단
+          - code [ref=f2e105]: 스타일
+          - text: 에서 카드뉴스 톤을 고릅니다. 사진형 스타일은 배경 이미지를 함께 쓰면 효과가 큽니다.
+      - article [ref=f2e106]:
+        - generic [ref=f2e107]: 비율
+        - paragraph [ref=f2e108]:
+          - code [ref=f2e109]: 세로형 4:5
+          - text: 는 인스타 캐러셀에 적합합니다. 정방형이나 가로형은 블로그, 강의자료, 썸네일에 맞춰 고릅니다.
+      - article [ref=f2e110]:
+        - generic [ref=f2e111]: 헤더/푸터
+        - paragraph [ref=f2e112]:
+          - text: 헤더는 상단 브랜드명, 푸터는 하단 계정명입니다. 푸터에
+          - code [ref=f2e113]: "@"
+          - text: 를 입력하지 않아도 앱에서 표시 규칙을 처리합니다.
+      - article [ref=f2e114]:
+        - generic [ref=f2e115]: 카드 선택
+        - paragraph [ref=f2e116]:
+          - text: 좌측 썸네일에서 수정할 카드를 고르고 우측
+          - code [ref=f2e117]: 콘텐츠
+          - text: 탭에서 내용을 입력합니다.
+    - figure "Pro 전체 작업 화면. 좌측은 카드 목록, 중앙은 미리보기, 우측은 편집 패널입니다." [ref=f2e118]:
+      - img "Cardnews Studio Pro 전체 작업 화면" [ref=f2e119]
+      - generic [ref=f2e120]: Pro 전체 작업 화면. 좌측은 카드 목록, 중앙은 미리보기, 우측은 편집 패널입니다.
+    - heading "카드 문법 예시" [level=3] [ref=f2e121]
+    - code [ref=f2e123]: "유형: 표지 배지: MONEY NOTE 제목: 돈 이야기를 *다시* 배워야 하는 이유 소제목: 숫자보다 먼저 보는 관점 본문: 첫 번째 문단을 씁니다. - 자동 불릿 예시 - 두 번째 불릿 예시 출처: 내부 메모 강조: 저장하고 다시 보기"
+    - figure "콘텐츠 탭에서는 카드 유형, 배지, 제목, 소제목, 본문, 불릿, 출처, 강조 문구를 수정합니다." [ref=f2e124]:
+      - img "카드 콘텐츠 편집 화면" [ref=f2e125]
+      - generic [ref=f2e126]: 콘텐츠 탭에서는 카드 유형, 배지, 제목, 소제목, 본문, 불릿, 출처, 강조 문구를 수정합니다.
+  - generic [ref=f2e127]:
+    - heading "4. 디자인 조절 방법" [level=2] [ref=f2e128]
+    - generic [ref=f2e129]:
+      - article [ref=f2e130]:
+        - generic [ref=f2e131]: 전역
+        - paragraph [ref=f2e132]: 상단 스타일, 비율, 헤더, 푸터는 전체 카드뉴스에 영향을 줍니다.
+      - article [ref=f2e133]:
+        - generic [ref=f2e134]: 카드 배경
+        - paragraph [ref=f2e135]: 우측 디자인 탭에서 카드별 배경, 밝기, 대비, 채도, 어둡기를 조절합니다.
+      - article [ref=f2e136]:
+        - generic [ref=f2e137]: 텍스트
+        - paragraph [ref=f2e138]: 텍스트 크기, 굵기, 기울임, 정렬, 자간, 행간을 조절합니다.
+      - article [ref=f2e139]:
+        - generic [ref=f2e140]: 레이어
+        - paragraph [ref=f2e141]: 텍스트 박스, 모형, 선, 이미지를 추가하고 X/Y/W/H 값으로 위치와 크기를 조정합니다.
+    - figure "디자인 탭. 카드 배경, 배지, 넘김 기호, 텍스트, 레이어를 한 곳에서 조절합니다." [ref=f2e142]:
+      - img "디자인 패널 화면" [ref=f2e143]
+      - generic [ref=f2e144]: 디자인 탭. 카드 배경, 배지, 넘김 기호, 텍스트, 레이어를 한 곳에서 조절합니다.
+    - generic [ref=f2e145]: 이미지를 배경 라이브러리에 추가하면 현재 PC의 사용자 데이터 폴더에 저장됩니다. 다른 컴퓨터로 그대로 따라가지 않으므로, 프로젝트 이동이 필요하면 Pro의 프로젝트 내보내기/가져오기를 사용하세요.
+  - generic [ref=f2e146]:
+    - heading "5. PNG 생성과 내보내기" [level=2] [ref=f2e147]
+    - list [ref=f2e148]:
+      - listitem [ref=f2e149]:
+        - text: 상단
+        - code [ref=f2e150]: PNG 생성
+        - text: 버튼을 누릅니다.
+      - listitem [ref=f2e151]: 결과 패널에서 경고와 실패 항목을 확인합니다.
+      - listitem [ref=f2e152]:
+        - code [ref=f2e153]: 현재 카드 PNG
+        - text: 로 한 장만 저장하거나
+        - code [ref=f2e154]: 전체 ZIP
+        - text: 으로 전체 카드를 묶습니다.
+      - listitem [ref=f2e155]:
+        - code [ref=f2e156]: 폴더 열기
+        - text: 를 누르면 렌더 결과 폴더가 열립니다.
+    - figure "내보내기 탭. PNG 생성 결과, ZIP 저장, CSV 대량 생성, 프로젝트 archive를 관리합니다." [ref=f2e157]:
+      - img "내보내기 패널 화면" [ref=f2e158]
+      - generic [ref=f2e159]: 내보내기 탭. PNG 생성 결과, ZIP 저장, CSV 대량 생성, 프로젝트 archive를 관리합니다.
+  - generic [ref=f2e160]:
+    - heading "6. Pro 기능 활용" [level=2] [ref=f2e161]
+    - generic [ref=f2e162]:
+      - article [ref=f2e163]:
+        - generic [ref=f2e164]: AI 대화
+        - paragraph [ref=f2e165]: AI 버튼을 눌러 대화 패널을 열고, 주제나 원문을 입력합니다. 주제 찾기, 리서치 메모, 카드 대본 만들기 프리셋을 사용할 수 있습니다.
+      - article [ref=f2e166]:
+        - generic [ref=f2e167]: AI 결과 적용
+        - paragraph [ref=f2e168]:
+          - text: 카드 10장 양식으로 감지된 답변은
+          - code [ref=f2e169]: 카드에 적용
+          - text: 버튼으로 현재 덱에 반영합니다.
+      - article [ref=f2e170]:
+        - generic [ref=f2e171]: CSV 대량 생성
+        - paragraph [ref=f2e172]: 내보내기 탭에서 CSV 템플릿을 저장하고 행별 데이터를 채운 뒤 BULK PNG를 실행합니다.
+      - article [ref=f2e173]:
+        - generic [ref=f2e174]: 프로젝트 이동
+        - paragraph [ref=f2e175]: Pro의 프로젝트 내보내기는 덱과 연결 배경 asset을 함께 archive로 저장합니다. 다른 PC에서 가져오면 배경 누락을 줄일 수 있습니다.
+    - figure "Pro AI 패널. 외부 CLI provider를 선택하고 자연어로 대화해 카드뉴스 초안을 만듭니다." [ref=f2e176]:
+      - img "Pro AI 대화 패널" [ref=f2e177]
+      - generic [ref=f2e178]: Pro AI 패널. 외부 CLI provider를 선택하고 자연어로 대화해 카드뉴스 초안을 만듭니다.
+  - generic [ref=f2e179]:
+    - heading "7. 자주 묻는 문제" [level=2] [ref=f2e180]
+    - generic [ref=f2e181]:
+      - article [ref=f2e182]:
+        - heading "다른 컴퓨터에 배경 이미지가 없어요" [level=3] [ref=f2e183]
+        - paragraph [ref=f2e184]: 설치 EXE에는 이 PC에서 추가한 배경 이미지가 자동 포함되지 않습니다. Pro 프로젝트 내보내기/가져오기 또는 별도 이미지 파일 전달이 필요합니다.
+      - article [ref=f2e185]:
+        - heading "SmartScreen 경고가 떠요" [level=3] [ref=f2e186]
+        - paragraph [ref=f2e187]:
+          - text: 코드 서명 전 개인 배포 파일에서 흔합니다. 파일 출처를 확인한 뒤
+          - code [ref=f2e188]: 추가 정보
+          - text: 와
+          - code [ref=f2e189]: 실행
+          - text: 을 누릅니다.
+      - article [ref=f2e190]:
+        - heading "무설치 EXE 하나만 보냈더니 실행이 안 돼요" [level=3] [ref=f2e191]
+        - paragraph [ref=f2e192]:
+          - text: 무설치 버전은 폴더 전체가 필요합니다.
+          - code [ref=f2e193]: win-unpacked-...
+          - text: 폴더를 ZIP으로 압축해 전달하세요.
+      - article [ref=f2e194]:
+        - heading "AI가 안 보여요" [level=3] [ref=f2e195]
+        - paragraph [ref=f2e196]: AI는 Pro 기능입니다. Pro에서도 Claude Code, Codex CLI, Gemini CLI 중 사용할 provider가 설치되어 있어야 실제 응답을 받을 수 있습니다.
+  - generic [ref=f2e197]:
+    - paragraph [ref=f2e198]: "스크린샷 캡처: Playwright CLI, viewport 1440x1000, Pro/Lite dev server. 문서 생성일: 2026-07-09."
+    - paragraph [ref=f2e199]:
+      - text: "문의 링크:"
+      - link "AX문의/강의 문의" [ref=f2e200] [cursor=pointer]:
+        - /url: https://open.kakao.com/me/kkongdon
+      - text: "· Threads:"
+      - link "@kkongdon_story" [ref=f2e201] [cursor=pointer]:
+        - /url: https://www.threads.com/@kkongdon_story

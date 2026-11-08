@@ -36,6 +36,26 @@ describe("evaluateQualityGates", () => {
     expect(report.issues[0]?.measured).toBeLessThan(4.5);
   });
 
+  it("accepts Chromium color(srgb) values when measuring contrast", () => {
+    const report = evaluateQualityGates([
+      makeMetric({ backgroundColor: "#fffcf4", color: "color(srgb 0.113725 0.113725 0.105882)" })
+    ]);
+
+    expect(report.status).toBe("pass");
+    expect(report.issues).toEqual([]);
+  });
+
+  it("does not evaluate the aggregate body container twice when child text slots exist", () => {
+    const report = evaluateQualityGates([
+      makeMetric({ slot: "body", fontSize: 16, top: 300, height: 180, text: "문단과 불릿" }),
+      makeMetric({ slot: "paragraph", fontSize: 34, top: 300, height: 48, text: "문단" }),
+      makeMetric({ slot: "bullet", fontSize: 34, top: 372, height: 48, text: "불릿" })
+    ]);
+
+    expect(report.status).toBe("pass");
+    expect(report.issues).toEqual([]);
+  });
+
   it("fails text that leaves the safe zone", () => {
     const report = evaluateQualityGates([makeMetric({ left: 12, slot: "footer" })]);
 

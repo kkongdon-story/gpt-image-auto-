@@ -1,12 +1,20 @@
 // noqa: SIZE_OK - v4 release keeps Electron bootstrap and IPC registration together; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
 import AdmZip from "adm-zip";
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
+import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { aspectRatios } from "../src/domain/aspectRatios.js";
 import { parseCardText } from "../src/domain/cardParser.js";
 import { parseBulkCsv } from "../src/domain/csvBulk.js";
+import {
+  materializeTemplateBulkRow,
+  preflightTemplateBulkCsv,
+  validateBulkBindingMetadata
+} from "../src/domain/templateBulkBindings.js";
+import { isAllowedExternalUrl, isAllowedGptsTemplateBuilderUrl } from "../src/domain/externalLinks.js";
 import {
   createPixabayApiUrl,
   createPixabayFallbackUrl,
@@ -17,6 +25,7 @@ import type {
   AiChatMessage,
   AiProviderId,
   BackgroundLibraryItem,
+  BulkBindingMetadata,
   BulkRenderResult,
   BulkRenderRowResult,
   CardnewsError,
@@ -36,6 +45,13 @@ import { removeBackground } from "../src/render-engine/backgroundRemoval.js";
 import { renderDeckOffscreen } from "../src/render-engine/offscreenRenderer.js";
 import { isSafeStylePresetRecord } from "../src/render-engine/styleSafety.js";
 import { stylePresets } from "../src/render-engine/stylePresets.js";
+
+// Windows 일부 배포/QA 환경에서 Chromium sandboxed GPU helper가 DLL 로드 실패
+// (exit_code=-1073741515)로 offscreen paint를 시작하지 못한다. 앱은 로컬 파일만
+// 로드하고 nodeIntegration=false/contextIsolation=true를 유지하므로 PNG 렌더 안정성을
+// 위해 Chromium process sandbox를 끈다.
+app.commandLine.appendSwitch("no-sandbox");
+app.disableHardwareAcceleration();
 import {
   addBackgroundToLibrary,
   addImageToLibrary,
@@ -51,6 +67,7 @@ import {
   fontMimeTypeForExtension,
   getCardnewsStorageRoot,
   getRenderOutputDirectory,
+  isRenderJobId,
   importFontToLibrary,
   isDeckPreset,
   isWorkspaceState,
@@ -62,12 +79,17 @@ import {
   loadAppSettings,
   loadDeck,
   loadWorkspaceState,
+  purgeImageLibrarySmokeFixtures,
+  removeImageFromLibrary,
+  removeBackgroundFromLibrary,
   saveAppSettings,
   saveCustomStyle,
   saveDeckDraft,
   saveDeckPresetToStore,
   saveImageBufferToLibrary,
   saveWorkspaceState,
+  smokeFixtureImageAttribution,
+  internalSmokeImageAttribution,
   type StoredLocalImage
 } from "../src/storage/deckStore.js";
 import {
@@ -75,17 +97,52 @@ import {
   importProjectArchive
 } from "../src/storage/projectArchive.js";
 import {
+  deleteMediaAsset,
+  getMediaAsset,
+  importMediaAsset,
+  listMediaAssets,
+  type MediaLibraryError,
+  type MediaLibraryUsageRef
+} from "../src/storage/mediaLibrary.js";
+import type { Mp4ExportInput, Mp4ExportProgress } from "../src/domain/cardnews-api.js";
+import { compileVideoTimeline } from "../src/domain/videoTimeline.js";
+import { defaultFfmpegManifest, type FfmpegProbe } from "./ffmpegPreflight.js";
+import { exportVideoMp4 } from "./videoExporter.js";
+import type { VideoExportAudioSegment } from "./videoExporter.js";
+import { createWorkspaceFrameProducer } from "./videoFrameProducer.js";
+import { createVideoMediaProbe } from "./videoMediaProbe.js";
+import {
   isAiProviderId,
   listAiProviderStatuses,
   runAiProviderChat
 } from "./ai/cliAdapters.js";
+import type { AiProviderInstallRecipe } from "./ai/cliProviderDefinitions.js";
+import { installAiProviderRecipe } from "./ai/cliProviderInstaller.js";
+import type { SmokeActionResult } from "./ai/smoke/aiSmokeTypes.js";
+import {
+  createStockDownloadPath,
+  fetchAllowedPixabayImage,
+  isSafeStockImageDownloadInput,
+  readResponseBytesWithLimit
+} from "./stockImageDownload.js";
+import { importTemplatePackArchive } from "./templatePackImporter.js";
+import {
+  createMediaAssetUrl,
+  installMediaProtocolHandler,
+  registerMediaProtocolScheme
+} from "./mediaProtocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const devServerUrl = process.env["VITE_DEV_SERVER_URL"];
-const smokeScreenshotPath = process.env["CARDNEWS_SMOKE_SCREENSHOT"];
-const smokeTextPath = process.env["CARDNEWS_SMOKE_TEXT"];
-const smokeAction = process.env["CARDNEWS_SMOKE_ACTION"];
-const allowedExternalUrls = new Set(["https://www.threads.com/@kkongdon_story", "https://open.kakao.com/me/kkongdon"]);
+registerMediaProtocolScheme();
+const devServerUrl = app.isPackaged ? undefined : process.env["VITE_DEV_SERVER_URL"];
+const smokeScreenshotPath = app.isPackaged ? undefined : process.env["CARDNEWS_SMOKE_SCREENSHOT"];
+const smokeTextPath = app.isPackaged ? undefined : process.env["CARDNEWS_SMOKE_TEXT"];
+const smokeAction = app.isPackaged ? undefined : process.env["CARDNEWS_SMOKE_ACTION"];
+if (smokeAction) {
+  const smokeUserDataPath = path.join(app.getPath("temp"), "cardnews-studio-smoke", `${process.pid}-${smokeAction}`);
+  mkdirSync(smokeUserDataPath, { recursive: true });
+  app.setPath("userData", smokeUserDataPath);
+}
 let selectedStyleReferenceImages: readonly StoredLocalImage[] = [];
 let approvedStyleProfile: StyleProfile | undefined;
 
@@ -96,23 +153,31 @@ class SmokeCaptureError extends Error {
   }
 }
 
-type SmokeActionResult =
-  | {
-      readonly ok: true;
-    }
-  | {
-      readonly ok: false;
-      readonly message: string;
-    };
-
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
 }
 
+function parseSmokeWindowDimension(name: string, fallback: number): number {
+  const rawValue = process.env[name];
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsedValue = Number.parseInt(rawValue, 10);
+  return Number.isFinite(parsedValue) && parsedValue >= 720 && parsedValue <= 4096
+    ? parsedValue
+    : fallback;
+}
+
 async function captureSmokePng(mainWindow: BrowserWindow): Promise<Buffer> {
   let lastFailure = "unknown failure";
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive();
+    await delay(300);
+  }
 
   for (const retryDelay of [500, 1000, 2000, 4000] as const) {
     if (retryDelay > 0) {
@@ -121,7 +186,10 @@ async function captureSmokePng(mainWindow: BrowserWindow): Promise<Buffer> {
 
     try {
       const screenshot = await mainWindow.webContents.capturePage();
-      return screenshot.toPNG();
+      if (!screenshot.isEmpty()) {
+        return screenshot.toPNG();
+      }
+      lastFailure = "capturePage returned an empty image";
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : "non-Error rejection";
     }
@@ -169,10 +237,13 @@ async function runSmokeCapture(mainWindow: BrowserWindow): Promise<void> {
 
   if (!smokeActionResult.ok) {
     console.error(smokeActionResult.message);
+    mainWindow.destroy();
     app.exit(1);
     return;
   }
 
+  console.log(`CARDNEWS_SMOKE_ACTION ${smokeAction ?? "none"} PASS`);
+  mainWindow.destroy();
   app.exit(0);
 }
 
@@ -300,6 +371,8 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
       `);
       await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
       return await readRenderSmokeResult(mainWindow);
+    case "template-pack-import":
+      return await runTemplatePackImportSmoke(mainWindow);
     case "render-bulk-sample": {
       const result = await mainWindow.webContents.executeJavaScript(`
         (async () => {
@@ -345,25 +418,241 @@ async function runSmokeAction(mainWindow: BrowserWindow): Promise<SmokeActionRes
     }
     case "project-roundtrip":
       return await runProjectRoundtripSmoke(mainWindow);
+    case "body-number-roundtrip-regression":
+      return await runBodyNumberRoundtripRegressionSmoke(mainWindow);
     case "edit-layer":
       return await runLayerEditSmoke(mainWindow);
     case "layer-controls-regression":
       return await runLayerControlsRegressionSmoke(mainWindow);
     case "line-endpoint-regression":
       return await runLineEndpointRegressionSmoke(mainWindow);
+    case "footer-display-regression":
+      return await runFooterDisplayRegressionSmoke(mainWindow);
+    case "page-format-dropdown-regression":
+      return await runPageFormatDropdownRegressionSmoke(mainWindow);
+    case "content-input-latency-regression":
+      return await runContentInputLatencyRegressionSmoke(mainWindow);
+    case "content-title-whitespace-regression":
+      return await runContentTitleWhitespaceRegressionSmoke(mainWindow);
+    case "inspector-layout-regression":
+      return await runInspectorLayoutRegressionSmoke(mainWindow);
+    case "inspector-design-scroll-regression":
+      return await runInspectorDesignScrollRegressionSmoke(mainWindow);
     case "chrome-style-regression":
       return await runChromeStyleRegressionSmoke(mainWindow);
     case "content-form-regression":
       return await runContentFormRegressionSmoke(mainWindow);
+    case "image-picker-library-hygiene-regression":
+      return await runImagePickerLibraryHygieneRegressionSmoke(mainWindow);
+    case "m15-image-library-before":
+      return await runM15ImageLibraryBeforeSmoke(mainWindow);
+    case "m15-toolbar":
+      return await runM15ToolbarSmoke(mainWindow);
+    case "background-manager-regression": {
+      const { runBackgroundManagerSmoke } = await import("./backgroundManagerSmoke.js");
+      return await runBackgroundManagerSmoke(mainWindow, storageRoot());
+    }
     case "badge-background-removal-regression":
       return await runBadgeBackgroundRemovalRegressionSmoke(mainWindow);
     case "next-hint-image-regression":
       return await runNextHintImageRegressionSmoke(mainWindow);
+    case "ai-provider-detection-regression":
+    case "ai-raw-chat-regression":
+    case "ai-error-sanitization-regression":
+    case "ai-preset-retry-regression":
+    case "ai-timeout-progress-regression":
+    case "ai-preset-mode-regression":
+    case "ai-provider-command-regression":
+    case "ai-workflow-regression":
+    case "ai-workflow-visual-regression":
     case "ai-draft-regression":
-      return await runAiDraftRegressionSmoke(mainWindow);
+      return await runAiSmokeAction(smokeAction, mainWindow);
     default:
       throw new SmokeCaptureError(`Unknown CARDNEWS_SMOKE_ACTION: ${smokeAction}`);
   }
+}
+
+async function runAiSmokeAction(action: string, mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  switch (action) {
+    case "ai-provider-detection-regression": {
+      const { runAiProviderDetectionRegressionSmoke } = await import("./ai/smoke/aiSmokeConversation.js");
+      return await runAiProviderDetectionRegressionSmoke(mainWindow);
+    }
+    case "ai-raw-chat-regression": {
+      const { runAiRawChatRegressionSmoke } = await import("./ai/smoke/aiSmokeConversation.js");
+      return await runAiRawChatRegressionSmoke(mainWindow);
+    }
+    case "ai-error-sanitization-regression": {
+      const { runAiErrorSanitizationRegressionSmoke } = await import("./ai/smoke/aiSmokeErrors.js");
+      return await runAiErrorSanitizationRegressionSmoke(mainWindow);
+    }
+    case "ai-preset-retry-regression": {
+      const { runAiPresetRetryRegressionSmoke } = await import("./ai/smoke/aiSmokeErrors.js");
+      return await runAiPresetRetryRegressionSmoke(mainWindow);
+    }
+    case "ai-timeout-progress-regression": {
+      const { runAiTimeoutProgressRegressionSmoke } = await import("./ai/smoke/aiSmokeProgressPresets.js");
+      return await runAiTimeoutProgressRegressionSmoke(mainWindow);
+    }
+    case "ai-preset-mode-regression": {
+      const { runAiPresetModeRegressionSmoke } = await import("./ai/smoke/aiSmokeProgressPresets.js");
+      return await runAiPresetModeRegressionSmoke(mainWindow);
+    }
+    case "ai-provider-command-regression": {
+      const { runAiProviderCommandRegressionSmoke } = await import("./ai/smoke/aiSmokeCommandWorkflow.js");
+      return await runAiProviderCommandRegressionSmoke(mainWindow, storageRoot());
+    }
+    case "ai-workflow-regression": {
+      const { runAiWorkflowRegressionSmoke } = await import("./ai/smoke/aiSmokeCommandWorkflow.js");
+      return await runAiWorkflowRegressionSmoke(mainWindow);
+    }
+    case "ai-workflow-visual-regression": {
+      const { runAiWorkflowVisualRegressionSmoke } = await import("./ai/smoke/aiSmokeVisual.js");
+      return await runAiWorkflowVisualRegressionSmoke(mainWindow);
+    }
+    case "ai-draft-regression": {
+      const { runAiDraftRegressionSmoke } = await import("./ai/smoke/aiSmokeDraft.js");
+      return await runAiDraftRegressionSmoke(mainWindow, {
+        clickSmokeButton,
+        readRenderSmokeResult,
+        waitForSmokeText
+      });
+    }
+    default:
+      return { ok: false, message: `Unknown AI smoke action: ${action}` };
+  }
+}
+
+async function runTemplatePackImportSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const zipPath = await createTemplatePackSmokeZip(app.getPath("userData"));
+  const imported = await importTemplatePackArchive(storageRoot(), zipPath);
+  if (isCardnewsError(imported)) {
+    return { ok: false, message: imported.message };
+  }
+  if (imported.cardCount !== 1 || imported.backgroundCount !== 1) {
+    return { ok: false, message: `Template-pack smoke imported unexpected counts: ${JSON.stringify(imported)}` };
+  }
+
+  const workspace = await loadWorkspaceState(storageRoot());
+  if (
+    !workspace ||
+    workspace.headerLabel !== "M13 SMOKE" ||
+    workspace.footerAccount !== "kkongdon_story" ||
+    workspace.cards.length !== 1 ||
+    !workspace.cards[0]?.includes("템플릿팩 스모크")
+  ) {
+    return { ok: false, message: "Template-pack smoke import did not save the expected workspace." };
+  }
+
+  const deck = buildDeckFromDraft(
+    `template-pack-smoke-${Date.now()}`,
+    deckDraftFromWorkspace(workspace),
+    undefined
+  );
+  if (isCardnewsError(deck)) {
+    return { ok: false, message: deck.message };
+  }
+  const renderJobId = `template-pack-smoke-${Date.now()}`;
+  const rendered = await renderDeckToOutput(
+    deck,
+    renderJobId,
+    getRenderOutputDirectory(storageRoot(), renderJobId),
+    await listCustomStyles(storageRoot())
+  );
+  if (isCardnewsError(rendered)) {
+    return { ok: false, message: rendered.message };
+  }
+  const firstCard = rendered.cards[0];
+  if (
+    rendered.cardCount !== 1 ||
+    !firstCard ||
+    firstCard.bytes < 100 ||
+    !firstCard.previewDataUrl.startsWith("data:image/png;base64,")
+  ) {
+    return { ok: false, message: `Template-pack smoke render failed: ${JSON.stringify(rendered)}` };
+  }
+
+  await reloadSmokeWindow(mainWindow);
+  await delay(800);
+
+  return { ok: true };
+}
+
+function deckDraftFromWorkspace(workspace: WorkspaceState): DeckDraft {
+  return {
+    headerLabel: workspace.headerLabel,
+    footerAccount: workspace.footerAccount,
+    cards: workspace.cards.map((rawText, cardIndex) => ({ index: cardIndex + 1, rawText })),
+    styleId: workspace.styleId,
+    ...(workspace.accentColor ? { accentColor: workspace.accentColor } : {}),
+    ...(typeof workspace.backgroundDim === "number" ? { backgroundDim: workspace.backgroundDim } : {}),
+    ...(workspace.aspectRatio ? { aspectRatio: workspace.aspectRatio } : {}),
+    ...(workspace.backgroundId ? { backgroundId: workspace.backgroundId } : {}),
+    ...(workspace.fontId ? { fontId: workspace.fontId } : {}),
+    ...(workspace.chrome ? { chrome: workspace.chrome } : {}),
+    ...(workspace.nextHint ? { nextHint: workspace.nextHint } : {}),
+    ...(workspace.overrides ? { overrides: workspace.overrides } : {})
+  };
+}
+
+async function createTemplatePackSmokeZip(root: string): Promise<string> {
+  const smokeRoot = path.join(root, "m13-template-pack-smoke");
+  await fs.mkdir(smokeRoot, { recursive: true });
+  const zipPath = path.join(smokeRoot, "m13-template-pack-smoke.zip");
+  const zip = new AdmZip();
+  zip.addFile("template.json", Buffer.from(JSON.stringify({
+    schema: "kkongdon.cardnews.template-pack.v1",
+    name: "M13 Smoke Template Pack",
+    style: {
+      name: "M13 Smoke Style",
+      usesPhoto: true,
+      pageBackground: "#111111",
+      ink: "#ffffff",
+      inkSub: "#f5f5f5",
+      accentDefault: "#ffd23c",
+      badgeBackground: "#ffd23c",
+      badgeInk: "#111111",
+      defaultDim: 0.2
+    },
+    chrome: {
+      header: "M13 SMOKE",
+      footer: "kkongdon_story",
+      pageFormat: "{n} / {total}"
+    },
+    cards: [
+      {
+        type: "cover",
+        backgroundImage: "backgrounds/card-01-clean.png",
+        badge: "M13 SMOKE",
+        title: "템플릿팩 스모크",
+        subtitle: "불러오기 검증",
+        layers: [
+          { kind: "shape", x: 8, y: 8, width: 18, height: 7, fill: "#ffd23c", radius: 2 },
+          { kind: "line", x1: 70, y1: 84, x2: 94, y2: 84, thickness: 3, color: "#ffffff" }
+        ]
+      }
+    ]
+  }, null, 2), "utf8"));
+  zip.addFile("backgrounds/card-01-clean.png", createSmokePng());
+  await fs.writeFile(zipPath, zip.toBuffer());
+  return zipPath;
+}
+
+function createSmokePng(): Buffer {
+  const size = 24;
+  const bitmap = Buffer.alloc(size * size * 4);
+  for (let pixel = 0; pixel < size * size; pixel += 1) {
+    const offset = pixel * 4;
+    bitmap[offset] = 0x11;
+    bitmap[offset + 1] = 0x1d;
+    bitmap[offset + 2] = 0x2f;
+    bitmap[offset + 3] = 0xff;
+  }
+  const image = nativeImage.createFromBitmap(bitmap, { width: size, height: size });
+  if (image.isEmpty()) {
+    throw new Error("Template-pack smoke image could not be created.");
+  }
+  return image.toPNG();
 }
 
 async function runProjectRoundtripSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
@@ -447,6 +736,562 @@ async function seedProjectSmokeWorkspace(): Promise<WorkspaceState> {
   };
   await saveWorkspaceState(storageRoot(), workspace);
   return workspace;
+}
+
+type BodyNumberSmokePhase = "customize" | "delete" | "verify-deleted";
+
+async function runBodyNumberRoundtripRegressionSmoke(
+  mainWindow: BrowserWindow
+): Promise<SmokeActionResult> {
+  const customize = await runBodyNumberSmokePhase(mainWindow, "customize");
+  if (!isSuccessfulBodyNumberSmokePhase(customize, "customize")) {
+    return {
+      ok: false,
+      message: `Body-number customize smoke failed: ${JSON.stringify(customize)}`
+    };
+  }
+
+  await reloadSmokeWindow(mainWindow);
+  const deletion = await runBodyNumberSmokePhase(mainWindow, "delete");
+  if (!isSuccessfulBodyNumberSmokePhase(deletion, "delete")) {
+    return {
+      ok: false,
+      message: `Body-number delete smoke failed: ${JSON.stringify(deletion)}`
+    };
+  }
+
+  const persistedWorkspace = await loadWorkspaceState(storageRoot());
+  const persistedOverride = persistedWorkspace?.overrides?.["2"];
+  if (
+    persistedOverride?.bodyNumberMode !== "hide" ||
+    persistedOverride.bodyNumberText !== "A"
+  ) {
+    return {
+      ok: false,
+      message: `Body-number workspace persistence failed: ${JSON.stringify(persistedOverride)}`
+    };
+  }
+
+  const projectSmokeRoot = path.join(storageRoot(), "body-number-project-roundtrip");
+  const projectPath = path.join(projectSmokeRoot, "body-number.cardnews");
+  const importRoot = path.join(projectSmokeRoot, "import-root");
+  await fs.rm(projectSmokeRoot, { recursive: true, force: true });
+  await fs.mkdir(importRoot, { recursive: true });
+  const exported = await exportProjectArchive(storageRoot(), projectPath, app.getVersion());
+  if (isCardnewsError(exported)) {
+    return { ok: false, message: exported.message };
+  }
+  const imported = await importProjectArchive(importRoot, projectPath);
+  if (isCardnewsError(imported)) {
+    return { ok: false, message: imported.message };
+  }
+  const importedOverride = imported.workspace.overrides?.["2"];
+  if (
+    importedOverride?.bodyNumberMode !== "hide" ||
+    importedOverride.bodyNumberText !== "A"
+  ) {
+    return {
+      ok: false,
+      message: `Body-number project archive persistence failed: ${JSON.stringify(importedOverride)}`
+    };
+  }
+
+  await reloadSmokeWindow(mainWindow);
+  const verification = await runBodyNumberSmokePhase(mainWindow, "verify-deleted");
+  if (!isSuccessfulBodyNumberSmokePhase(verification, "verify-deleted")) {
+    return {
+      ok: false,
+      message: `Body-number reopen smoke failed: ${JSON.stringify(verification)}`
+    };
+  }
+
+  await waitForSmokeText(mainWindow, ["렌더 완료:", "렌더 실패", "게이트 실패"]);
+  const renderResult = await readRenderSmokeResult(mainWindow);
+  if (!renderResult.ok) {
+    return renderResult;
+  }
+
+  const outputDir = await findLatestRenderOutputDirectory();
+  if (!outputDir) {
+    return { ok: false, message: "Body-number smoke render output directory was not found." };
+  }
+  const cardHtmlPath = path.join(outputDir, "card-02.html");
+  const cardPngPath = path.join(outputDir, "card-02.png");
+  const [cardHtml, cardPngStat] = await Promise.all([
+    fs.readFile(cardHtmlPath, "utf8"),
+    fs.stat(cardPngPath)
+  ]);
+  if (cardHtml.includes('data-slot="body-number"') || cardPngStat.size < 1024) {
+    return {
+      ok: false,
+      message: `Body-number PNG render persistence failed: ${JSON.stringify({
+        bodyNumberPresent: cardHtml.includes('data-slot="body-number"'),
+        pngBytes: cardPngStat.size
+      })}`
+    };
+  }
+
+  const evidence = {
+    customize,
+    deletion,
+    verification,
+    projectPath,
+    outputDir,
+    cardHtmlPath,
+    cardPngPath,
+    pngBytes: cardPngStat.size
+  };
+  await mainWindow.webContents.executeJavaScript(`
+    (() => {
+      const pre = document.createElement("pre");
+      pre.id = "body-number-roundtrip-result";
+      pre.style.position = "fixed";
+      pre.style.left = "-100000px";
+      pre.textContent = "BODY_NUMBER_ROUNDTRIP_RESULT " + ${JSON.stringify(JSON.stringify(evidence))};
+      document.body.append(pre);
+    })()
+  `);
+  console.log(`BODY_NUMBER_ROUNDTRIP_RESULT ${JSON.stringify(evidence)}`);
+  return { ok: true };
+}
+
+function isSuccessfulBodyNumberSmokePhase(
+  value: unknown,
+  phase: BodyNumberSmokePhase
+): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>)["ok"] === true &&
+    (value as Record<string, unknown>)["phase"] === phase
+  );
+}
+
+async function runBodyNumberSmokePhase(
+  mainWindow: BrowserWindow,
+  phase: BodyNumberSmokePhase
+): Promise<unknown> {
+  const phasePromise = mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const phase = ${JSON.stringify(phase)};
+      window.__cardnewsBodyNumberSmokeInputStage = "idle";
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitUntil = async (predicate, description, timeout = 15000) => {
+        const started = Date.now();
+        let lastError = "";
+        while (Date.now() - started < timeout) {
+          try {
+            const result = await predicate();
+            if (result) return result;
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error);
+          }
+          await delay(80);
+        }
+        throw new Error(description + (lastError ? " / last error: " + lastError : ""));
+      };
+      const waitFor = (selector, timeout = 15000) =>
+        waitUntil(
+          () => document.querySelector(selector),
+          "Body-number smoke target was not found: " + selector,
+          timeout
+        );
+      const click = async (selector) => {
+        const element = await waitFor(selector);
+        if (!(element instanceof HTMLElement)) {
+          throw new Error("Body-number smoke target is not clickable: " + selector);
+        }
+        element.click();
+        return element;
+      };
+      const selectCard = async (zeroBasedIndex) => {
+        const thumbnails = await waitUntil(
+          () => {
+            const items = Array.from(document.querySelectorAll(".slide-thumb"));
+            return items.length > zeroBasedIndex ? items : null;
+          },
+          "Slide thumbnails were not ready."
+        );
+        thumbnails[zeroBasedIndex].click();
+        await waitUntil(
+          () =>
+            Array.from(document.querySelectorAll(".slide-thumb")).findIndex((item) =>
+              item.classList.contains("active")
+            ) === zeroBasedIndex,
+          "Selected slide did not become active."
+        );
+      };
+      const ensureEditMode = async () => {
+        if (!document.querySelector(".edit-overlay")) {
+          await click('[data-smoke-action="toggle-edit-mode"]');
+        }
+        await waitFor(".edit-overlay");
+      };
+      const readIframeDocument = (kind) => {
+        const selector =
+          kind === "stage"
+            ? '.stage .stage-canvas iframe[title="selected-card"]'
+            : 'iframe[title="card-2"]';
+        const iframe = document.querySelector(selector);
+        return iframe instanceof HTMLIFrameElement ? iframe.contentDocument : null;
+      };
+      const readBodyNumber = (kind) => {
+        const doc = readIframeDocument(kind);
+        const element = doc?.querySelector('[data-slot="body-number"]');
+        return element?.textContent ?? null;
+      };
+      const readSurfaceSnapshot = (kind) => {
+        const doc = readIframeDocument(kind);
+        const card = doc?.querySelector(".card");
+        if (!card || typeof card.getBoundingClientRect !== "function") {
+          throw new Error("Card surface was not readable: " + kind);
+        }
+        const cardRect = card.getBoundingClientRect();
+        if (cardRect.width <= 0 || cardRect.height <= 0) {
+          throw new Error("Card surface has invalid geometry: " + kind);
+        }
+        const entries = Array.from(doc.querySelectorAll("[data-semantic-item-id]")).map((element) => {
+          const id = element.getAttribute("data-semantic-item-id");
+          const rect = element.getBoundingClientRect();
+          const style = doc.defaultView?.getComputedStyle(element);
+          return [
+            id,
+            {
+              text: element.textContent ?? "",
+              left: (rect.left - cardRect.left) / cardRect.width,
+              top: (rect.top - cardRect.top) / cardRect.height,
+              width: rect.width / cardRect.width,
+              height: rect.height / cardRect.height,
+              fontSize: style?.fontSize ?? "",
+              fontWeight: style?.fontWeight ?? "",
+              lineHeight: style?.lineHeight ?? "",
+              letterSpacing: style?.letterSpacing ?? "",
+              textAlign: style?.textAlign ?? "",
+              opacity: style?.opacity ?? "",
+              visibility: style?.visibility ?? "",
+              zIndex: style?.zIndex ?? ""
+            }
+          ];
+        });
+        return Object.fromEntries(entries.filter(([id]) => Boolean(id)));
+      };
+      const compareSurfaces = () => {
+        const stage = readSurfaceSnapshot("stage");
+        const thumbnail = readSurfaceSnapshot("thumbnail");
+        const stageIds = Object.keys(stage).sort();
+        const thumbnailIds = Object.keys(thumbnail).sort();
+        const missing = stageIds
+          .filter((id) => !thumbnailIds.includes(id))
+          .concat(thumbnailIds.filter((id) => !stageIds.includes(id)));
+        let maxGeometryDelta = 0;
+        const styleMismatches = [];
+        for (const id of stageIds.filter((candidate) => thumbnail[candidate])) {
+          const left = stage[id];
+          const right = thumbnail[id];
+          for (const key of ["left", "top", "width", "height"]) {
+            maxGeometryDelta = Math.max(maxGeometryDelta, Math.abs(left[key] - right[key]));
+          }
+          for (const key of [
+            "text",
+            "fontSize",
+            "fontWeight",
+            "lineHeight",
+            "letterSpacing",
+            "textAlign",
+            "opacity",
+            "visibility",
+            "zIndex"
+          ]) {
+            if (left[key] !== right[key]) {
+              styleMismatches.push({ id, key, stage: left[key], thumbnail: right[key] });
+            }
+          }
+        }
+        return {
+          ok: missing.length === 0 && styleMismatches.length === 0 && maxGeometryDelta <= 0.002,
+          missing,
+          styleMismatches,
+          maxGeometryDelta,
+          itemCount: stageIds.length
+        };
+      };
+      const waitForSurfaceMatch = () =>
+        waitUntil(
+          () => {
+            const comparison = compareSurfaces();
+            return comparison.ok ? comparison : null;
+          },
+          "Stage and thumbnail semantic surfaces did not converge."
+        );
+      const waitForBodyNumber = async (expected) => {
+        try {
+          return await waitUntil(
+            () =>
+              readBodyNumber("stage") === expected &&
+              readBodyNumber("thumbnail") === expected,
+            "Body number did not match in stage and thumbnail. expected=" + String(expected)
+          );
+        } catch (error) {
+          const workspace = await window.cardnews.loadWorkspace();
+          throw new Error(
+            (error instanceof Error ? error.message : String(error)) +
+              " diagnostics=" +
+              JSON.stringify({
+                textareaValue: document.querySelector(".semantic-inline-textarea")?.value ?? null,
+                stage: readBodyNumber("stage"),
+                thumbnail: readBodyNumber("thumbnail"),
+                override: workspace?.overrides?.["2"] ?? null
+              })
+          );
+        }
+      };
+      const waitForWorkspaceOverride = async (mode, text) =>
+        waitUntil(
+          async () => {
+            const workspace = await window.cardnews.loadWorkspace();
+            const override = workspace?.overrides?.["2"];
+            return override?.bodyNumberMode === mode && override?.bodyNumberText === text
+              ? { mode: override.bodyNumberMode, text: override.bodyNumberText }
+              : null;
+          },
+          "Workspace override did not persist. mode=" + mode + " text=" + text
+        );
+      const waitForBodyNumberBox = () => {
+        const selector = '[data-semantic-slot$=":body-number"]';
+        return waitUntil(
+          () => document.querySelector(selector),
+          "Body-number smoke target was not found: " +
+            selector +
+            " diagnostics=" +
+            JSON.stringify({
+              overlayIds: Array.from(document.querySelectorAll("[data-semantic-slot]")).map((element) =>
+                element.getAttribute("data-semantic-slot")
+              ),
+              stageIds: Array.from(
+                readIframeDocument("stage")?.querySelectorAll("[data-semantic-item-id]") ?? []
+              ).map((element) => element.getAttribute("data-semantic-item-id")),
+              thumbnailIds: Array.from(
+                readIframeDocument("thumbnail")?.querySelectorAll("[data-semantic-item-id]") ?? []
+              ).map((element) => element.getAttribute("data-semantic-item-id")),
+              stageBodyNumber: readBodyNumber("stage"),
+              thumbnailBodyNumber: readBodyNumber("thumbnail"),
+              editOverlay: (() => {
+                const overlay = document.querySelector(".edit-overlay");
+                return overlay
+                  ? {
+                      semanticSlotCount: overlay.getAttribute("data-semantic-slot-count"),
+                      measuredSemanticCount: overlay.getAttribute("data-measured-semantic-count")
+                    }
+                  : null;
+              })()
+            })
+        );
+      };
+      const selectBodyNumber = async () => {
+        const box = await waitForBodyNumberBox();
+        const rect = box.getBoundingClientRect();
+        box.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            pointerId: 72,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            buttons: 1
+          })
+        );
+        const overlay = await waitFor(".edit-overlay");
+        overlay.dispatchEvent(
+          new PointerEvent("pointerup", {
+            bubbles: true,
+            pointerId: 72,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            buttons: 0
+          })
+        );
+        overlay.focus();
+        await waitFor('[data-toolbar-target="body-number"]');
+        return overlay;
+      };
+      const deleteWithKey = async (key) => {
+        const overlay = await selectBodyNumber();
+        overlay.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key }));
+        await waitForBodyNumber(null);
+      };
+      const historyAction = async (label, expected) => {
+        const button = await waitUntil(
+          () => {
+            const candidate = document.querySelector('[aria-label="' + label + '"]');
+            return candidate instanceof HTMLButtonElement && !candidate.disabled ? candidate : null;
+          },
+          "History action was not enabled: " + label
+        );
+        button.click();
+        await waitForBodyNumber(expected);
+      };
+
+      window.confirm = () => true;
+      await waitUntil(
+        () => document.querySelector('[data-smoke-workspace-ready="true"]'),
+        "Workspace hydration did not complete."
+      );
+
+      if (phase === "customize") {
+        await click('[data-smoke-action="reset-workspace"]');
+        await selectCard(1);
+        await ensureEditMode();
+        await waitForBodyNumber("01");
+        const initialSurface = await waitForSurfaceMatch();
+        const openBodyNumberEditor = async () => {
+          const box = await waitForBodyNumberBox();
+          const rect = box.getBoundingClientRect();
+          box.dispatchEvent(
+            new MouseEvent("dblclick", {
+              bubbles: true,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2
+            })
+          );
+          const textarea = await waitFor(".semantic-inline-textarea");
+          if (!(textarea instanceof HTMLTextAreaElement)) {
+            throw new Error("Body-number inline editor is not a textarea.");
+          }
+          return textarea;
+        };
+        const requestTextInput = async (textarea, stage, expected) => {
+          textarea.focus();
+          textarea.select();
+          window.__cardnewsBodyNumberSmokeInputStage = stage;
+          await waitUntil(
+            () => textarea.value === expected,
+            "Body-number textarea did not receive text. expected=" + expected
+          );
+          textarea.blur();
+          await waitForBodyNumber(expected);
+        };
+        await requestTextInput(await openBodyNumberEditor(), "korean", "첫 번째");
+        const koreanSurface = await waitForSurfaceMatch();
+        const persistedKorean = await waitForWorkspaceOverride("show", "첫 번째");
+
+        await requestTextInput(await openBodyNumberEditor(), "ascii", "A");
+        const customizedSurface = await waitForSurfaceMatch();
+        const persisted = await waitForWorkspaceOverride("show", "A");
+        return {
+          ok: true,
+          phase,
+          initialText: "01",
+          koreanText: "첫 번째",
+          customText: "A",
+          initialSurface,
+          koreanSurface,
+          customizedSurface,
+          persistedKorean,
+          persisted
+        };
+      }
+
+      if (phase === "delete") {
+        await selectCard(1);
+        await ensureEditMode();
+        await waitForBodyNumber("A");
+        const restoredSurface = await waitForSurfaceMatch();
+
+        await deleteWithKey("Delete");
+        await historyAction("되돌리기", "A");
+        await historyAction("다시 실행", null);
+        await historyAction("되돌리기", "A");
+
+        await deleteWithKey("Backspace");
+        await historyAction("되돌리기", "A");
+
+        await selectBodyNumber();
+        await click('[data-smoke-action="delete-body-number"]');
+        await waitForBodyNumber(null);
+        await selectCard(2);
+        await selectCard(1);
+        await waitForBodyNumber(null);
+        const deletedSurface = await waitForSurfaceMatch();
+        const persisted = await waitForWorkspaceOverride("hide", "A");
+        return {
+          ok: true,
+          phase,
+          deleteKey: true,
+          backspaceKey: true,
+          toolbarDelete: true,
+          undo: true,
+          redo: true,
+          pageSwitch: true,
+          restoredSurface,
+          deletedSurface,
+          persisted
+        };
+      }
+
+      await selectCard(1);
+      await ensureEditMode();
+      await waitForBodyNumber(null);
+      const reopenedSurface = await waitForSurfaceMatch();
+      const persisted = await waitForWorkspaceOverride("hide", "A");
+      await click('[data-smoke-action="open-export-dialog"]');
+      await click('[data-smoke-action="export-png-choice"]');
+      return {
+        ok: true,
+        phase,
+        reopenedDeleted: true,
+        reopenedSurface,
+        persisted,
+        renderStarted: true
+      };
+    })()
+  `);
+  let phaseValue: unknown;
+  let phaseError: unknown;
+  const observedPhase = phasePromise.then(
+    (value) => {
+      phaseValue = value;
+    },
+    (error: unknown) => {
+      phaseError = error;
+    }
+  );
+  if (phase === "customize") {
+    const waitForInputStage = async (expected: "korean" | "ascii"): Promise<void> => {
+      const started = Date.now();
+      while (Date.now() - started < 15_000) {
+        if (phaseError) {
+          throw phaseError;
+        }
+        const current = await mainWindow.webContents.executeJavaScript(
+          "window.__cardnewsBodyNumberSmokeInputStage ?? null"
+        );
+        if (current === expected) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      throw new Error(`Body-number smoke input stage was not ready: ${expected}`);
+    };
+    const debuggerClient = mainWindow.webContents.debugger;
+    const attachedBySmoke = !debuggerClient.isAttached();
+    if (attachedBySmoke) {
+      debuggerClient.attach("1.3");
+    }
+    try {
+      await waitForInputStage("korean");
+      await debuggerClient.sendCommand("Input.insertText", { text: "첫 번째" });
+      await waitForInputStage("ascii");
+      await debuggerClient.sendCommand("Input.insertText", { text: "A" });
+    } finally {
+      if (attachedBySmoke && debuggerClient.isAttached()) {
+        debuggerClient.detach();
+      }
+    }
+  }
+  await observedPhase;
+  if (phaseError) {
+    throw phaseError;
+  }
+  return phaseValue;
 }
 
 async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
@@ -571,6 +1416,1125 @@ async function runLayerEditSmoke(mainWindow: BrowserWindow): Promise<SmokeAction
   return await readRenderSmokeResult(mainWindow);
 }
 
+async function runFooterDisplayRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Footer smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Footer smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native input value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readFooter = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        return iframe.contentDocument.querySelector('[data-slot="footer"]')?.textContent?.trim() ?? "";
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      const input = await waitFor('[data-smoke-role="footer-input"], [data-smoke-role="mention-input"]');
+      if (!(input instanceof HTMLInputElement)) {
+        throw new Error("Footer input was not an input.");
+      }
+      const labelText = input.closest("label")?.textContent ?? "";
+      setNativeValue(input, "@kkongdon_story");
+      await waitUntil(
+        () => readFooter() === "@kkongdon_story",
+        () => "Preview footer did not preserve @: " + readFooter()
+      );
+      const readThreadsUrl = () =>
+        document.querySelector('[data-smoke-role="threads-link"]')?.getAttribute("data-smoke-url") ?? "";
+      await waitUntil(
+        () => readThreadsUrl() === "https://www.threads.com/@kkongdon_story",
+        () => "Threads URL was not derived from footer display text: " + readThreadsUrl()
+      );
+      const evidence = { inputValue: input.value, labelText, previewFooter: readFooter(), threadsUrl: readThreadsUrl() };
+      const pre = document.createElement("pre");
+      pre.id = "footer-display-regression-result";
+      pre.textContent = "FOOTER_DISPLAY_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Footer display smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  if (
+    record["inputValue"] !== "@kkongdon_story" ||
+    record["previewFooter"] !== "@kkongdon_story" ||
+    record["threadsUrl"] !== "https://www.threads.com/@kkongdon_story" ||
+    !String(record["labelText"] ?? "").includes("푸터")
+  ) {
+    return { ok: false, message: `Footer display smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runPageFormatDropdownRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Page format smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Page format smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setSelectValue = (element, value) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native select value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readPage = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        return iframe.contentDocument.querySelector('[data-slot="page"]')?.textContent?.trim() ?? "";
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      const select = await waitFor('[data-smoke-role="chrome-page-template"]');
+      if (!(select instanceof HTMLSelectElement)) {
+        throw new Error("Page format control was not a dropdown.");
+      }
+      const labels = Array.from(select.options).map((option) => option.textContent?.trim() ?? "");
+      const presets = [
+        { label: "1 / N", value: "{n} / {total}", expected: "1 / 10" },
+        { label: "1/N", value: "{n}/{total}", expected: "1/10" },
+        { label: "1-N", value: "{n}-{total}", expected: "1-10" },
+        { label: "01 / N", value: "{n2} / {total}", expected: "01 / 10" },
+        { label: "1장 / N장", value: "{n}장 / {total}장", expected: "1장 / 10장" }
+      ];
+      const results = [];
+      for (const preset of presets) {
+        setSelectValue(select, preset.value);
+        await waitUntil(
+          () => readPage() === preset.expected,
+          () => "Page preview did not use selected preset " + preset.label + ": " + readPage()
+        );
+        results.push({
+          label: preset.label,
+          selectedValue: select.value,
+          pageText: readPage(),
+          expected: preset.expected
+        });
+      }
+      const evidence = { labels, results };
+      const pre = document.createElement("pre");
+      pre.id = "page-format-dropdown-regression-result";
+      pre.textContent = "PAGE_FORMAT_DROPDOWN_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Page format dropdown smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const labels = Array.isArray(record["labels"]) ? record["labels"] : [];
+  const results = Array.isArray(record["results"]) ? record["results"] : [];
+  const expectedLabels = ["1 / N", "1/N", "1-N", "01 / N", "1장 / N장"];
+  const missing = expectedLabels.filter((label) => !labels.includes(label));
+  const expectedResults = [
+    { label: "1 / N", value: "{n} / {total}", expected: "1 / 10" },
+    { label: "1/N", value: "{n}/{total}", expected: "1/10" },
+    { label: "1-N", value: "{n}-{total}", expected: "1-10" },
+    { label: "01 / N", value: "{n2} / {total}", expected: "01 / 10" },
+    { label: "1장 / N장", value: "{n}장 / {total}장", expected: "1장 / 10장" }
+  ];
+  const missingResults = expectedResults.filter(
+    (expected) =>
+      !results.some((item) => {
+        if (typeof item !== "object" || item === null) {
+          return false;
+        }
+        const candidate = item as Record<string, unknown>;
+        return (
+          candidate["label"] === expected.label &&
+          candidate["selectedValue"] === expected.value &&
+          candidate["pageText"] === expected.expected
+        );
+      })
+  );
+  if (missing.length > 0 || missingResults.length > 0) {
+    return { ok: false, message: `Page format dropdown smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runContentInputLatencyRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const setupResult = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Content latency smoke target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Content latency smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      const titleInput = await waitFor('[data-smoke-role="content-title"]');
+      if (!(titleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content title control was not a textarea.");
+      }
+      titleInput.focus();
+      titleInput.setSelectionRange(0, titleInput.value.length);
+      window.__contentLatencySmokeStarted = performance.now();
+      return true;
+    })()
+  `)) as unknown;
+
+  if (setupResult !== true) {
+    return { ok: false, message: "Content input latency smoke could not focus the title field." };
+  }
+
+  const typedTitle = "Money Note spaced title";
+  const typedSubtitle = "Subtitle spaced note";
+  const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const debuggerClient = mainWindow.webContents.debugger;
+  let attachedDebugger = false;
+  const focusContentField = async (role: string): Promise<void> => {
+    const selector = `[data-smoke-role="${role}"]`;
+    const focused = (await mainWindow.webContents.executeJavaScript(`
+      (() => {
+        const input = document.querySelector(${JSON.stringify(selector)});
+        if (!(input instanceof HTMLTextAreaElement)) {
+          return false;
+        }
+        input.focus();
+        input.setSelectionRange(0, input.value.length);
+        return document.activeElement === input;
+      })()
+    `)) as unknown;
+    if (focused !== true) {
+      throw new Error(`Content input smoke could not focus ${role}.`);
+    }
+  };
+  const insertTextThroughChromium = async (text: string): Promise<void> => {
+    await debuggerClient.sendCommand("Input.insertText", { text });
+    await delay(80);
+  };
+
+  if (!debuggerClient.isAttached()) {
+    debuggerClient.attach("1.3");
+    attachedDebugger = true;
+  }
+  try {
+    await insertTextThroughChromium(typedTitle);
+    await focusContentField("content-subtitle");
+    await insertTextThroughChromium(typedSubtitle);
+  } finally {
+    if (attachedDebugger && debuggerClient.isAttached()) {
+      debuggerClient.detach();
+    }
+  }
+
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Content latency smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+
+      const titleInput = await waitFor('[data-smoke-role="content-title"]');
+      if (!(titleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content title control was not a textarea.");
+      }
+      const subtitleInput = await waitFor('[data-smoke-role="content-subtitle"]');
+      if (!(subtitleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content subtitle control was not a textarea.");
+      }
+      await waitUntil(
+        () => titleInput.value === "Money Note spaced title" && subtitleInput.value === "Subtitle spaced note",
+        () => "Content fields did not receive typed key events: " + JSON.stringify({
+          title: titleInput.value,
+          subtitle: subtitleInput.value
+        })
+      );
+      const valueAfterInput = titleInput.value;
+      const subtitleAfterInput = subtitleInput.value;
+      await delay(300);
+      const rawInput = await waitFor('[data-smoke-role="raw-card-input"]');
+      const rawValue = rawInput instanceof HTMLTextAreaElement ? rawInput.value : "";
+      const evidence = {
+        elapsedMs: Math.round((performance.now() - (window.__contentLatencySmokeStarted || performance.now())) * 100) / 100,
+        method: "Input.insertText",
+        rawValue,
+        subtitleAfterInput,
+        typedSubtitle: "Subtitle spaced note",
+        typedTitle: "Money Note spaced title",
+        valueAfterInput
+      };
+      const pre = document.createElement("pre");
+      pre.id = "content-input-latency-regression-result";
+      pre.textContent = "CONTENT_INPUT_LATENCY_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Content input latency smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  const valueAfterInput = String(record["valueAfterInput"] ?? "");
+  const subtitleAfterInput = String(record["subtitleAfterInput"] ?? "");
+  const rawValue = String(record["rawValue"] ?? "");
+  if (
+    valueAfterInput !== typedTitle ||
+    subtitleAfterInput !== typedSubtitle ||
+    !rawValue.includes(`제목: ${typedTitle}`) ||
+    !rawValue.includes(`소제목: ${typedSubtitle}`) ||
+    record["method"] !== "Input.insertText"
+  ) {
+    return { ok: false, message: `Content input latency smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runContentTitleWhitespaceRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const setupResult = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Title whitespace smoke target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Title whitespace smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      const titleInput = await waitFor('[data-smoke-role="content-title"]');
+      if (!(titleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content title control was not a textarea.");
+      }
+      const subtitleInput = await waitFor('[data-smoke-role="content-subtitle"]');
+      if (!(subtitleInput instanceof HTMLTextAreaElement)) {
+        throw new Error("Content subtitle control was not a textarea.");
+      }
+      const setNativeValue = (element, value) => {
+        const prototype = Object.getPrototypeOf(element);
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      setNativeValue(titleInput, "갑자기 화면이 여전히 안");
+      setNativeValue(subtitleInput, "숫자보다 먼저 보는 관점");
+      titleInput.focus();
+      titleInput.setSelectionRange(titleInput.value.length, titleInput.value.length);
+      return true;
+    })()
+  `)) as unknown;
+
+  if (setupResult !== true) {
+    return { ok: false, message: "Title whitespace smoke could not focus the title field." };
+  }
+
+  const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const debuggerClient = mainWindow.webContents.debugger;
+  let attachedDebugger = false;
+  const insertTextThroughChromium = async (text: string): Promise<void> => {
+    await debuggerClient.sendCommand("Input.insertText", { text });
+    await delay(120);
+  };
+
+  if (!debuggerClient.isAttached()) {
+    debuggerClient.attach("1.3");
+    attachedDebugger = true;
+  }
+  try {
+    await insertTextThroughChromium(" ");
+    await insertTextThroughChromium("\n");
+    await insertTextThroughChromium("먹음");
+    await mainWindow.webContents.executeJavaScript(`
+      (() => {
+        const subtitleInput = document.querySelector('[data-smoke-role="content-subtitle"]');
+        if (!(subtitleInput instanceof HTMLTextAreaElement)) {
+          throw new Error("Subtitle input disappeared.");
+        }
+        subtitleInput.focus();
+        subtitleInput.setSelectionRange(subtitleInput.value.length, subtitleInput.value.length);
+      })()
+    `);
+    await insertTextThroughChromium(" ");
+    await insertTextThroughChromium("\n두번째 줄");
+  } finally {
+    if (attachedDebugger && debuggerClient.isAttached()) {
+      debuggerClient.detach();
+    }
+  }
+
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Title whitespace smoke target was not found after typing: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const titleInput = await waitFor('[data-smoke-role="content-title"]');
+      const subtitleInput = await waitFor('[data-smoke-role="content-subtitle"]');
+      const rawInput = await waitFor('[data-smoke-role="raw-card-input"]');
+      if (
+        !(titleInput instanceof HTMLTextAreaElement) ||
+        !(subtitleInput instanceof HTMLTextAreaElement) ||
+        !(rawInput instanceof HTMLTextAreaElement)
+      ) {
+        throw new Error("Content whitespace controls were not textareas.");
+      }
+      const expectedTitle = "갑자기 화면이 여전히 안 \\n먹음";
+      const expectedSubtitle = "숫자보다 먼저 보는 관점 \\n두번째 줄";
+      await waitUntil(
+        () => titleInput.value === expectedTitle && subtitleInput.value === expectedSubtitle,
+        () => "Active fields dropped whitespace/newline: " + JSON.stringify({
+          title: titleInput.value,
+          subtitle: subtitleInput.value
+        })
+      );
+      await waitUntil(
+        () => rawInput.value.includes("제목: 갑자기 화면이 여전히 안 |먹음") &&
+          rawInput.value.includes("소제목: 숫자보다 먼저 보는 관점 |두번째 줄"),
+        () => "Raw card did not preserve textarea newlines: " + rawInput.value
+      );
+      await delay(1200);
+      const workspace = await window.cardnews.loadWorkspace();
+      const workspaceCards = workspace && !("ok" in workspace) ? workspace.cards : [];
+      const persistedIndex = workspaceCards.findIndex((card) =>
+        card.includes("제목: 갑자기 화면이 여전히 안 |먹음") &&
+          card.includes("소제목: 숫자보다 먼저 보는 관점 |두번째 줄")
+      );
+      const persistedRaw = persistedIndex >= 0 ? workspaceCards[persistedIndex] : "";
+      const evidence = {
+        expectedSubtitle,
+        expectedTitle,
+        persistedIndex,
+        persistedRaw,
+        rawValue: rawInput.value,
+        subtitleValue: subtitleInput.value,
+        titleValue: titleInput.value
+      };
+      const pre = document.createElement("pre");
+      pre.id = "content-title-whitespace-regression-result";
+      pre.textContent = "CONTENT_TITLE_WHITESPACE_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Title whitespace smoke did not return a result." };
+  }
+
+  const record = result as Record<string, unknown>;
+  const persistedRaw = typeof record["persistedRaw"] === "string" ? record["persistedRaw"] : "";
+  const rawValue = typeof record["rawValue"] === "string" ? record["rawValue"] : "";
+  if (
+    record["titleValue"] !== "갑자기 화면이 여전히 안 \n먹음" ||
+    record["subtitleValue"] !== "숫자보다 먼저 보는 관점 \n두번째 줄" ||
+    !(persistedRaw.includes("제목: 갑자기 화면이 여전히 안 |먹음") ||
+      rawValue.includes("제목: 갑자기 화면이 여전히 안 |먹음"))
+  ) {
+    return { ok: false, message: `Title whitespace smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runInspectorLayoutRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Inspector layout smoke target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Inspector layout smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      const inspector = await waitFor(".inspector");
+      if (!(inspector instanceof HTMLElement)) {
+        throw new Error("Inspector was not an HTMLElement.");
+      }
+      inspector.scrollTop = inspector.scrollHeight;
+      await delay(120);
+      const visiblePanels = Array.from(inspector.querySelectorAll(".panel:not([hidden])")).filter(
+        (panel) => panel instanceof HTMLElement
+      );
+      const lastPanel = visiblePanels.at(-1);
+      if (!(lastPanel instanceof HTMLElement)) {
+        throw new Error("No visible inspector panel was found.");
+      }
+      const inspectorRect = inspector.getBoundingClientRect();
+      const panelRect = lastPanel.getBoundingClientRect();
+      const bottomGap = Math.round((inspectorRect.bottom - panelRect.bottom) * 100) / 100;
+      const evidence = {
+        bottomGap,
+        canScroll: inspector.scrollHeight > inspector.clientHeight,
+        clientHeight: inspector.clientHeight,
+        scrollHeight: inspector.scrollHeight
+      };
+      const pre = document.createElement("pre");
+      pre.id = "inspector-layout-regression-result";
+      pre.textContent = "INSPECTOR_LAYOUT_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Inspector layout smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  if (typeof record["bottomGap"] !== "number" || record["bottomGap"] < 8) {
+    return { ok: false, message: `Inspector layout smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runInspectorDesignScrollRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Inspector design scroll target was not found: " + selector);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Inspector design scroll action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      const inspector = await waitFor(".inspector");
+      const panel = await waitFor(".panel.grow:not([hidden])");
+      const controls = await waitFor(".card-design-controls");
+      const layerControls = await waitFor(".layer-controls");
+      const addCardButton = await waitFor('[data-smoke-action="design-panel-add-card"]');
+      const removeCardButton = await waitFor('[data-smoke-action="design-panel-remove-card"]');
+      if (
+        !(inspector instanceof HTMLElement) ||
+        !(panel instanceof HTMLElement) ||
+        !(controls instanceof HTMLElement) ||
+        !(layerControls instanceof HTMLElement) ||
+        !(addCardButton instanceof HTMLButtonElement) ||
+        !(removeCardButton instanceof HTMLButtonElement)
+      ) {
+        throw new Error("Inspector design scroll controls were not available.");
+      }
+      inspector.scrollTop = inspector.scrollHeight;
+      await delay(250);
+      const inspectorRect = inspector.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const controlsRect = controls.getBoundingClientRect();
+      const layerRect = layerControls.getBoundingClientRect();
+      const addRect = addCardButton.getBoundingClientRect();
+      const removeRect = removeCardButton.getBoundingClientRect();
+      const whitePanelClipsChildren = controlsRect.bottom > panelRect.bottom + 1 || controlsRect.top < panelRect.top - 1;
+      const bottomControlsReachable =
+        addRect.bottom <= inspectorRect.bottom + 1 &&
+        removeRect.bottom <= inspectorRect.bottom + 1 &&
+        addRect.top >= inspectorRect.top - 1 &&
+        removeRect.top >= inspectorRect.top - 1;
+      const evidence = {
+        bottomControlsReachable,
+        inspector: {
+          clientHeight: inspector.clientHeight,
+          scrollHeight: inspector.scrollHeight,
+          scrollTop: inspector.scrollTop
+        },
+        panelBottom: Math.round(panelRect.bottom * 100) / 100,
+        controlsBottom: Math.round(controlsRect.bottom * 100) / 100,
+        layerTop: Math.round(layerRect.top * 100) / 100,
+        addButtonTop: Math.round(addRect.top * 100) / 100,
+        removeButtonBottom: Math.round(removeRect.bottom * 100) / 100,
+        whitePanelClipsChildren
+      };
+      const pre = document.createElement("pre");
+      pre.id = "inspector-design-scroll-regression-result";
+      pre.textContent = "INSPECTOR_DESIGN_SCROLL_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Inspector design scroll smoke did not return a result." };
+  }
+
+  const record = result as Record<string, unknown>;
+  if (record["whitePanelClipsChildren"] !== false || record["bottomControlsReachable"] !== true) {
+    return { ok: false, message: `Inspector design scroll smoke failed: ${JSON.stringify(record)}` };
+  }
+  return { ok: true };
+}
+
+async function runImagePickerLibraryHygieneRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  await purgeImageLibrarySmokeFixtures(storageRoot());
+  const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
+  if (sourceImage.isEmpty()) {
+    return { ok: false, message: "Image picker hygiene smoke source image could not be created." };
+  }
+  const internal = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "badge-smoke-source.png",
+    internalSmokeImageAttribution
+  );
+  if (isCardnewsError(internal)) {
+    return { ok: false, message: internal.message };
+  }
+  const visible = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "qa-picker-visible.png",
+    smokeFixtureImageAttribution
+  );
+  if (isCardnewsError(visible)) {
+    return { ok: false, message: visible.message };
+  }
+
+  await reloadSmokeWindow(mainWindow);
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("Image picker hygiene target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 10000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(100);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("Image picker hygiene action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLTextAreaElement
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter for " + element.tagName);
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      await waitUntil(
+        () => document.querySelector('[data-smoke-workspace-ready="true"]') !== null,
+        "Badge picker smoke workspace hydration did not finish."
+      );
+      window.confirm = () => true;
+      await clickAction("reset-workspace");
+      await waitUntil(
+        () => {
+          const background = document.querySelector('[data-smoke-role="global-background-select"]');
+          const style = document.querySelector(".topbar-style-select");
+          return background instanceof HTMLSelectElement &&
+            background.value === "" &&
+            style instanceof HTMLSelectElement &&
+            style.value === "newsprint";
+        },
+        () => "Badge picker smoke reset did not settle into the default workspace: " + document.body.innerText
+      );
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await clickAction("open-badge-image-picker");
+      const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
+      const searchInput = await waitFor('[data-smoke-role="image-picker-search"]');
+      if (!(searchInput instanceof HTMLInputElement)) {
+        throw new Error("Image picker search input was not available.");
+      }
+      await waitUntil(
+        () => (grid.textContent ?? "").includes("qa-picker-visible"),
+        () => "Image picker hygiene grid did not show visible QA image: " + (grid.textContent ?? "")
+      );
+      const textBeforeSearch = grid.textContent ?? "";
+      setNativeValue(searchInput, "qa-picker-visible");
+      await waitUntil(
+        () => (grid.textContent ?? "").includes("qa-picker-visible") && !(grid.textContent ?? "").includes("badge-smoke-source"),
+        () => "Image picker search did not filter to visible QA image: " + (grid.textContent ?? "")
+      );
+      const sourceButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
+        (button.textContent ?? "").includes("qa-picker-visible")
+      );
+      if (!(sourceButton instanceof HTMLButtonElement)) {
+        throw new Error("Image picker visible QA source button was not found.");
+      }
+      sourceButton.click();
+      await waitFor('[data-smoke-role="image-picker-selected-preview"]');
+      const deleteButton = await waitFor('[data-smoke-action="image-picker-delete"]');
+      if (!(deleteButton instanceof HTMLButtonElement)) {
+        throw new Error("Image picker delete action was not a button.");
+      }
+      const deleteButtonEnabled = !deleteButton.disabled;
+      if (!deleteButtonEnabled) {
+        throw new Error("Image picker delete button stayed disabled for an unused image.");
+      }
+      deleteButton.click();
+      await waitUntil(
+        () => !(grid.textContent ?? "").includes("qa-picker-visible"),
+        () => "Image picker visible QA image was not removed: " + (grid.textContent ?? "")
+      );
+      const textAfterDelete = grid.textContent ?? "";
+      const evidence = {
+        deleteButtonEnabled,
+        deletedVisible: !textAfterDelete.includes("qa-picker-visible"),
+        hiddenInternal: !textBeforeSearch.includes("badge-smoke-source"),
+        searchFiltered: searchInput.value === "qa-picker-visible" && !textAfterDelete.includes("badge-smoke-source"),
+        shownVisibleBefore: textBeforeSearch.includes("qa-picker-visible"),
+        textAfterDelete,
+        textBeforeSearch
+      };
+      const pre = document.createElement("pre");
+      pre.id = "image-picker-library-hygiene-regression-result";
+      pre.textContent = "IMAGE_PICKER_LIBRARY_HYGIENE_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "Image picker hygiene smoke did not return a result." };
+  }
+  const record = result as Record<string, unknown>;
+  if (
+    record["hiddenInternal"] !== true ||
+    record["shownVisibleBefore"] !== true ||
+    record["searchFiltered"] !== true ||
+    record["deleteButtonEnabled"] !== true ||
+    record["deletedVisible"] !== true
+  ) {
+    return { ok: false, message: `Image picker hygiene smoke failed: ${JSON.stringify(record)}` };
+  }
+  await purgeImageLibrarySmokeFixtures(storageRoot());
+  return { ok: true };
+}
+
+async function runM15ImageLibraryBeforeSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  await purgeImageLibrarySmokeFixtures(storageRoot());
+  const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
+  if (sourceImage.isEmpty()) {
+    return { ok: false, message: "M15 image library before smoke source image could not be created." };
+  }
+
+  const first = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "qa-duplicate.png",
+    smokeFixtureImageAttribution
+  );
+  if (isCardnewsError(first)) {
+    return { ok: false, message: first.message };
+  }
+  const second = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "qa-duplicate.png",
+    smokeFixtureImageAttribution
+  );
+  if (isCardnewsError(second)) {
+    return { ok: false, message: second.message };
+  }
+
+  await reloadSmokeWindow(mainWindow);
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("M15 image library before target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 10000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(100);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("M15 image library before action is not a button: " + action);
+        }
+        button.click();
+        await delay(180);
+      };
+      const setNativeValue = (element, value) => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native input value setter was available.");
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      window.confirm = () => true;
+      await waitUntil(
+        () => document.querySelector('[data-smoke-workspace-ready="true"]') !== null,
+        "M15 image library before workspace hydration did not finish."
+      );
+      await clickAction("reset-workspace");
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await clickAction("open-badge-image-picker");
+      const searchInput = await waitFor('[data-smoke-role="image-picker-search"]');
+      if (!(searchInput instanceof HTMLInputElement)) {
+        throw new Error("M15 image library before search input was not available.");
+      }
+      setNativeValue(searchInput, "qa-duplicate");
+      const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
+      await waitUntil(
+        () => Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).filter((button) =>
+          (button.textContent ?? "").includes("qa-duplicate")
+        ).length >= 2,
+        () => "M15 image library before duplicates were not visible: " + (grid.textContent ?? "")
+      );
+      const duplicateButtons = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).filter(
+        (button) => (button.textContent ?? "").includes("qa-duplicate")
+      );
+      const firstButton = duplicateButtons[0];
+      if (!(firstButton instanceof HTMLButtonElement)) {
+        throw new Error("M15 image library before duplicate button was not available.");
+      }
+      firstButton.click();
+      await waitFor('[data-smoke-role="image-picker-selected-preview"]');
+      const idHintCount = grid.querySelectorAll(".image-picker-id").length;
+      const evidence = {
+        duplicateCount: duplicateButtons.length,
+        idHintCount,
+        searchValue: searchInput.value,
+        selectedPreview: true,
+        text: grid.textContent ?? ""
+      };
+      const pre = document.createElement("pre");
+      pre.id = "m15-image-library-before-result";
+      pre.textContent = "M15_IMAGE_LIBRARY_BEFORE_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "M15 image library before smoke did not return a result." };
+  }
+
+  const record = result as Record<string, unknown>;
+  if (record["duplicateCount"] !== 2 || record["selectedPreview"] !== true) {
+    return { ok: false, message: `M15 image library before smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  return { ok: true };
+}
+
+async function runM15ToolbarSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  const result = (await mainWindow.webContents.executeJavaScript(`
+    (async () => {
+      const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const waitFor = async (selector, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          const element = document.querySelector(selector);
+          if (element) {
+            return element;
+          }
+          await delay(80);
+        }
+        throw new Error("M15 toolbar smoke target was not found: " + selector);
+      };
+      const waitUntil = async (predicate, description, timeout = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeout) {
+          if (predicate()) {
+            return true;
+          }
+          await delay(80);
+        }
+        throw new Error(typeof description === "function" ? description() : description);
+      };
+      const clickAction = async (action) => {
+        const button = await waitFor('[data-smoke-action="' + action + '"]');
+        if (!(button instanceof HTMLButtonElement)) {
+          throw new Error("M15 toolbar smoke action is not a button: " + action);
+        }
+        button.click();
+        await delay(160);
+      };
+      const setNativeValue = (element, value) => {
+        const prototype = element instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("No native value setter for " + element.tagName);
+        }
+        setter.call(element, String(value));
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const readLayerStyle = () => {
+        const iframe = document.querySelector(".stage .stage-canvas iframe");
+        if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentDocument) {
+          throw new Error("Preview iframe was not readable.");
+        }
+        const textLayer = iframe.contentDocument.querySelector(".layer-text");
+        return textLayer?.getAttribute("style") ?? "";
+      };
+
+      window.confirm = () => true;
+      await delay(900);
+      await clickAction("reset-workspace");
+      const editToggle = await waitFor('[data-smoke-action="toggle-edit-mode"]');
+      if (editToggle instanceof HTMLButtonElement && !editToggle.classList.contains("active")) {
+        editToggle.click();
+        await delay(160);
+      }
+      await clickAction("inspector-content");
+      await clickAction("card-design-tab");
+      await clickAction("add-text-layer");
+      await waitFor('[data-smoke-role="layer-box"]');
+      const toolbar = await waitFor('[data-smoke-role="floating-editor-toolbar"] [data-toolbar-target="text-layer"]');
+      if (!(toolbar instanceof HTMLElement)) {
+        throw new Error("M15 toolbar target was not an HTMLElement.");
+      }
+      const colorInput = toolbar.querySelector('input[type="color"]');
+      const sizeInput = toolbar.querySelector('input[type="number"]');
+      if (!(colorInput instanceof HTMLInputElement) || !(sizeInput instanceof HTMLInputElement)) {
+        throw new Error("M15 toolbar inputs were not available.");
+      }
+      setNativeValue(colorInput, "#336699");
+      setNativeValue(sizeInput, 72);
+      await waitUntil(
+        () => readLayerStyle().includes("#336699") && readLayerStyle().includes("font-size: 72px"),
+        () => "M15 toolbar did not update preview layer: " + readLayerStyle()
+      );
+      const evidence = {
+        layerStyle: readLayerStyle(),
+        toolbarText: toolbar.textContent ?? "",
+        toolbarVisible: true
+      };
+      const pre = document.createElement("pre");
+      pre.id = "m15-toolbar-smoke-result";
+      pre.textContent = "M15_TOOLBAR_RESULT " + JSON.stringify(evidence);
+      document.body.append(pre);
+      return evidence;
+    })()
+  `)) as unknown;
+
+  if (typeof result !== "object" || result === null) {
+    return { ok: false, message: "M15 toolbar smoke did not return a result." };
+  }
+
+  const record = result as Record<string, unknown>;
+  const layerStyle = typeof record["layerStyle"] === "string" ? record["layerStyle"] : "";
+  if (record["toolbarVisible"] !== true || !layerStyle.includes("#336699") || !layerStyle.includes("font-size: 72px")) {
+    return { ok: false, message: `M15 toolbar smoke failed: ${JSON.stringify(record)}` };
+  }
+
+  return { ok: true };
+}
+
 async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
   const result = (await mainWindow.webContents.executeJavaScript(`
     (async () => {
@@ -605,9 +2569,12 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
         await delay(180);
       };
       const setNativeValue = (element, value) => {
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        const prototype = element instanceof HTMLSelectElement
+          ? window.HTMLSelectElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
         if (!setter) {
-          throw new Error("No native input value setter was available.");
+          throw new Error("No native value setter was available.");
         }
         setter.call(element, String(value));
         element.dispatchEvent(new Event("input", { bubbles: true }));
@@ -639,7 +2606,7 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
       const offsetInput = await waitFor('[data-smoke-role="chrome-page-offset-y"]');
       const footerVisibleInput = await waitFor('[data-smoke-role="chrome-footer-visible"]');
       if (
-        !(templateInput instanceof HTMLInputElement) ||
+        !(templateInput instanceof HTMLSelectElement) ||
         !(colorInput instanceof HTMLInputElement) ||
         !(offsetInput instanceof HTMLInputElement) ||
         !(footerVisibleInput instanceof HTMLInputElement)
@@ -647,7 +2614,7 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
         throw new Error("Chrome smoke controls were not input elements.");
       }
 
-      setNativeValue(templateInput, "{n2}");
+      setNativeValue(templateInput, "{n2} / {total}");
       setNativeValue(colorInput, "#123456");
       setNativeValue(offsetInput, 10);
       if (footerVisibleInput.checked) {
@@ -658,7 +2625,7 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
         () => {
           const state = readChromeState();
           return (
-            state.pageText === "01" &&
+            state.pageText === "01 / 10" &&
             state.pageStyle.includes("color: #123456") &&
             state.pageStyle.includes("translate(0px, 10px)") &&
             state.footerExists === false
@@ -697,11 +2664,11 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
   const controls = record["controls"] as Record<string, unknown> | undefined;
   const pageStyle = typeof preview?.["pageStyle"] === "string" ? preview["pageStyle"] : "";
   const failed =
-    preview?.["pageText"] !== "01" ||
+    preview?.["pageText"] !== "01 / 10" ||
     !pageStyle.includes("color: #123456") ||
     !pageStyle.includes("translate(0px, 10px)") ||
     preview?.["footerExists"] !== false ||
-    controls?.["template"] !== "{n2}" ||
+    controls?.["template"] !== "{n2} / {total}" ||
     controls?.["offset"] !== "10" ||
     controls?.["footerVisible"] !== false;
 
@@ -719,7 +2686,7 @@ async function runChromeStyleRegressionSmoke(mainWindow: BrowserWindow): Promise
     return { ok: false, message: "Saved deck chrome was missing." };
   }
   if (
-    savedChrome.pageNumber.template !== "{n2}" ||
+    savedChrome.pageNumber.template !== "{n2} / {total}" ||
     savedChrome.pageNumber.color !== "#123456" ||
     savedChrome.pageNumber.offsetY !== 10 ||
     savedChrome.footer.visible !== false
@@ -893,12 +2860,27 @@ async function runContentFormRegressionSmoke(mainWindow: BrowserWindow): Promise
 }
 
 async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  await purgeImageLibrarySmokeFixtures(storageRoot());
   const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
   if (sourceImage.isEmpty()) {
     return { ok: false, message: "Badge smoke source image could not be created." };
   }
 
-  const source = await saveImageBufferToLibrary(storageRoot(), sourceImage.toPNG(), "badge-smoke-source.png");
+  const internal = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "badge-smoke-source.png",
+    internalSmokeImageAttribution
+  );
+  if (isCardnewsError(internal)) {
+    return { ok: false, message: internal.message };
+  }
+  const source = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "qa-badge-source.png",
+    smokeFixtureImageAttribution
+  );
   if (isCardnewsError(source)) {
     return { ok: false, message: source.message };
   }
@@ -937,8 +2919,23 @@ async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindo
         throw new Error(typeof description === "function" ? description() : description);
       };
 
+      await waitUntil(
+        () => document.querySelector('[data-smoke-workspace-ready="true"]') !== null,
+        "Next hint picker smoke workspace hydration did not finish."
+      );
       window.confirm = () => true;
       await clickAction("reset-workspace");
+      await waitUntil(
+        () => {
+          const background = document.querySelector('[data-smoke-role="global-background-select"]');
+          const style = document.querySelector(".topbar-style-select");
+          return background instanceof HTMLSelectElement &&
+            background.value === "" &&
+            style instanceof HTMLSelectElement &&
+            style.value === "newsprint";
+        },
+        () => "Next hint picker smoke reset did not settle into the default workspace: " + document.body.innerText
+      );
       await clickAction("inspector-content");
       await clickAction("card-design-tab");
       await clickAction("open-badge-image-picker");
@@ -946,12 +2943,15 @@ async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindo
       const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
       await waitUntil(
         () => Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).some((button) =>
-          (button.textContent ?? "").includes("badge-smoke-source")
+          (button.textContent ?? "").includes("qa-badge-source")
         ),
-        () => "Badge picker grid did not show the saved source image: " + (grid.textContent ?? "")
+        () => "Badge picker grid did not show the visible source image: " + (grid.textContent ?? "")
       );
+      if ((grid.textContent ?? "").includes("badge-smoke-source")) {
+        throw new Error("Badge picker leaked an internal smoke source image.");
+      }
       const sourceButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
-        (button.textContent ?? "").includes("badge-smoke-source")
+        (button.textContent ?? "").includes("qa-badge-source")
       );
       if (!(sourceButton instanceof HTMLButtonElement)) {
         throw new Error("Badge source thumbnail button was not found.");
@@ -1024,16 +3024,32 @@ async function runBadgeBackgroundRemovalRegressionSmoke(mainWindow: BrowserWindo
     return { ok: false, message: "Rendered badge smoke PNG was missing or empty." };
   }
 
+  await purgeImageLibrarySmokeFixtures(storageRoot());
   return { ok: true };
 }
 
 async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
+  await purgeImageLibrarySmokeFixtures(storageRoot());
   const sourceImage = nativeImage.createFromBitmap(createSmokeBadgeBitmap(), { width: 12, height: 12 });
   if (sourceImage.isEmpty()) {
     return { ok: false, message: "Next hint smoke source image could not be created." };
   }
 
-  const source = await saveImageBufferToLibrary(storageRoot(), sourceImage.toPNG(), "next-hint-smoke.png");
+  const internal = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "next-hint-smoke.png",
+    internalSmokeImageAttribution
+  );
+  if (isCardnewsError(internal)) {
+    return { ok: false, message: internal.message };
+  }
+  const source = await saveImageBufferToLibrary(
+    storageRoot(),
+    sourceImage.toPNG(),
+    "qa-next-hint-source.png",
+    smokeFixtureImageAttribution
+  );
   if (isCardnewsError(source)) {
     return { ok: false, message: source.message };
   }
@@ -1097,12 +3113,15 @@ async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promi
       const grid = await waitFor('[data-smoke-role="image-picker-grid"]');
       await waitUntil(
         () => Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).some((button) =>
-          (button.textContent ?? "").includes("next-hint-smoke")
+          (button.textContent ?? "").includes("qa-next-hint-source")
         ),
-        () => "Next hint picker grid did not show the saved source image: " + (grid.textContent ?? "")
+        () => "Next hint picker grid did not show the visible source image: " + (grid.textContent ?? "")
       );
+      if ((grid.textContent ?? "").includes("next-hint-smoke")) {
+        throw new Error("Next hint picker leaked an internal smoke source image.");
+      }
       const sourceButton = Array.from(grid.querySelectorAll('[data-smoke-action="image-picker-select"]')).find((button) =>
-        (button.textContent ?? "").includes("next-hint-smoke")
+        (button.textContent ?? "").includes("qa-next-hint-source")
       );
       if (!(sourceButton instanceof HTMLButtonElement)) {
         throw new Error("Next hint source thumbnail button was not found.");
@@ -1170,117 +3189,8 @@ async function runNextHintImageRegressionSmoke(mainWindow: BrowserWindow): Promi
     return { ok: false, message: "Rendered next hint PNG was missing or empty." };
   }
 
+  await purgeImageLibrarySmokeFixtures(storageRoot());
   return { ok: true };
-}
-
-async function runAiDraftRegressionSmoke(mainWindow: BrowserWindow): Promise<SmokeActionResult> {
-  if (process.env["CARDNEWS_MOCK_AI"] !== "1" && !listAiProviderStatuses().some((provider) => provider.installed)) {
-    return { ok: true };
-  }
-
-  await mainWindow.webContents.executeJavaScript(`
-    new Promise((resolve, reject) => {
-      const openButton = document.querySelector('[data-smoke-action="open-ai-panel"]');
-      if (!(openButton instanceof HTMLButtonElement)) {
-        reject(new Error("AI panel button was not found."));
-        return;
-      }
-      openButton.click();
-      const started = Date.now();
-      const tick = () => {
-        const panel = document.querySelector('[data-smoke-role="ai-panel"]');
-        const draftButton = document.querySelector('[data-smoke-action="ai-preset-draft"]');
-        const input = document.querySelector('[data-smoke-role="ai-input"]');
-        const sendButton = document.querySelector('[data-smoke-action="ai-send"]');
-        if (
-          panel instanceof HTMLElement &&
-          draftButton instanceof HTMLButtonElement &&
-          input instanceof HTMLTextAreaElement &&
-          sendButton instanceof HTMLButtonElement &&
-          draftButton.disabled === false &&
-          sendButton.disabled === false
-        ) {
-          draftButton.click();
-          const waitForPrompt = () => {
-            if (input.value.includes("앱에서 파싱하는 양식 계약")) {
-              sendButton.click();
-              resolve(true);
-              return;
-            }
-            if (Date.now() - started > 8000) {
-              reject(new Error("AI preset chip did not fill the draft prompt."));
-              return;
-            }
-            setTimeout(waitForPrompt, 80);
-          };
-          waitForPrompt();
-          return;
-        }
-        if (Date.now() - started > 8000) {
-          reject(new Error("AI panel did not become ready."));
-          return;
-        }
-        setTimeout(tick, 100);
-      };
-      tick();
-    })
-  `);
-  await waitForSmokeText(mainWindow, ["카드 10장 감지", "AI 오류"]);
-
-  await mainWindow.webContents.executeJavaScript(`
-    new Promise((resolve, reject) => {
-      const started = Date.now();
-      const tick = () => {
-        const assistant = document.querySelector('[data-smoke-role="ai-assistant-bubble"]');
-        const applyButton = document.querySelector('[data-smoke-action="ai-apply-draft"]');
-        if (assistant instanceof HTMLElement && applyButton instanceof HTMLButtonElement) {
-          applyButton.click();
-          resolve(true);
-          return;
-        }
-        if (Date.now() - started > 8000) {
-          reject(new Error("AI assistant bubble or apply button was not found."));
-          return;
-        }
-        setTimeout(tick, 100);
-      };
-      tick();
-    })
-  `);
-  await waitForSmokeText(mainWindow, ["AI 대본 적용: 카드 10장", "AI 대본 파싱 실패", "AI 오류"]);
-
-  const applied = await mainWindow.webContents.executeJavaScript(`
-    (() => {
-      const text = document.body.innerText;
-      return {
-        applied: text.includes("AI 대본 적용: 카드 10장"),
-        thumbCount: document.querySelectorAll(".slide-thumb").length
-      };
-    })()
-  `) as unknown;
-  if (!isAiSmokeUiRecord(applied) || !applied.applied || applied.thumbCount !== 10) {
-    return { ok: false, message: `AI draft did not apply ten cards: ${JSON.stringify(applied)}` };
-  }
-
-  await clickSmokeButton(mainWindow, "generate");
-  await waitForSmokeText(mainWindow, ["렌더 완료: 10장", "렌더 실패", "게이트 실패"]);
-  const renderResult = await readRenderSmokeResult(mainWindow);
-  if (!renderResult.ok) {
-    return renderResult;
-  }
-
-  const rendered = await mainWindow.webContents.executeJavaScript(`
-    (() => document.body.innerText.includes("렌더 완료: 10장"))()
-  `) as unknown;
-  return rendered === true ? { ok: true } : { ok: false, message: "AI draft did not render ten cards." };
-}
-
-function isAiSmokeUiRecord(input: unknown): input is { readonly applied: boolean; readonly thumbCount: number } {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return false;
-  }
-  const record = input as Record<string, unknown>;
-  return typeof record["applied"] === "boolean" && typeof record["thumbCount"] === "number";
 }
 
 function createSmokeBadgeBitmap(): Buffer {
@@ -1373,6 +3283,7 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
         const lineLayer = iframeDocument.querySelector(".layer-line");
         const computedStyle = iframe.contentWindow?.getComputedStyle(textLayer);
         const lineStyle = lineLayer && iframe.contentWindow ? iframe.contentWindow.getComputedStyle(lineLayer) : null;
+        const titleStyle = title && iframe.contentWindow ? iframe.contentWindow.getComputedStyle(title) : null;
         return {
           badgeScale: article.style.getPropertyValue("--gap-badge-scale").trim(),
           badgeTitleGap,
@@ -1386,7 +3297,8 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
           lineTransform: lineStyle?.transform ?? "",
           srcDocHasLine: iframe.srcdoc.includes("layer-line"),
           styleAttribute: textLayer.getAttribute("style") ?? "",
-          textAlign: computedStyle?.textAlign ?? ""
+          textAlign: computedStyle?.textAlign ?? "",
+          titleColor: titleStyle?.color ?? ""
         };
       };
       const readIframeFooterText = () => {
@@ -1416,11 +3328,9 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
       const kakaoLink = await waitFor('[data-smoke-role="kakao-inquiry-link"]');
       const threadsLinkText = threadsLink.textContent?.trim() ?? "";
       const kakaoLinkText = kakaoLink.textContent?.trim() ?? "";
-      const mentionInput = Array.from(document.querySelectorAll(".topbar-field"))
-        .find((field) => (field.textContent ?? "").includes("멘션"))
-        ?.querySelector("input");
+      const mentionInput = document.querySelector('[data-smoke-role="footer-input"], [data-smoke-role="mention-input"]');
       if (!(mentionInput instanceof HTMLInputElement)) {
-        throw new Error("Mention input was not found.");
+        throw new Error("Footer input was not found.");
       }
       const defaultMentionValue = mentionInput.value;
       setNativeValue(mentionInput, "@");
@@ -1466,6 +3376,31 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
 
       let box = await waitFor('[data-smoke-role="layer-box"]');
       const overlay = await waitFor(".edit-overlay");
+      const toolbarTarget = await waitFor('[data-smoke-role="floating-editor-toolbar"] [data-toolbar-target="text-layer"]');
+      if (!(toolbarTarget instanceof HTMLElement)) {
+        throw new Error("Floating editor toolbar did not target the selected text layer.");
+      }
+      const toolbarColorInput = toolbarTarget.querySelector('input[type="color"]');
+      if (!(toolbarColorInput instanceof HTMLInputElement)) {
+        throw new Error("Floating editor toolbar color input was not available.");
+      }
+      const typographyColorControl = await waitFor('[data-smoke-role="typography-color-control"]');
+      const typographyColorInput = typographyColorControl.querySelector('input[type="color"]');
+      if (!(typographyColorInput instanceof HTMLInputElement)) {
+        throw new Error("Typography color control input was not available.");
+      }
+      setNativeValue(typographyColorInput, "#123456");
+      await waitUntil(
+        () => readIframeLayerStyle()?.titleColor === "rgb(18, 52, 86)",
+        () => "Typography color did not reach preview title: " + JSON.stringify(readIframeLayerStyle())
+      );
+      const titleColorAfterTypography = readIframeLayerStyle()?.titleColor ?? "";
+      setNativeValue(toolbarColorInput, "#336699");
+      await waitUntil(
+        () => readIframeLayerStyle()?.styleAttribute.includes("#336699") === true,
+        () => "Floating toolbar text color did not reach preview layer: " + JSON.stringify(readIframeLayerStyle())
+      );
+      const toolbarTextStyle = readIframeLayerStyle();
       const overlayText = overlay.innerText;
       const noOverlayTextDuplicate = !overlayText.includes("텍스트 입력");
 
@@ -1615,7 +3550,10 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
         noShapeControlsForLine,
         shapeLabelText,
         styleOptionTexts,
+        titleColorAfterTypography,
         thumbnailCenterDelta,
+        toolbarTextColorApplied: toolbarTextStyle?.styleAttribute.includes("#336699") === true,
+        toolbarTextTargetVisible: Boolean(toolbarTarget),
         threadsLinkText,
         normalizedPreviewFooter,
         textStyle
@@ -1664,6 +3602,9 @@ async function runLayerControlsRegressionSmoke(mainWindow: BrowserWindow): Promi
     textStyle?.["fontSize"] !== "80px" ||
     textStyle?.["fontWeight"] !== "950" ||
     textStyle?.["textAlign"] !== "right" ||
+    record["titleColorAfterTypography"] !== "rgb(18, 52, 86)" ||
+    record["toolbarTextTargetVisible"] !== true ||
+    record["toolbarTextColorApplied"] !== true ||
     record["noShapeControlsForLine"] !== true ||
     !shapeLabelText.includes("도형 색상") ||
     !lineLabelText.includes("선 색상") ||
@@ -1976,9 +3917,22 @@ function scheduleSmokeCapture(mainWindow: BrowserWindow): void {
 }
 
 function createWindow(): void {
+  const hasSmokeWindowSize =
+    !app.isPackaged &&
+    (process.env["CARDNEWS_SMOKE_VIEWPORT_WIDTH"] !== undefined ||
+      process.env["CARDNEWS_SMOKE_VIEWPORT_HEIGHT"] !== undefined);
+  const smokeWindowWidth = hasSmokeWindowSize
+    ? parseSmokeWindowDimension("CARDNEWS_SMOKE_VIEWPORT_WIDTH", 1280)
+    : 1280;
+  const smokeWindowHeight = hasSmokeWindowSize
+    ? parseSmokeWindowDimension("CARDNEWS_SMOKE_VIEWPORT_HEIGHT", 880)
+    : 880;
   const mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 880,
+    width: smokeWindowWidth,
+    height: smokeWindowHeight,
+    useContentSize: hasSmokeWindowSize,
+    show: !hasSmokeWindowSize,
+    paintWhenInitiallyHidden: true,
     minWidth: 1080,
     minHeight: 720,
     title: "Cardnews Studio",
@@ -1990,6 +3944,9 @@ function createWindow(): void {
       sandbox: true
     }
   });
+  if (hasSmokeWindowSize) {
+    mainWindow.setContentSize(smokeWindowWidth, smokeWindowHeight);
+  }
 
   if (devServerUrl) {
     void mainWindow.loadURL(devServerUrl);
@@ -2049,6 +4006,318 @@ async function writeDeckZip(outputDir: string, targetPath: string): Promise<void
 
 function storageRoot(): string {
   return getCardnewsStorageRoot(app.getPath("userData"));
+}
+
+const activeVideoExports = new Map<string, AbortController>();
+
+function mediaLibraryErrorWithUsages(
+  error: MediaLibraryError,
+  usages?: readonly MediaLibraryUsageRef[]
+): MediaLibraryError & { readonly usages?: readonly MediaLibraryUsageRef[] } {
+  return usages && usages.length > 0 ? { ...error, usages } : error;
+}
+
+function isMediaLibraryError(value: unknown): value is MediaLibraryError {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "ok" in value &&
+    (value as { readonly ok?: unknown }).ok === false
+  );
+}
+
+async function chooseMediaFile(kind?: unknown): Promise<string | undefined> {
+  const normalizedKind = kind === "image" || kind === "video" ? kind : undefined;
+  const filters =
+    normalizedKind === "image"
+      ? [{ extensions: ["png", "jpg", "jpeg", "webp"], name: "Images" }]
+      : normalizedKind === "video"
+        ? [{ extensions: ["mp4"], name: "MP4 Video" }]
+        : [{ extensions: ["png", "jpg", "jpeg", "webp", "mp4"], name: "Images and MP4 Video" }];
+  const result = await dialog.showOpenDialog({ filters, properties: ["openFile"] });
+  return result.canceled ? undefined : result.filePaths[0];
+}
+
+async function importManagedMedia(kind?: unknown): Promise<unknown> {
+  const expectedKind = kind === "image" || kind === "video" ? kind : undefined;
+  const filePath = await chooseMediaFile(expectedKind);
+  if (!filePath) {
+    return invalidInput("미디어 선택이 취소되었습니다.");
+  }
+
+  return importMediaAsset(storageRoot(), filePath, {
+    ...(expectedKind ? { expectedKind } : {}),
+    videoProbe: createVideoMediaProbe({
+      trustedResourcesRoot: process.resourcesPath,
+      ffmpegProbe: createFfmpegProbe(),
+      pathApi: path.win32
+    })
+  });
+}
+
+async function getManagedMediaPreview(mediaId: unknown): Promise<unknown> {
+  if (typeof mediaId !== "string" || mediaId.length === 0) {
+    return invalidInput("미디어 id가 올바르지 않습니다.");
+  }
+  const asset = await getMediaAsset(storageRoot(), mediaId);
+  if (isMediaLibraryError(asset)) {
+    return asset;
+  }
+  if (asset.missing) {
+    return { ok: false, code: "not_found", message: "미디어 파일이 저장소에서 사라졌습니다." };
+  }
+  if (asset.kind === "video") {
+    return createMediaAssetUrl(asset.id);
+  }
+
+  const previewPath = asset.posterAbsolutePath ?? asset.absolutePath;
+  const image = nativeImage.createFromPath(previewPath);
+  if (image.isEmpty()) {
+    return { ok: false, code: "corrupt_media", message: "미디어 미리보기를 만들 수 없습니다." };
+  }
+  const { width } = image.getSize();
+  const resized = width > 720 ? image.resize({ width: 720 }) : image;
+  return `data:image/jpeg;base64,${resized.toJPEG(82).toString("base64")}`;
+}
+
+async function listManagedMediaUsage(mediaId: unknown): Promise<unknown> {
+  if (typeof mediaId !== "string" || mediaId.length === 0) {
+    return invalidInput("미디어 id가 올바르지 않습니다.");
+  }
+  const workspace = await loadWorkspaceState(storageRoot());
+  return workspace ? findMediaUsages(workspace, mediaId) : [];
+}
+
+async function deleteManagedMedia(mediaId: unknown): Promise<unknown> {
+  if (typeof mediaId !== "string" || mediaId.length === 0) {
+    return invalidInput("미디어 id가 올바르지 않습니다.");
+  }
+  const usages = (await listManagedMediaUsage(mediaId)) as readonly MediaLibraryUsageRef[];
+  const result = await deleteMediaAsset(storageRoot(), { id: mediaId, usages });
+  return isMediaLibraryError(result) ? mediaLibraryErrorWithUsages(result, usages) : result;
+}
+
+function findMediaUsages(workspace: WorkspaceState, mediaId: string): readonly MediaLibraryUsageRef[] {
+  const usages: MediaLibraryUsageRef[] = [];
+  if (workspace.backgroundMedia?.mode === "asset" && workspace.backgroundMedia.mediaId === mediaId) {
+    usages.push({ workspaceId: "current", role: "global-background" });
+  }
+  for (const [cardIndex, override] of Object.entries(workspace.overrides ?? {})) {
+    const numericCardIndex = Number.parseInt(cardIndex, 10);
+    if (override.backgroundMedia?.mode === "asset" && override.backgroundMedia.mediaId === mediaId) {
+      usages.push({ workspaceId: "current", cardIndex: numericCardIndex, role: "card-background" });
+    }
+    for (const layer of override.layers ?? []) {
+      if (layer.kind === "video" && layer.mediaId === mediaId) {
+        usages.push({ workspaceId: "current", cardIndex: numericCardIndex, layerId: layer.id, role: "video-layer" });
+      }
+      if (layer.kind === "image" && layer.backgroundId === mediaId) {
+        usages.push({ workspaceId: "current", cardIndex: numericCardIndex, layerId: layer.id, role: "image-layer" });
+      }
+    }
+  }
+  return usages;
+}
+
+async function exportManagedVideo(input: unknown): Promise<unknown> {
+  if (!isMp4ExportInput(input)) {
+    return invalidInput("MP4 출력 입력 형식이 올바르지 않습니다.");
+  }
+  const result = await dialog.showSaveDialog({
+    defaultPath: `cardnews-${new Date().toISOString().slice(0, 10)}.mp4`,
+    filters: [{ extensions: ["mp4"], name: "MP4" }]
+  });
+  if (result.canceled || !result.filePath) {
+    return invalidInput("MP4 저장이 취소되었습니다.");
+  }
+
+  const outputPath = ensureMp4Extension(result.filePath);
+  const jobId = `video-${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}`;
+  const controller = new AbortController();
+  activeVideoExports.set(jobId, controller);
+  const fontCss = await buildRenderFontCss(input.workspace.fontId);
+  if (isCardnewsError(fontCss)) {
+    activeVideoExports.delete(jobId);
+    return fontCss;
+  }
+  const deck = buildDeckForVideoExport(input.workspace);
+  if (isCardnewsError(deck)) {
+    activeVideoExports.delete(jobId);
+    return deck;
+  }
+  const timeline = compileVideoTimeline(deck);
+  const totalFrames = timeline.frameCount;
+  const audioSegments = await resolvePrimaryAudioSegments(timeline);
+
+  let exported: Awaited<ReturnType<typeof exportVideoMp4>>;
+  try {
+    exported = await exportVideoMp4(
+      {
+        outputPath,
+        outputRoot: path.dirname(outputPath),
+        overwrite: input.overwrite === true,
+        totalFrames,
+        totalDurationMs: timeline.durationMs,
+        ...(audioSegments.length > 0 ? { audioSegments } : {}),
+        signal: controller.signal,
+        onProgress: (progress) => broadcastVideoProgress({
+          jobId,
+          stage: progress.stage,
+          percent: progress.percent,
+          ...(progress.completedFrames !== undefined ? { completedFrames: progress.completedFrames } : {}),
+          ...(progress.totalFrames !== undefined ? { totalFrames: progress.totalFrames } : {}),
+          ...(progress.message ? { message: progress.message } : {}),
+          ...(progress.elapsedMs !== undefined ? { elapsedMs: progress.elapsedMs } : {})
+        })
+      },
+      {
+        trustedResourcesRoot: process.resourcesPath,
+        manifest: defaultFfmpegManifest,
+        ffmpegProbe: createFfmpegProbe(),
+        spawn,
+        frameProducer: createWorkspaceFrameProducer({
+          ...(fontCss ? { fontCss } : {}),
+          signal: controller.signal,
+          storageRoot: storageRoot(),
+          totalFrames,
+          workspace: input.workspace
+        }),
+        pathApi: path.win32
+      }
+    );
+  } catch (error) {
+    activeVideoExports.delete(jobId);
+    if (controller.signal.aborted) {
+      return { ok: false, code: "cancelled", message: "MP4 export was cancelled.", jobId };
+    }
+    throw error;
+  }
+  activeVideoExports.delete(jobId);
+  if (exported.ok === false) {
+    return { ...exported, jobId };
+  }
+  return { ok: true, jobId, filePath: exported.outputPath, framesWritten: exported.framesWritten };
+}
+
+async function resolvePrimaryAudioSegments(
+  timeline: ReturnType<typeof compileVideoTimeline>
+): Promise<readonly VideoExportAudioSegment[]> {
+  const segments: VideoExportAudioSegment[] = [];
+  for (const scene of timeline.scenes) {
+    const primarySource = scene.sources.find((source) => source.hasAudio && !source.muted);
+    if (!primarySource || primarySource.volume <= 0) {
+      continue;
+    }
+    const asset = await getMediaAsset(storageRoot(), primarySource.mediaId);
+    if (isMediaLibraryError(asset) || asset.missing || asset.kind !== "video" || asset.hasAudio !== true) {
+      continue;
+    }
+    const sourceEndMs = primarySource.clipEndMs ?? asset.durationMs ?? primarySource.clipStartMs + scene.durationMs;
+    const sourceDurationMs = Math.max(0, sourceEndMs - primarySource.clipStartMs);
+    const durationMs = Math.min(scene.durationMs, sourceDurationMs);
+    if (durationMs <= 0) {
+      continue;
+    }
+    segments.push({
+      path: asset.absolutePath,
+      sceneStartMs: scene.startMs,
+      clipStartMs: primarySource.clipStartMs,
+      durationMs,
+      volume: primarySource.volume
+    });
+  }
+  return segments;
+}
+
+function buildDeckForVideoExport(workspace: WorkspaceState): CardnewsResult<Deck> {
+  const cards: Deck["cards"][number][] = [];
+  for (const [offset, rawText] of workspace.cards.entries()) {
+    const parsed = parseCardText(rawText, offset + 1);
+    if (isCardnewsError(parsed)) {
+      return parsed;
+    }
+    cards.push(parsed);
+  }
+
+  return {
+    id: "current",
+    headerLabel: workspace.headerLabel,
+    footerAccount: workspace.footerAccount,
+    cards,
+    styleId: workspace.styleId,
+    ...(workspace.chrome ? { chrome: workspace.chrome } : {}),
+    ...(workspace.accentColor ? { accentColor: workspace.accentColor } : {}),
+    ...(typeof workspace.backgroundDim === "number" ? { backgroundDim: workspace.backgroundDim } : {}),
+    ...(workspace.backgroundId ? { backgroundId: workspace.backgroundId } : {}),
+    ...(workspace.backgroundMedia ? { backgroundMedia: workspace.backgroundMedia } : {}),
+    ...(workspace.mediaAssets ? { mediaAssets: workspace.mediaAssets } : {}),
+    ...(workspace.sceneDefaults ? { sceneDefaults: workspace.sceneDefaults } : {}),
+    ...(workspace.bodyNumberDefault ? { bodyNumberDefault: workspace.bodyNumberDefault } : {}),
+    ...(workspace.fontId ? { fontId: workspace.fontId } : {}),
+    ...(workspace.nextHint ? { nextHint: workspace.nextHint } : {}),
+    ...(workspace.overrides ? { overrides: workspace.overrides } : {})
+  };
+}
+
+function cancelManagedVideoExport(jobId: unknown): { readonly ok: true; readonly jobId: string } | {
+  readonly ok: false;
+  readonly code: "invalid_input" | "cancelled";
+  readonly message: string;
+  readonly jobId?: string;
+} {
+  if (typeof jobId !== "string" || jobId.length === 0) {
+    return { ok: false, code: "invalid_input", message: "MP4 작업 id가 올바르지 않습니다." };
+  }
+  const controller = activeVideoExports.get(jobId);
+  if (!controller) {
+    return { ok: false, code: "cancelled", message: "진행 중인 MP4 작업을 찾지 못했습니다.", jobId };
+  }
+  controller.abort();
+  return { ok: true, jobId };
+}
+
+function isMp4ExportInput(input: unknown): input is Mp4ExportInput {
+  return (
+    typeof input === "object" &&
+    input !== null &&
+    "workspace" in input &&
+    isWorkspaceState((input as { readonly workspace?: unknown }).workspace)
+  );
+}
+
+function createFfmpegProbe(): FfmpegProbe {
+  return {
+    run: (filePath, args) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(filePath, args, { windowsHide: true });
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (chunk: Buffer | string) => {
+          stdout += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk: Buffer | string) => {
+          stderr += chunk.toString();
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code === 0) {
+            resolve({ stdout, stderr });
+          } else {
+            reject(new Error(stderr || `FFmpeg probe exited with ${code ?? 1}`));
+          }
+        });
+      })
+  };
+}
+
+function broadcastVideoProgress(progress: Mp4ExportProgress): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send("cardnews:video:progress", progress);
+  }
+}
+
+function ensureMp4Extension(filePath: string): string {
+  return path.extname(filePath).toLowerCase() === ".mp4" ? filePath : `${filePath}.mp4`;
 }
 
 let cachedBundledFont: FontData | null | undefined;
@@ -2373,7 +4642,10 @@ function isAppSettings(input: unknown): input is AppSettings {
   const record = input as Record<string, unknown>;
   return (
     (record["pixabayApiKey"] === undefined || typeof record["pixabayApiKey"] === "string") &&
-    (record["aiDefaultProviderId"] === undefined || isAiProviderId(record["aiDefaultProviderId"]))
+    (record["aiDefaultProviderId"] === undefined || isAiProviderId(record["aiDefaultProviderId"])) &&
+    (record["gptsTemplateBuilderUrl"] === undefined ||
+      (typeof record["gptsTemplateBuilderUrl"] === "string" &&
+        isAllowedGptsTemplateBuilderUrl(record["gptsTemplateBuilderUrl"])))
   );
 }
 
@@ -2400,21 +4672,6 @@ function isAiChatRole(input: unknown): input is AiChatMessage["role"] {
   return input === "system" || input === "user" || input === "assistant";
 }
 
-function isStockImageDownloadInput(input: unknown): input is StockImageDownloadInput {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return false;
-  }
-
-  const record = input as Record<string, unknown>;
-  return (
-    record["provider"] === "pixabay" &&
-    typeof record["id"] === "string" &&
-    typeof record["imageUrl"] === "string" &&
-    typeof record["pageUrl"] === "string" &&
-    typeof record["author"] === "string"
-  );
-}
-
 async function chooseImageFiles(allowsMultipleSelection: boolean): Promise<readonly string[] | undefined> {
   const result = await dialog.showOpenDialog({
     filters: [{ extensions: ["png", "jpg", "jpeg", "webp"], name: "Images" }],
@@ -2436,6 +4693,15 @@ async function chooseFontFile(): Promise<string | undefined> {
 async function chooseCsvFile(): Promise<string | undefined> {
   const result = await dialog.showOpenDialog({
     filters: [{ extensions: ["csv"], name: "CSV" }],
+    properties: ["openFile"]
+  });
+
+  return result.canceled ? undefined : result.filePaths[0];
+}
+
+async function chooseTemplatePackFile(): Promise<string | undefined> {
+  const result = await dialog.showOpenDialog({
+    filters: [{ extensions: ["zip"], name: "Kkongdon Template Pack" }],
     properties: ["openFile"]
   });
 
@@ -2494,33 +4760,23 @@ async function searchPixabayImages(
 async function downloadStockImageToLibrary(
   input: StockImageDownloadInput
 ): Promise<CardnewsResult<BackgroundLibraryItem>> {
-  let url: URL;
+  let filePath: string | undefined;
   try {
-    url = new URL(input.imageUrl);
-  } catch {
-    return invalidInput("이미지 URL 형식이 올바르지 않습니다.");
-  }
-
-  if (url.protocol !== "https:") {
-    return invalidInput("https 이미지 URL만 다운로드할 수 있습니다.");
-  }
-
-  try {
-    const response = await fetch(url);
+    const response = await fetchAllowedPixabayImage(input.imageUrl);
     if (!response.ok) {
       return externalServiceFailed(`이미지 다운로드 실패: HTTP ${response.status}`);
     }
 
     const contentType = response.headers.get("content-type") ?? "";
-    const extension = extensionForContentType(contentType) ?? extensionForPath(url.pathname);
+    const extension = extensionForContentType(contentType) ?? extensionForPath(new URL(input.imageUrl).pathname);
     if (!extension) {
       return invalidInput("지원하지 않는 이미지 형식입니다.");
     }
 
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes = await readResponseBytesWithLimit(response);
     const downloadDir = path.join(storageRoot(), "stock-downloads");
     await fs.mkdir(downloadDir, { recursive: true });
-    const filePath = path.join(downloadDir, `pixabay-${input.id}.${extension}`);
+    filePath = createStockDownloadPath(downloadDir, extension);
     await fs.writeFile(filePath, bytes);
 
     const decodeResult = validateImageDecode(filePath);
@@ -2532,6 +4788,10 @@ async function downloadStockImageToLibrary(
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 네트워크 오류";
     return externalServiceFailed(`이미지 다운로드 실패: ${message}`);
+  } finally {
+    if (filePath) {
+      await fs.rm(filePath, { force: true }).catch(() => undefined);
+    }
   }
 }
 
@@ -2568,8 +4828,10 @@ async function renderDeckToOutput(
 
   return renderDeckOffscreen({
     ...renderAssets,
+    appVersion: app.getVersion(),
     customStyles,
     deck,
+    edition: "pro",
     jobId,
     outputDir,
     ...(fontCss ? { fontCss } : {})
@@ -2746,6 +5008,99 @@ async function renderBulkCsvText(csvText: string): Promise<CardnewsResult<BulkRe
   return result;
 }
 
+async function renderTemplateBulkCsvText(
+  csvText: string,
+  workspace: WorkspaceState,
+  metadata: BulkBindingMetadata
+): Promise<CardnewsResult<BulkRenderResult>> {
+  const preflight = preflightTemplateBulkCsv(csvText, metadata);
+  if (isCardnewsError(preflight)) return preflight;
+
+  const customStyles = await listCustomStyles(storageRoot());
+  const jobId = `bulk-v2-${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}`;
+  const outputDir = getRenderOutputDirectory(storageRoot(), jobId);
+  await fs.mkdir(outputDir, { recursive: true });
+  const rowResults: BulkRenderRowResult[] = [];
+
+  for (const row of preflight.rows) {
+    const materialized = materializeTemplateBulkRow(workspace, metadata, row);
+    if (isCardnewsError(materialized)) {
+      rowResults.push({
+        rowNumber: row.rowNumber,
+        outputName: row.outputName,
+        status: "failed",
+        cardCount: 0,
+        message: materialized.message
+      });
+      continue;
+    }
+
+    const draft = deckDraftFromWorkspace(materialized);
+    const referenceError = await validateBulkReferences(draft);
+    if (isCardnewsError(referenceError)) {
+      rowResults.push({
+        rowNumber: row.rowNumber,
+        outputName: row.outputName,
+        status: "failed",
+        cardCount: 0,
+        message: referenceError.message
+      });
+      continue;
+    }
+
+    const deck = buildDeckFromDraft(`${jobId}-${row.rowNumber}`, draft, approvedStyleProfile);
+    if (isCardnewsError(deck)) {
+      rowResults.push({
+        rowNumber: row.rowNumber,
+        outputName: row.outputName,
+        status: "failed",
+        cardCount: 0,
+        message: deck.message
+      });
+      continue;
+    }
+
+    const rowOutputDir = path.join(outputDir, safeOutputName(row.outputName, row.rowNumber));
+    const rendered = await renderDeckToOutput(deck, `${jobId}-${row.rowNumber}`, rowOutputDir, customStyles);
+    if (isCardnewsError(rendered)) {
+      rowResults.push({
+        rowNumber: row.rowNumber,
+        outputName: row.outputName,
+        status: "failed",
+        cardCount: 0,
+        outputDir: rowOutputDir,
+        message: rendered.message
+      });
+      continue;
+    }
+
+    rowResults.push({
+      rowNumber: row.rowNumber,
+      outputName: row.outputName,
+      status: "rendered",
+      cardCount: rendered.cardCount,
+      outputDir: rendered.outputDir
+    });
+  }
+
+  rowResults.sort((first, second) => first.rowNumber - second.rowNumber);
+  const zipPath = path.join(outputDir, "bulk-output.zip");
+  const result: BulkRenderResult = {
+    failedCount: rowResults.filter((row) => row.status === "failed").length,
+    jobId,
+    outputDir,
+    renderedCount: rowResults.filter((row) => row.status === "rendered").length,
+    rows: rowResults,
+    totalRows: rowResults.length,
+    zipPath
+  };
+  await writeBulkReports(outputDir, result);
+  const zip = new AdmZip();
+  zip.addLocalFolder(outputDir);
+  zip.writeZip(zipPath);
+  return result;
+}
+
 async function validateBulkReferences(input: DeckDraft): Promise<CardnewsResult<void>> {
   if (input.backgroundId && !(await findLibraryBackground(storageRoot(), input.backgroundId))) {
     return invalidInput(`배경 id를 찾을 수 없습니다: ${input.backgroundId}`);
@@ -2794,7 +5149,32 @@ function escapeCsvValue(value: string): string {
   return `"${value.replaceAll("\"", "\"\"")}"`;
 }
 
+async function confirmAiProviderInstall(recipe: AiProviderInstallRecipe): Promise<boolean> {
+  const result = await dialog.showMessageBox({
+    type: "question",
+    title: "AI CLI 설치 확인",
+    message: `${recipe.provider === "codex" ? "Codex CLI" : "Claude Code"}를 설치하시겠습니까?`,
+    detail: [
+      `설치 명령: ${recipe.command.join(" ")}`,
+      `확인 명령: ${recipe.verifyCommand.join(" ")}`,
+      recipe.doctorCommand ? `진단 명령: ${recipe.doctorCommand.join(" ")}` : undefined,
+      `필수 조건: ${recipe.prerequisites.join(" ")}`,
+      `공식 안내: ${recipe.officialUrl}`,
+      "",
+      "관리자 권한은 자동으로 요청하지 않습니다. 설치 과정은 별도의 터미널에 표시됩니다."
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n"),
+    buttons: ["취소", "설치"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  return result.response === 1;
+}
+
 app.whenReady().then(() => {
+  installMediaProtocolHandler(storageRoot);
   ipcMain.handle("cardnews:getEdition", () => ({ edition: "pro", productName: "Cardnews Studio Pro" }));
   ipcMain.handle("cardnews:requestLockedFeature", () => undefined);
   ipcMain.handle("cardnews:chooseStyleReferenceImages", async () => {
@@ -2846,7 +5226,7 @@ app.whenReady().then(() => {
     return parseCardText(rawText, index);
   });
   ipcMain.handle("cardnews:extractStyle", () =>
-    process.env["CARDNEWS_MOCK_STYLE_EXTRACTION"] === "1"
+    !app.isPackaged && process.env["CARDNEWS_MOCK_STYLE_EXTRACTION"] === "1"
       ? {
           palette: ["#1d1d1b", "#f8f1e3", "#123c3a", "#a53d2d"],
           layoutMood: "newsprint editorial",
@@ -2952,8 +5332,8 @@ app.whenReady().then(() => {
 
     try {
       const stat = await fs.stat(filePath);
-      if (stat.size > 2 * 1024 * 1024) {
-        return invalidInput("CSV 파일은 2MB 이하만 불러올 수 있습니다.");
+      if (stat.size > 10 * 1024 * 1024) {
+        return invalidInput("CSV 파일은 10MB 이하만 불러올 수 있습니다.");
       }
 
       const text = await fs.readFile(filePath, "utf8");
@@ -2987,8 +5367,34 @@ app.whenReady().then(() => {
 
     return renderBulkCsvText(csvText);
   });
+  ipcMain.handle(
+    "cardnews:renderTemplateBulkCsv",
+    (_event, csvText: unknown, workspace: unknown, metadata: unknown) => {
+      if (typeof csvText !== "string") return invalidInput("CSV 내용은 문자열이어야 합니다.");
+      if (!isWorkspaceState(workspace)) return invalidInput("벌크 템플릿 워크스페이스가 올바르지 않습니다.");
+      if (
+        !metadata ||
+        typeof metadata !== "object" ||
+        !("bindings" in metadata) ||
+        !Array.isArray(metadata.bindings) ||
+        !("templateId" in metadata) ||
+        typeof metadata.templateId !== "string" ||
+        !("templateRevision" in metadata) ||
+        typeof metadata.templateRevision !== "number" ||
+        !("schemaVersion" in metadata) ||
+        metadata.schemaVersion !== 1
+      ) {
+        return invalidInput("벌크 바인딩 메타데이터가 올바르지 않습니다.");
+      }
+      const validation = validateBulkBindingMetadata(metadata as BulkBindingMetadata);
+      if (isCardnewsError(validation)) return validation;
+      return renderTemplateBulkCsvText(csvText, workspace, validation);
+    }
+  );
   ipcMain.handle("cardnews:listBackgroundLibrary", () => listBackgroundLibrary(storageRoot()));
-  ipcMain.handle("cardnews:listImageLibrary", () => listImageLibrary(storageRoot()));
+  ipcMain.handle("cardnews:listImageLibrary", () =>
+    listImageLibrary(storageRoot(), { includeSmokeFixtures: Boolean(smokeAction) })
+  );
   ipcMain.handle("cardnews:listFontLibrary", () => listFontLibrary(storageRoot()));
   ipcMain.handle("cardnews:importFontToLibrary", async () => {
     const filePath = await chooseFontFile();
@@ -3012,6 +5418,13 @@ app.whenReady().then(() => {
 
     return addBackgroundToLibrary(storageRoot(), filePath);
   });
+  ipcMain.handle("cardnews:removeBackgroundFromLibrary", (_event, backgroundId: unknown) => {
+    if (typeof backgroundId !== "string" || backgroundId.length === 0) {
+      return invalidInput("배경 이미지 id가 올바르지 않습니다.");
+    }
+
+    return removeBackgroundFromLibrary(storageRoot(), backgroundId);
+  });
   ipcMain.handle("cardnews:addImageToLibrary", async () => {
     const filePaths = await chooseImageFiles(false);
     const filePath = filePaths?.[0];
@@ -3026,6 +5439,20 @@ app.whenReady().then(() => {
 
     return addImageToLibrary(storageRoot(), filePath);
   });
+  ipcMain.handle("cardnews:removeImageFromLibrary", (_event, imageId: unknown) => {
+    if (typeof imageId !== "string" || imageId.length === 0) {
+      return invalidInput("이미지 id가 올바르지 않습니다.");
+    }
+
+    return removeImageFromLibrary(storageRoot(), imageId);
+  });
+  ipcMain.handle("cardnews:media:import", (_event, kind: unknown) => importManagedMedia(kind));
+  ipcMain.handle("cardnews:media:list", () => listMediaAssets(storageRoot()));
+  ipcMain.handle("cardnews:media:preview", (_event, mediaId: unknown) => getManagedMediaPreview(mediaId));
+  ipcMain.handle("cardnews:media:usage", (_event, mediaId: unknown) => listManagedMediaUsage(mediaId));
+  ipcMain.handle("cardnews:media:delete", (_event, mediaId: unknown) => deleteManagedMedia(mediaId));
+  ipcMain.handle("cardnews:video:export", (_event, input: unknown) => exportManagedVideo(input));
+  ipcMain.handle("cardnews:video:cancel", (_event, jobId: unknown) => cancelManagedVideoExport(jobId));
   ipcMain.handle("cardnews:searchStockImages", (_event, query: unknown, page: unknown) => {
     if (typeof query !== "string") {
       return invalidInput("검색어는 문자열이어야 합니다.");
@@ -3038,11 +5465,19 @@ app.whenReady().then(() => {
     return searchPixabayImages(query, page);
   });
   ipcMain.handle("cardnews:downloadStockImage", (_event, input: unknown) => {
-    if (!isStockImageDownloadInput(input)) {
+    if (!isSafeStockImageDownloadInput(input)) {
       return invalidInput("이미지 다운로드 입력 형식이 올바르지 않습니다.");
     }
 
     return downloadStockImageToLibrary(input);
+  });
+  ipcMain.handle("cardnews:importTemplatePack", async () => {
+    const filePath = await chooseTemplatePackFile();
+    if (!filePath) {
+      return invalidInput("템플릿팩 가져오기가 취소되었습니다.");
+    }
+
+    return importTemplatePackArchive(storageRoot(), filePath);
   });
   ipcMain.handle("cardnews:loadSettings", () => loadAppSettings(storageRoot()));
   ipcMain.handle("cardnews:saveSettings", async (_event, settings: unknown) => {
@@ -3053,7 +5488,26 @@ app.whenReady().then(() => {
     await saveAppSettings(storageRoot(), settings);
     return undefined;
   });
-  ipcMain.handle("cardnews:ai:listProviders", () => listAiProviderStatuses());
+  ipcMain.handle("cardnews:ai:listProviders", (_event, forceRefresh: unknown) =>
+    listAiProviderStatuses({ forceRefresh: forceRefresh === true })
+  );
+  ipcMain.handle("cardnews:ai:install", (_event, providerId: unknown, recipeId: unknown) => {
+    if (
+      !isAiProviderId(providerId) ||
+      typeof recipeId !== "string" ||
+      recipeId.length === 0 ||
+      recipeId.length > 80
+    ) {
+      return {
+        ok: false,
+        outcome: "failed",
+        message: "AI CLI 설치 요청 형식이 올바르지 않습니다."
+      };
+    }
+    return installAiProviderRecipe(providerId, recipeId, {
+      confirm: confirmAiProviderInstall
+    });
+  });
   ipcMain.handle("cardnews:ai:chat", async (_event, providerId: unknown, messages: unknown) => {
     if (!isAiProviderId(providerId)) {
       return invalidInput("AI provider는 claude, codex, gemini 중 하나여야 합니다.");
@@ -3062,7 +5516,10 @@ app.whenReady().then(() => {
       return invalidInput("AI 대화 메시지 형식이 올바르지 않습니다.");
     }
 
-    return runAiProviderChat(providerId, messages, { cwd: storageRoot() });
+    return runAiProviderChat(providerId, messages, {
+      cwd: storageRoot(),
+      allowMock: !app.isPackaged
+    });
   });
   ipcMain.handle("cardnews:listCustomStyles", () => listCustomStyles(storageRoot()));
   ipcMain.handle("cardnews:saveCustomStyle", (_event, style: unknown) => {
@@ -3104,7 +5561,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("cardnews:loadWorkspace", () => loadWorkspaceState(storageRoot()));
   ipcMain.handle("cardnews:exportCardPng", async (_event, jobId: unknown, fileName: unknown) => {
-    if (typeof jobId !== "string" || !jobId.startsWith("render-")) {
+    if (!isRenderJobId(jobId)) {
       return invalidInput("렌더 작업 id가 올바르지 않습니다.");
     }
 
@@ -3138,7 +5595,7 @@ app.whenReady().then(() => {
     }
   });
   ipcMain.handle("cardnews:exportDeckZip", async (_event, jobId: unknown) => {
-    if (typeof jobId !== "string" || !jobId.startsWith("render-")) {
+    if (!isRenderJobId(jobId)) {
       return invalidInput("렌더 작업 id가 올바르지 않습니다.");
     }
 
@@ -3274,21 +5731,27 @@ app.whenReady().then(() => {
 
       const { width, height } = image.getSize();
       const bitmap = image.toBitmap();
-      const processed = removeBackground(Uint8Array.from(bitmap), width, height, Math.min(96, Math.max(1, tolerance)));
+      const clampedTolerance = Math.min(96, Math.max(1, tolerance));
+      const processed = removeBackground(Uint8Array.from(bitmap), width, height, clampedTolerance);
       const processedImage = nativeImage.createFromBitmap(Buffer.from(processed), { width, height });
       if (processedImage.isEmpty()) {
         return invalidInput("배경 제거 결과 이미지를 생성하지 못했습니다.");
       }
 
       const sourceName = found.entry.displayName.replace(/\.[^.]+$/, "");
-      return saveImageBufferToLibrary(storageRoot(), processedImage.toPNG(), `${sourceName}-no-bg.png`);
+      return saveImageBufferToLibrary(
+        storageRoot(),
+        processedImage.toPNG(),
+        `${sourceName}-no-bg-t${clampedTolerance}.png`,
+        found.entry.attribution === smokeFixtureImageAttribution ? smokeFixtureImageAttribution : undefined
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "알 수 없는 파일 오류";
       return invalidInput(`배경 제거에 실패했습니다: ${message}`);
     }
   });
   ipcMain.handle("cardnews:openOutputFolder", async (_event, jobId: unknown) => {
-    if (typeof jobId !== "string" || !jobId.startsWith("render-")) {
+    if (!isRenderJobId(jobId)) {
       return invalidInput("렌더 작업 id가 올바르지 않습니다.");
     }
 
@@ -3296,7 +5759,7 @@ app.whenReady().then(() => {
     return error.length > 0 ? invalidInput(error) : undefined;
   });
   ipcMain.handle("cardnews:openExternalLink", async (_event, url: unknown) => {
-    if (typeof url !== "string" || !allowedExternalUrls.has(url)) {
+    if (typeof url !== "string" || !isAllowedExternalUrl(url)) {
       return invalidInput("허용되지 않은 외부 링크입니다.");
     }
 

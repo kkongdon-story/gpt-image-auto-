@@ -24,7 +24,7 @@ type StyleNameEntry = {
  * 양식.md 원문을 파싱한다.
  *
  * 문서 구조:
- * - 첫 구분선(`---` 또는 `## 카드 N`) 이전 = 메타 블록 (헤더/멘션/스타일/포인트색상/하단어둡기)
+ * - 첫 구분선(`---` 또는 `## 카드 N`) 이전 = 메타 블록 (헤더/푸터/스타일/포인트색상/하단어둡기)
  * - 구분선으로 나뉜 각 블록 = 카드 원문 (기존 카드 라벨 문법 그대로)
  * - 메타 블록의 인식 불가 줄은 안내문으로 간주하고 무시한다.
  */
@@ -68,7 +68,7 @@ export function buildTemplateDocument(styleNames: readonly StyleNameEntry[]): st
 메타 항목은 생략하면 앱의 현재 설정이 유지됩니다.
 
 헤더: MONEY NOTE
-멘션: @kkongdon_story
+푸터: @kkongdon_story
 스타일: newsprint
 포인트색상: #a53d2d
 하단어둡기: 85

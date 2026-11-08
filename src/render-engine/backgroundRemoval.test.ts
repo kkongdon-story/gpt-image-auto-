@@ -44,4 +44,20 @@ describe("removeBackground", () => {
     expect(output[pixelOffset(width, 2, 2) + 3]).toBe(255);
     expect(output[enclosed + 3]).toBe(255);
   });
+
+  it("uses tolerance to include or preserve near-background edge pixels", () => {
+    const width = 5;
+    const height = 3;
+    const bitmap = fillBitmap(width, height, [255, 255, 255, 255]);
+    const nearBackground = pixelOffset(width, 2, 0);
+    bitmap[nearBackground] = 220;
+    bitmap[nearBackground + 1] = 220;
+    bitmap[nearBackground + 2] = 220;
+
+    const lowTolerance = removeBackground(bitmap, width, height, 10);
+    const highTolerance = removeBackground(bitmap, width, height, 80);
+
+    expect(lowTolerance[nearBackground + 3]).toBe(255);
+    expect(highTolerance[nearBackground + 3]).toBe(0);
+  });
 });

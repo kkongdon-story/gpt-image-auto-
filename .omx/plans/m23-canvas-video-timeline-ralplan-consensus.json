@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "workflow": "ralplan-deliberate",
+  "milestone": "M23",
+  "task": "Canvas semantic-item editing, live video preview, canonical timeline, MP4 quality and media-isolation fixes through Lite/Pro release artifacts",
+  "contextSnapshot": ".omx/context/m23-video-editor-debug-20260717T102000Z/context.md",
+  "planning_artifacts": {
+    "prd": ".omx/plans/prd-v6-m23-canvas-video-timeline-hardening.md",
+    "testSpec": ".omx/plans/test-spec-v6-m23-canvas-video-timeline-hardening.md",
+    "executionBrief": ".omx/plans/m23-ultragoal-brief.md",
+    "plannerDraft": ".omx/plans/m23-video-canvas-release-plan.md"
+  },
+  "planner": {
+    "agentId": "019f6dd7-5cbf-7222-9038-74ecb6fb7650",
+    "status": "revised-ready",
+    "artifact": ".omx/plans/m23-video-canvas-release-plan.md"
+  },
+  "ralplan_architect_review": {
+    "agentId": "019f6dee-d878-7470-9a27-7d240e75e1f3",
+    "status": "approved",
+    "artifact": ".omx/plans/m23-canvas-video-timeline-architect-review.md"
+  },
+  "ralplan_critic_review": {
+    "agentId": "019f6dfa-c9fb-7340-a2b7-a627416f138b",
+    "status": "approved",
+    "artifact": ".omx/plans/m23-canvas-video-timeline-critic-review.md"
+  },
+  "reviewOrder": [
+    "planner",
+    "architect",
+    "critic",
+    "planner-revision",
+    "architect-re-review",
+    "critic-re-review"
+  ],
+  "ralplan_consensus_gate": {
+    "complete": true,
+    "approvedAt": "2026-07-17T12:29:07+09:00",
+    "reason": "Planner revised the plan, Architect Review 4 approved it, and subsequent Critic Review 2 approved it in the required order."
+  },
+  "executionAuthorization": {
+    "status": "ready-for-user-selected-handoff",
+    "default": "ultragoal",
+    "requiredFreshLedgerCommand": "omx ultragoal create-goals --force --brief-file .omx/plans/m23-ultragoal-brief.md --json",
+    "staleGoalRule": "Use a new Codex task or /goal clear before creating the M23 Codex goal; stop if status references M13."
+  }
+}

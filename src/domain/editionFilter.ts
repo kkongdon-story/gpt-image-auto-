@@ -10,7 +10,15 @@ export function stripProDeckDraft(input: DeckDraft): DeckDraft {
     ...(input.backgroundDim !== undefined ? { backgroundDim: input.backgroundDim } : {}),
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
-    ...(input.fontId ? { fontId: input.fontId } : {})
+    ...(input.backgroundMedia ? { backgroundMedia: input.backgroundMedia } : {}),
+    ...(input.mediaAssets ? { mediaAssets: input.mediaAssets } : {}),
+    ...(input.videoProjectMode ? { videoProjectMode: input.videoProjectMode } : {}),
+    ...(input.sceneDefaults ? { sceneDefaults: input.sceneDefaults } : {}),
+    ...(input.bodyNumberDefault ? { bodyNumberDefault: input.bodyNumberDefault } : {}),
+    ...(input.fontId ? { fontId: input.fontId } : {}),
+    ...(input.chrome ? { chrome: input.chrome } : {}),
+    ...(input.nextHint ? { nextHint: input.nextHint } : {}),
+    ...(input.overrides ? { overrides: input.overrides } : {})
   };
 }
 
@@ -27,7 +35,15 @@ export function stripProDeck(input: Deck): Deck {
     ...(input.backgroundDim !== undefined ? { backgroundDim: input.backgroundDim } : {}),
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
-    ...(input.fontId ? { fontId: input.fontId } : {})
+    ...(input.backgroundMedia ? { backgroundMedia: input.backgroundMedia } : {}),
+    ...(input.mediaAssets ? { mediaAssets: input.mediaAssets } : {}),
+    ...(input.videoProjectMode ? { videoProjectMode: input.videoProjectMode } : {}),
+    ...(input.sceneDefaults ? { sceneDefaults: input.sceneDefaults } : {}),
+    ...(input.bodyNumberDefault ? { bodyNumberDefault: input.bodyNumberDefault } : {}),
+    ...(input.fontId ? { fontId: input.fontId } : {}),
+    ...(input.chrome ? { chrome: input.chrome } : {}),
+    ...(input.nextHint ? { nextHint: input.nextHint } : {}),
+    ...(input.overrides ? { overrides: input.overrides } : {})
   };
 }
 
@@ -40,8 +56,17 @@ export function stripProWorkspaceState(input: WorkspaceState): WorkspaceState {
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     ...(input.backgroundDim !== undefined ? { backgroundDim: input.backgroundDim } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
+    ...(input.backgroundMedia ? { backgroundMedia: input.backgroundMedia } : {}),
+    ...(input.mediaAssets ? { mediaAssets: input.mediaAssets } : {}),
+    ...(input.videoProjectMode ? { videoProjectMode: input.videoProjectMode } : {}),
+    ...(input.sceneDefaults ? { sceneDefaults: input.sceneDefaults } : {}),
+    ...(input.bodyNumberDefault ? { bodyNumberDefault: input.bodyNumberDefault } : {}),
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
     ...(input.fontId ? { fontId: input.fontId } : {}),
+    ...(input.chrome ? { chrome: input.chrome } : {}),
+    ...(input.nextHint ? { nextHint: input.nextHint } : {}),
+    ...(input.overrides ? { overrides: input.overrides } : {}),
+    ...(input.bulkBindings ? { bulkBindings: input.bulkBindings } : {}),
     ...(input.railWidth !== undefined ? { railWidth: input.railWidth } : {}),
     ...(input.selectedIndex !== undefined ? { selectedIndex: input.selectedIndex } : {})
   };
@@ -57,7 +82,16 @@ export function stripProDeckPreset(input: DeckPreset): DeckPreset {
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     ...(input.backgroundDim !== undefined ? { backgroundDim: input.backgroundDim } : {}),
     ...(input.backgroundId ? { backgroundId: input.backgroundId } : {}),
+    ...(input.backgroundMedia ? { backgroundMedia: input.backgroundMedia } : {}),
+    ...(input.mediaAssets ? { mediaAssets: input.mediaAssets } : {}),
+    ...(input.videoProjectMode ? { videoProjectMode: input.videoProjectMode } : {}),
+    ...(input.sceneDefaults ? { sceneDefaults: input.sceneDefaults } : {}),
+    ...(input.bodyNumberDefault ? { bodyNumberDefault: input.bodyNumberDefault } : {}),
     ...(input.aspectRatio ? { aspectRatio: input.aspectRatio } : {}),
-    ...(input.fontId ? { fontId: input.fontId } : {})
+    ...(input.fontId ? { fontId: input.fontId } : {}),
+    ...(input.chrome ? { chrome: input.chrome } : {}),
+    ...(input.nextHint ? { nextHint: input.nextHint } : {}),
+    ...(input.overrides ? { overrides: input.overrides } : {}),
+    ...(input.bulkBindings ? { bulkBindings: input.bulkBindings } : {})
   };
 }

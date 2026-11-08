@@ -49,7 +49,7 @@ export function parseCardText(rawText: string, index = 1): CardnewsResult<Card> 
   }
 
   const parts = collectCardParts(lines);
-  const title = cleanText(parts.title);
+  const title = preserveStructuredText(parts.title);
   if (!title) {
     return invalidInput("카드 제목이 필요합니다.");
   }
@@ -66,7 +66,7 @@ export function parseCardText(rawText: string, index = 1): CardnewsResult<Card> 
     emphasis: cleanText(parts.emphasis),
     index,
     source: cleanText(parts.source),
-    subtitle: cleanText(parts.subtitle),
+    subtitle: preserveStructuredText(parts.subtitle),
     title,
     type: typeResult
   });
@@ -133,7 +133,7 @@ function parseLabel(line: string): ParsedLabel | undefined {
     if (line.startsWith(definition.prefix)) {
       return {
         label: definition.label,
-        value: decodeLabelValue(line.slice(definition.prefix.length).trim())
+        value: decodeLabelValue(normalizeLabelValue(line.slice(definition.prefix.length)))
       };
     }
   }
@@ -283,8 +283,7 @@ function normalizeLines(rawText: string): readonly string[] {
   return rawText
     .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.trim().length > 0);
 }
 
 function appendText(current: string | undefined, next: string): string {
@@ -305,6 +304,18 @@ function appendText(current: string | undefined, next: string): string {
 function cleanText(value: string | undefined): string | undefined {
   const cleaned = value?.trim();
   return cleaned && cleaned.length > 0 ? cleaned : undefined;
+}
+
+function preserveStructuredText(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim().length === 0) {
+    return undefined;
+  }
+
+  return value.replace(/\r\n/g, "\n");
+}
+
+function normalizeLabelValue(value: string): string {
+  return value.startsWith(" ") || value.startsWith("\t") ? value.slice(1) : value;
 }
 
 function decodeLabelValue(value: string): string {

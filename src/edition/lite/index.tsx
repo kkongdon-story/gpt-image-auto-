@@ -4,12 +4,14 @@ import type {
   AiChatResult,
   AiProviderId,
   AiProviderStatus,
+  BulkBindingMetadata,
   BulkRenderResult,
   CardnewsError,
   CardnewsResult,
   ImageLibraryItem,
   ProjectArchiveResult,
-  ProjectImportResult
+  ProjectImportResult,
+  WorkspaceState
 } from "../../domain/types";
 
 export const editionKind = "lite" as const;
@@ -82,15 +84,21 @@ export function extractTemplateDocument(input: string): string {
 }
 
 export async function listEditionImages(): Promise<CardnewsResult<readonly ImageLibraryItem[]>> {
-  return [];
+  return window.cardnews.listImageLibrary();
 }
 
 export async function addEditionImage(): Promise<CardnewsResult<ImageLibraryItem>> {
-  return lockedResult();
+  return window.cardnews.addImageToLibrary();
 }
 
-export async function getEditionImagePreview(_imageId: string): Promise<CardnewsResult<string>> {
-  return lockedResult();
+export async function getEditionImagePreview(imageId: string): Promise<CardnewsResult<string>> {
+  return window.cardnews.getImagePreview(imageId);
+}
+
+export async function removeEditionImage(imageId: string): Promise<
+  CardnewsResult<{ readonly id: string; readonly removed: boolean }>
+> {
+  return window.cardnews.removeImageFromLibrary(imageId);
 }
 
 export async function removeEditionImageBackdrop(
@@ -108,12 +116,17 @@ export async function loadEditionBulkInput(): Promise<
 
 export async function saveEditionBulkTemplate(
   _styleId: string,
-  _aspectRatioId: string
+  _aspectRatioId: string,
+  _metadata?: BulkBindingMetadata
 ): Promise<CardnewsResult<string>> {
   return lockedResult();
 }
 
-export async function runEditionBulkRender(_csvText: string): Promise<CardnewsResult<BulkRenderResult>> {
+export async function runEditionBulkRender(
+  _csvText: string,
+  _workspace?: WorkspaceState,
+  _metadata?: BulkBindingMetadata
+): Promise<CardnewsResult<BulkRenderResult>> {
   return lockedResult();
 }
 
@@ -125,7 +138,7 @@ export async function loadEditionProject(): Promise<CardnewsResult<ProjectImport
   return lockedResult();
 }
 
-export async function listEditionAiProviders(): Promise<CardnewsResult<readonly AiProviderStatus[]>> {
+export async function listEditionAiProviders(_forceRefresh = false): Promise<CardnewsResult<readonly AiProviderStatus[]>> {
   return [];
 }
 

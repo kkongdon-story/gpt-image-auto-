@@ -1,5 +1,6 @@
 import electron = require("electron");
 import type { LiteCardnewsApi } from "../src/domain/cardnews-api.js";
+import type { MediaKind, Mp4ExportInput, Mp4ExportProgress } from "../src/domain/cardnews-api.js";
 import type {
   AppSettings,
   DeckDraft,
@@ -34,6 +35,25 @@ const api: LiteCardnewsApi = {
   exportTemplateFile: (content: string) => ipcRenderer.invoke("cardnews:exportTemplateFile", content),
   listBackgroundLibrary: () => ipcRenderer.invoke("cardnews:listBackgroundLibrary"),
   addBackgroundToLibrary: () => ipcRenderer.invoke("cardnews:addBackgroundToLibrary"),
+  removeBackgroundFromLibrary: (backgroundId: string) =>
+    ipcRenderer.invoke("cardnews:removeBackgroundFromLibrary", backgroundId),
+  listImageLibrary: () => ipcRenderer.invoke("cardnews:listImageLibrary"),
+  addImageToLibrary: () => ipcRenderer.invoke("cardnews:addImageToLibrary"),
+  getImagePreview: (imageId: string) => ipcRenderer.invoke("cardnews:getImagePreview", imageId),
+  removeImageFromLibrary: (imageId: string) => ipcRenderer.invoke("cardnews:removeImageFromLibrary", imageId),
+  importMediaAsset: (kind?: MediaKind) => ipcRenderer.invoke("cardnews:media:import", kind),
+  listMediaCatalog: () => ipcRenderer.invoke("cardnews:media:list"),
+  getMediaPreview: (mediaId: string) => ipcRenderer.invoke("cardnews:media:preview", mediaId),
+  listMediaUsage: (mediaId: string) => ipcRenderer.invoke("cardnews:media:usage", mediaId),
+  deleteMediaAsset: (mediaId: string) => ipcRenderer.invoke("cardnews:media:delete", mediaId),
+  exportVideoMp4: (input: Mp4ExportInput) => ipcRenderer.invoke("cardnews:video:export", input),
+  cancelVideoExport: (jobId: string) => ipcRenderer.invoke("cardnews:video:cancel", jobId),
+  onVideoExportProgress: (handler: (progress: Mp4ExportProgress) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: Mp4ExportProgress) => handler(progress);
+    ipcRenderer.on("cardnews:video:progress", listener);
+    return () => ipcRenderer.removeListener("cardnews:video:progress", listener);
+  },
+  importTemplatePack: () => ipcRenderer.invoke("cardnews:importTemplatePack"),
   searchStockImages: (query: string, page: number) =>
     ipcRenderer.invoke("cardnews:searchStockImages", query, page),
   downloadStockImage: (input: StockImageDownloadInput) =>

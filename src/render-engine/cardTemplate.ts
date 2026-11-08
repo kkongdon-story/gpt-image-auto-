@@ -1,6 +1,9 @@
 // noqa: SIZE_OK - v4 release keeps the deterministic HTML/CSS template in one audited unit; split plan is documented in .omo/evidence/v4-upgrade/final/programming-size-exceptions.md.
 import { findAspectRatio } from "../domain/aspectRatios.js";
+import { resolveBodyNumber, type ResolvedBodyNumber } from "../domain/bodyNumber.js";
+import { isHexColor, normalizeHexColor } from "../domain/colors.js";
 import type {
+  BodyNumberTextStyle,
   Card,
   CardBadgeOverride,
   CardImageAdjust,
@@ -16,6 +19,18 @@ import type {
 } from "../domain/types.js";
 import { defaultChromeConfig, normalizeChromeConfig, renderPageNumber } from "../domain/chromeConfig.js";
 import { getLineLayerRenderGeometry, normalizeLineLayer } from "../domain/lineLayer.js";
+import {
+  normalizeSemanticItemPlacement,
+  normalizeSemanticSlotPlacement,
+  normalizeVideoLayer
+} from "../domain/media.js";
+import { resolveEffectiveCardBackgroundMedia } from "../domain/mediaResolver.js";
+import {
+  buildSemanticItemManifest,
+  createSemanticItemId,
+  type SemanticItemManifestEntry
+} from "../domain/m23Semantic.js";
+import { buildSemanticPlacementRuntimeScript } from "./semanticPlacement.js";
 import { resolveStylePreset, type StylePreset } from "./stylePresets.js";
 
 export type CardTemplateInput = {
@@ -26,6 +41,7 @@ export type CardTemplateInput = {
   readonly customStyles?: readonly StylePreset[];
   /** `@font-face` CSS 블록 — data URI(오프스크린 렌더) 또는 blob URL(미리보기) 소스 */
   readonly fontCss?: string;
+  readonly liveVideo?: boolean;
   readonly override?: CardOverride;
 };
 
@@ -37,11 +53,23 @@ type ResolvedTheme = {
   readonly cardHeight: number;
   readonly adjust: CardImageAdjust;
   readonly badge: ResolvedBadge;
-  readonly layout: CardLayoutOverride;
+  readonly layout: ResolvedLayout;
   readonly layers: readonly CardLayer[];
   readonly nextHint: ResolvedNextHint;
   readonly typography: ResolvedTypography;
   readonly chrome: ChromeConfig;
+  readonly mediaAssets: Deck["mediaAssets"];
+  readonly bodyNumberStyle: BodyNumberTextStyle | undefined;
+};
+
+type ResolvedLayout = CardLayoutOverride & {
+  readonly semanticSlots: {
+    readonly badge: ReturnType<typeof normalizeSemanticSlotPlacement>;
+    readonly body: ReturnType<typeof normalizeSemanticSlotPlacement>;
+    readonly footer: ReturnType<typeof normalizeSemanticSlotPlacement>;
+    readonly subtitle: ReturnType<typeof normalizeSemanticSlotPlacement>;
+    readonly title: ReturnType<typeof normalizeSemanticSlotPlacement>;
+  };
 };
 
 type ResolvedBadge = {
@@ -58,6 +86,7 @@ type ResolvedNextHint = {
 };
 
 type ResolvedTypography = {
+  readonly color: string | undefined;
   readonly fontFamily: string | undefined;
   readonly italic: boolean | undefined;
   readonly letterSpacing: number;
@@ -65,6 +94,7 @@ type ResolvedTypography = {
   readonly sizeScale: number;
   readonly scope: "all" | "title" | "body";
   readonly weight: number | undefined;
+  readonly textOpacity: number;
 };
 
 type FontFaceOptions = {
@@ -88,15 +118,35 @@ export function buildCardHtml(input: CardTemplateInput): string {
   const theme = resolveTheme(input.deck, input.customStyles ?? [], input.override);
   const { preset, accent, dim } = theme;
   const totalCards = input.deck.cards.length;
-  const bodyNumber = computeBodyNumber(input.deck, input.card);
-  const hasPhoto = Boolean(input.backgroundCssUrl);
+  const bodyNumber = resolveBodyNumber(input.deck, input.card, input.override);
+  const resolvedBackground = resolveEffectiveCardBackgroundMedia(input.deck, input.card, input.override);
+  const backgroundMediaUrl =
+    resolvedBackground.status === "asset" ? input.assetCssUrls?.[resolvedBackground.asset.id] : undefined;
+  const effectiveBackgroundCssUrl = backgroundMediaUrl ?? input.backgroundCssUrl;
+  const hasPhoto = Boolean(effectiveBackgroundCssUrl);
   const textFit = computeTextFit(input.card);
+  const semanticItems = buildSemanticItemManifest({
+    card: input.card,
+    footerAccount: input.deck.footerAccount,
+    ...(input.override ? { override: input.override } : {})
+  });
 
-  const photoLayer =
-    input.backgroundCssUrl
-      ? `<div class="photo" style="background-image: url(&quot;${escapeAttribute(input.backgroundCssUrl)}&quot;);"></div>
+  const isLiveBackgroundVideo =
+    input.liveVideo === true &&
+    resolvedBackground.status === "asset" &&
+    resolvedBackground.asset.kind === "video";
+  const backgroundMediaId =
+    resolvedBackground.status === "asset" ? resolvedBackground.asset.id : "";
+  const photoLayer = effectiveBackgroundCssUrl
+    ? isLiveBackgroundVideo
+      ? `<video class="photo live-card-video" data-slot="background" data-media-kind="video" data-media-id="${escapeAttribute(backgroundMediaId)}" data-clip-start-ms="0" data-clip-end-ms="" src="${escapeAttribute(effectiveBackgroundCssUrl)}" autoplay muted playsinline preload="auto"></video>
          <div class="scrim"></div>`
-      : "";
+      : resolvedBackground.status === "asset" && resolvedBackground.asset.kind === "video"
+        ? `<div class="photo video-poster" data-slot="background" data-media-kind="video" data-media-id="${escapeAttribute(backgroundMediaId)}"></div>
+           <div class="scrim"></div>`
+        : `<div class="photo" data-slot="background" data-media-kind="image" data-media-id="${escapeAttribute(backgroundMediaId)}" style="background-image: url(&quot;${escapeAttribute(effectiveBackgroundCssUrl)}&quot;);"></div>
+           <div class="scrim"></div>`
+    : "";
 
   return `<!doctype html>
 <html lang="ko">
@@ -105,22 +155,42 @@ export function buildCardHtml(input: CardTemplateInput): string {
     <style>
       ${input.fontCss ?? ""}
       ${buildCss(theme)}
+      ${buildSemanticItemPlacementCss(input.override?.semanticItemPlacements)}
     </style>
   </head>
   <body data-card-index="${input.card.index}">
     <article class="card ${preset.id} ${input.card.type}${hasPhoto ? " has-photo" : ""}${preset.usesPhoto ? " photo-preset" : " solid-preset"}" style="--title-scale: ${textFit.titleScale.toFixed(3)}; --body-scale: ${textFit.bodyScale.toFixed(3)}; --gap-scale: ${textFit.gapScale.toFixed(3)}; --chrome-scale: ${textFit.chromeScale.toFixed(3)}; --gap-badge-scale: ${theme.layout.gapBadge.toFixed(3)}; --gap-subtitle-scale: ${theme.layout.gapSubtitle.toFixed(3)};">
       ${photoLayer}
-      ${renderLayers(theme, input.assetCssUrls ?? {})}
+      ${renderLayers(theme, input.assetCssUrls ?? {}, input.liveVideo === true)}
       ${renderHeaderChrome(input.deck, input.card, totalCards, theme)}
+      ${renderDirectTitle(input.card, theme)}
       <section class="content">
-        ${renderCardBody(input.card, theme, bodyNumber, input.assetCssUrls ?? {})}
+        ${renderCardBody(input.card, theme, bodyNumber, input.assetCssUrls ?? {}, semanticItems)}
       </section>
       ${renderFooterChrome(input.deck, input.card, totalCards, theme, input.assetCssUrls ?? {})}
     </article>
     <script>
+      ${buildSemanticPlacementRuntimeScript()}
+      for (const video of document.querySelectorAll("video.live-card-video")) {
+        const clipStartSeconds = Math.max(0, Number(video.dataset.clipStartMs || "0") / 1000);
+        const rawClipEndMs = Number(video.dataset.clipEndMs || "");
+        const clipEndSeconds = Number.isFinite(rawClipEndMs) && rawClipEndMs > 0 ? rawClipEndMs / 1000 : null;
+        video.addEventListener("loadedmetadata", () => {
+          if (clipStartSeconds > 0 && video.currentTime < clipStartSeconds) {
+            video.currentTime = Math.min(clipStartSeconds, video.duration || clipStartSeconds);
+          }
+          void video.play().catch(() => undefined);
+        }, { once: true });
+        video.addEventListener("timeupdate", () => {
+          if (clipEndSeconds !== null && video.currentTime >= clipEndSeconds) {
+            video.currentTime = Math.max(clipStartSeconds, clipEndSeconds - (1 / 30));
+            video.pause();
+          }
+        });
+      }
       window.__CARDNEWS_COLLECT_METRICS__ = function () {
         const cardIndex = Number(document.body.dataset.cardIndex || "0");
-        return Array.from(document.querySelectorAll("[data-slot]")).map((element) => {
+        return Array.from(document.querySelectorAll("[data-semantic-item-id], [data-slot]")).map((element) => {
           const rect = element.getBoundingClientRect();
           const style = window.getComputedStyle(element);
           const inlineFontSize = Number.parseFloat(element.style.fontSize) || 0;
@@ -141,6 +211,7 @@ export function buildCardHtml(input: CardTemplateInput): string {
             fontSize: Math.max(Number.parseFloat(style.fontSize) || 0, inlineFontSize, dataFontSize, attributeFontSize),
             height: Math.round(rect.height * 100) / 100,
             left: Math.round(rect.left * 100) / 100,
+            semanticItemId: element.getAttribute("data-semantic-item-id") || "",
             slot: element.getAttribute("data-slot") || "unknown",
             text: element.textContent || "",
             top: Math.round(rect.top * 100) / 100,
@@ -159,7 +230,7 @@ function resolveTheme(
   override: CardOverride | undefined
 ): ResolvedTheme {
   const preset = resolveStylePreset(deck.styleId, customStyles);
-  const accent = normalizeHexColor(deck.accentColor) ?? preset.accentDefault;
+  const accent = preserveHexColor(deck.accentColor) ?? preset.accentDefault;
   const dim = clamp01(override?.dim ?? deck.backgroundDim ?? preset.defaultDim);
   const ratio = findAspectRatio(deck.aspectRatio);
   return {
@@ -170,16 +241,18 @@ function resolveTheme(
     cardHeight: ratio.height,
     adjust: normalizeAdjust(override?.adjust),
     badge: normalizeBadge(override?.badge),
-    layout: normalizeLayout(override?.layout),
+    layout: normalizeLayout(override),
     layers: normalizeLayers(override?.layers),
     nextHint: normalizeNextHint(deck.nextHint),
     typography: normalizeTypography(override?.typography, Boolean(deck.fontId)),
-    chrome: deck.chrome ? normalizeChromeConfig(deck.chrome) : defaultChromeForPreset(preset)
+    chrome: deck.chrome ? normalizeChromeConfig(deck.chrome) : defaultChromeForPreset(preset),
+    mediaAssets: deck.mediaAssets,
+    bodyNumberStyle: override?.bodyNumberStyle
   };
 }
 
 function defaultChromeForPreset(preset: StylePreset): ChromeConfig {
-  const chromeBackground = normalizeHexColor(preset.chromeBackdrop);
+  const chromeBackground = preserveHexColor(preset.chromeBackdrop);
   const readableInk = chromeBackground ? pickReadableInk(chromeBackground) : defaultChromeConfig.header.color;
   return {
     header: { ...defaultChromeConfig.header, color: readableInk },
@@ -191,10 +264,10 @@ function defaultChromeForPreset(preset: StylePreset): ChromeConfig {
 function renderHeaderChrome(deck: Deck, card: Card, totalCards: number, theme: ResolvedTheme): string {
   const parts = [
     theme.chrome.header.visible
-      ? `<span class="chrome-label" data-slot="header" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.header, theme))}">${escapeHtml(deck.headerLabel)}</span>`
+      ? `<span class="chrome-label" data-slot="header" data-semantic-item-id="${createSemanticItemId(card.index, "header")}" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.header, theme))}">${escapeHtml(deck.headerLabel)}</span>`
       : "",
     theme.chrome.pageNumber.visible
-      ? `<span class="page-no" data-slot="page" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.pageNumber, theme))}">${escapeHtml(renderPageNumber(theme.chrome.pageNumber.template, card.index, totalCards))}</span>`
+      ? `<span class="page-no" data-slot="page" data-semantic-item-id="${createSemanticItemId(card.index, "page-number")}" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.pageNumber, theme))}">${escapeHtml(renderPageNumber(theme.chrome.pageNumber.template, card.index, totalCards))}</span>`
       : ""
   ].join("");
 
@@ -208,12 +281,15 @@ function renderFooterChrome(
   theme: ResolvedTheme,
   assetCssUrls: Readonly<Record<string, string>>
 ): string {
+  const footerPlacement = theme.layout.semanticSlots.footer;
+  const footerPlaced = footerPlacement.mode === "card";
+  const footerStyle = `${buildChromeSlotStyle(theme.chrome.footer, theme)}${buildSemanticSlotStyle(footerPlacement, "footer", theme)}`;
   const footer = theme.chrome.footer.visible
-    ? `<span data-slot="footer" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(buildChromeSlotStyle(theme.chrome.footer, theme))}">${escapeHtml(deck.footerAccount)}</span>`
+    ? `<span class="footer-label${footerPlaced ? " placed" : ""}" data-slot="footer" data-semantic-item-id="${createSemanticItemId(card.index, "footer")}" data-background-color="${chromeBackdrop(theme)}" style="${escapeHtml(footerStyle)}">${escapeHtml(deck.footerAccount)}</span>`
     : "";
   const nextHint = renderNextHint(card, totalCards, theme, assetCssUrls);
   return footer.length > 0 || nextHint.length > 0
-    ? `<div class="chrome footer">${footer}${nextHint}</div>`
+    ? `<div class="chrome footer${footerPlaced ? " placed" : ""}">${footer}${nextHint}</div>`
     : "";
 }
 
@@ -231,11 +307,11 @@ function renderNextHint(
   if (nextHint.kind === "image") {
     const imageSource = nextHint.imageId ? assetCssUrls[nextHint.imageId] : undefined;
     return imageSource
-      ? `<img class="next-hint-image" data-slot="next-hint-image" src="${escapeAttribute(imageSource)}" alt="" style="display: block; height: ${nextHint.height}px; max-width: 96px; object-fit: contain; width: auto;" />`
+      ? `<img class="next-hint-image" data-slot="next-hint-image" data-semantic-item-id="${createSemanticItemId(card.index, "next-hint")}" src="${escapeAttribute(imageSource)}" alt="" style="display: block; height: ${nextHint.height}px; max-width: 96px; object-fit: contain; width: auto;" />`
       : "";
   }
 
-  return `<span class="next-hint" style="color: ${theme.accent}; font-weight: 900; letter-spacing: 0.2em;">&gt;&gt;&gt;&gt;</span>`;
+  return `<span class="next-hint" data-slot="next-hint" data-semantic-item-id="${createSemanticItemId(card.index, "next-hint")}" style="color: ${theme.accent}; font-weight: 900; letter-spacing: 0.2em;">&gt;&gt;&gt;&gt;</span>`;
 }
 
 function buildChromeSlotStyle(slot: ChromeSlotStyle, theme: ResolvedTheme): string {
@@ -245,12 +321,26 @@ function buildChromeSlotStyle(slot: ChromeSlotStyle, theme: ResolvedTheme): stri
   return `color: ${slot.color}; font-size: ${Math.round(slot.fontSize)}px; font-weight: ${Math.round(slot.fontWeight)}; transform: translate(${Math.round(slot.offsetX)}px, ${Math.round(slot.offsetY)}px);${family}`;
 }
 
+function renderDirectTitle(card: Card, theme: ResolvedTheme): string {
+  const placement = theme.layout.titlePlacement;
+  if (placement?.mode !== "card-y") {
+    return "";
+  }
+  const y = clampRange(placement.y, 0, 100);
+  const backdrop = theme.preset.usesSurface ? theme.preset.textBackdrop : textBackdrop(theme);
+  return `<h1 class="title-direct" data-slot="title-direct" data-semantic-item-id="${createSemanticItemId(card.index, "title")}" data-background-color="${backdrop}" style="top: ${y.toFixed(2)}%; transform: translateY(-${y.toFixed(2)}%);">${renderRichText(card.title)}</h1>`;
+}
+
 function buildCss(theme: ResolvedTheme): string {
   const { preset, accent, dim, adjust, layout } = theme;
   const pageBackground = preset.pageBackground.replaceAll("__ACCENT__", accent);
   const bullet = resolveBulletShape(preset.bulletShape);
-  const titleInk = preset.inkScale?.ink ?? preset.ink;
-  const bodyInk = preset.inkScale?.body ?? preset.inkSub;
+  const defaultTitleInk = preset.inkScale?.ink ?? preset.ink;
+  const defaultBodyInk = preset.inkScale?.body ?? preset.inkSub;
+  const titleInk =
+    theme.typography.color && theme.typography.scope !== "body" ? theme.typography.color : defaultTitleInk;
+  const bodyInk =
+    theme.typography.color && theme.typography.scope !== "title" ? theme.typography.color : defaultBodyInk;
   const mutedInk = preset.inkScale?.mute ?? preset.inkMuted;
   const faintInk = preset.inkScale?.faint ?? preset.inkMuted;
   const surface = preset.surfaceLadder ?? [preset.textBackdrop, preset.chromeBackdrop, preset.textBackdrop];
@@ -260,6 +350,8 @@ function buildCss(theme: ResolvedTheme): string {
   const bodyLetterSpacing = theme.typography.scope === "title" ? 0 : theme.typography.letterSpacing;
   const titleLineHeight = theme.typography.scope === "body" ? 1 : theme.typography.lineHeight;
   const bodyLineHeight = theme.typography.scope === "title" ? 1 : theme.typography.lineHeight;
+  const titleTextOpacity = theme.typography.scope === "body" ? 100 : theme.typography.textOpacity;
+  const bodyTextOpacity = theme.typography.scope === "title" ? 100 : theme.typography.textOpacity;
 
   return `
       :root {
@@ -296,6 +388,14 @@ function buildCss(theme: ResolvedTheme): string {
         inset: 0;
         position: absolute;
       }
+      video.photo {
+        height: 100%;
+        object-fit: cover;
+        width: 100%;
+      }
+      .video-poster {
+        background: color-mix(in srgb, var(--surface-2) 78%, black);
+      }
       ${buildScrimCss(preset, dim)}
       .chrome {
         color: var(--ink-title);
@@ -312,16 +412,20 @@ function buildCss(theme: ResolvedTheme): string {
       }
       .header { top: 80px; }
       .footer { bottom: 80px; }
+      .footer.placed { inset: 0; pointer-events: none; }
+      .footer-label.placed { pointer-events: auto; position: absolute; white-space: nowrap; }
       .chrome-label { text-transform: uppercase; }
       .page-no { color: var(--ink-title); font-weight: 700; opacity: 0.92; }
       .content {
         display: flex;
         flex-direction: column;
-        inset: 0;
+        bottom: ${(-layout.offsetY).toFixed(2)}%;
+        left: 0;
         position: absolute;
         padding: 190px 96px 170px;
+        right: 0;
         text-align: ${layout.align};
-        transform: translateY(${layout.offsetY.toFixed(2)}%);
+        top: ${layout.offsetY.toFixed(2)}%;
         z-index: 2;
       }
       ${
@@ -353,7 +457,6 @@ function buildCss(theme: ResolvedTheme): string {
         margin-bottom: calc(40px * var(--gap-scale) * var(--gap-badge-scale));
         max-width: 100%;
         padding: ${theme.badge.shape === "none" ? "0" : badge.padding};
-        text-transform: uppercase;
         width: fit-content;
       }
       .badge-image {
@@ -373,7 +476,7 @@ function buildCss(theme: ResolvedTheme): string {
         margin-bottom: calc(34px * var(--gap-scale));
       }
       h1 {
-        color: var(--ink-title);
+        color: color-mix(in srgb, var(--ink-title) ${titleTextOpacity.toFixed(1)}%, transparent);
         font-family: ${theme.typography.fontFamily ?? preset.fontTitle};
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 900};
@@ -381,6 +484,14 @@ function buildCss(theme: ResolvedTheme): string {
         margin: 0;
         overflow-wrap: anywhere;
         word-break: keep-all;
+      }
+      .title-placeholder { visibility: hidden; }
+      .title-direct {
+        left: 96px;
+        position: absolute;
+        right: 96px;
+        text-align: ${layout.align};
+        z-index: 5;
       }
       .cover h1 { font-size: calc(88px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: ${(1.16 * titleLineHeight).toFixed(3)}; }
       .body h1 { font-size: calc(58px * var(--title-scale) * ${theme.typography.sizeScale.toFixed(3)}); line-height: ${(1.2 * titleLineHeight).toFixed(3)}; }
@@ -391,7 +502,7 @@ function buildCss(theme: ResolvedTheme): string {
         font-style: normal;
       }
       .subtitle {
-        color: var(--ink-body);
+        color: color-mix(in srgb, var(--ink-body) ${bodyTextOpacity.toFixed(1)}%, transparent);
         font-size: calc(40px * var(--body-scale) * ${theme.typography.sizeScale.toFixed(3)});
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 700};
@@ -402,7 +513,7 @@ function buildCss(theme: ResolvedTheme): string {
         word-break: keep-all;
       }
       .paragraphs {
-        color: var(--ink-body);
+        color: color-mix(in srgb, var(--ink-body) ${bodyTextOpacity.toFixed(1)}%, transparent);
         display: grid;
         font-size: calc(35px * var(--body-scale) * ${theme.typography.sizeScale.toFixed(3)});
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
@@ -423,7 +534,7 @@ function buildCss(theme: ResolvedTheme): string {
         padding: 0;
       }
       .bullets li {
-        color: var(--ink-body);
+        color: color-mix(in srgb, var(--ink-body) ${bodyTextOpacity.toFixed(1)}%, transparent);
         font-size: calc(34px * var(--body-scale) * ${theme.typography.sizeScale.toFixed(3)});
         font-style: ${theme.typography.italic === true ? "italic" : "normal"};
         font-weight: ${theme.typography.weight ?? 700};
@@ -448,7 +559,7 @@ function buildCss(theme: ResolvedTheme): string {
         align-self: ${layout.align === "center" ? "center" : "flex-start"};
         background: ${accent};
         border-radius: ${preset.usesSurface ? "0" : "14px"};
-        color: ${pickReadableInk(accent)};
+        color: color-mix(in srgb, ${pickReadableInk(accent)} ${bodyTextOpacity.toFixed(1)}%, transparent);
         display: inline-block;
         font-size: calc(44px * var(--body-scale));
         font-weight: 900;
@@ -459,7 +570,7 @@ function buildCss(theme: ResolvedTheme): string {
         overflow-wrap: anywhere;
       }
       .source {
-        color: var(--ink-muted);
+        color: color-mix(in srgb, var(--ink-muted) ${bodyTextOpacity.toFixed(1)}%, transparent);
         font-size: max(18px, calc(25px * var(--body-scale)));
         font-weight: 600;
         letter-spacing: ${bodyLetterSpacing.toFixed(3)}em;
@@ -485,66 +596,87 @@ function buildCss(theme: ResolvedTheme): string {
         background-position: center;
         background-repeat: no-repeat;
       }
+      .layer-video {
+        background-position: center;
+        background-repeat: no-repeat;
+      }
   `;
 }
 
 function renderLayers(
   theme: ResolvedTheme,
-  assetCssUrls: Readonly<Record<string, string>>
+  assetCssUrls: Readonly<Record<string, string>>,
+  liveVideo: boolean
 ): string {
   if (theme.layers.length === 0) {
     return "";
   }
 
-  return theme.layers.map((layer) => renderLayer(layer, theme, assetCssUrls)).join("");
+  return theme.layers.map((layer) => renderLayer(layer, theme, assetCssUrls, liveVideo)).join("");
 }
 
 function renderLayer(
   layer: CardLayer,
   theme: ResolvedTheme,
-  assetCssUrls: Readonly<Record<string, string>>
+  assetCssUrls: Readonly<Record<string, string>>,
+  liveVideo: boolean
 ): string {
   switch (layer.kind) {
     case "text": {
       const baseStyle = buildLayerBaseStyle(layer);
-      const color = normalizeHexColor(layer.color) ?? theme.preset.ink;
-      const background = normalizeHexColor(layer.backgroundColor) ?? "transparent";
+      const color = preserveHexColor(layer.color) ?? theme.preset.ink;
+      const background = preserveHexColor(layer.backgroundColor) ?? "transparent";
       const fontSize = Math.round(clampRange(layer.fontSize ?? 40, 10, 144));
       const fontWeight = Math.round(clampRange(layer.fontWeight ?? theme.typography.weight ?? 700, 100, 950));
       const align = layer.align ?? "left";
       const justify = align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start";
       const backdrop = background === "transparent" ? theme.preset.textBackdrop : background;
       const style = `${baseStyle} color: ${color}; background: ${background}; font-family: ${theme.typography.fontFamily ?? theme.preset.fontBody}; font-size: ${fontSize}px; font-style: ${layer.italic === true ? "italic" : "normal"}; font-weight: ${fontWeight}; justify-content: ${justify}; text-align: ${align};`;
-      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${escapeHtml(style)}">${escapeHtml(layer.text)}</div>`;
+      const textOpacity = clampRange(layer.textOpacity ?? 100, 0, 100) / 100;
+      return `<div class="layer layer-text" data-slot="layer-${escapeAttribute(layer.id)}" data-editor-layer-id="${escapeAttribute(layer.id)}" data-background-color="${backdrop}" data-font-size="${fontSize}" style="${escapeHtml(style)}"><span data-layer-text="${escapeAttribute(layer.id)}" style="opacity: ${textOpacity.toFixed(3)};">${escapeHtml(layer.text)}</span></div>`;
     }
     case "shape": {
       const baseStyle = buildLayerBaseStyle(layer);
-      const fill = normalizeHexColor(layer.fill) ?? withAlpha(theme.accent, 0.28);
-      const stroke = normalizeHexColor(layer.stroke);
+      const fill = preserveHexColor(layer.fill) ?? withAlpha(theme.accent, 0.28);
+      const stroke = preserveHexColor(layer.stroke);
       const borderRadius = layer.shape === "ellipse" ? "9999px" : `${Math.round(clampRange(layer.radius ?? 0, 0, 80))}px`;
       const border = stroke ? `${Math.round(clampRange(layer.strokeWidth ?? 2, 1, 24))}px solid ${stroke}` : "0";
-      return `<div class="layer layer-shape" style="${baseStyle} background: ${fill}; border: ${border}; border-radius: ${borderRadius};"></div>`;
+      return `<div class="layer layer-shape" data-editor-layer-id="${escapeAttribute(layer.id)}" style="${baseStyle} background: ${fill}; border: ${border}; border-radius: ${borderRadius};"></div>`;
     }
     case "line": {
       const geometry = getLineLayerRenderGeometry(layer, {
         width: theme.cardWidth,
         height: theme.cardHeight
       });
-      const color = normalizeHexColor(layer.color) ?? theme.accent;
+      const color = preserveHexColor(layer.color) ?? theme.accent;
       const zIndex = Math.round(clampRange(layer.zIndex ?? defaultLayerZIndex(layer), 0, 20));
       const opacity = clamp01(layer.opacity ?? 1);
       const style = `left: ${geometry.leftPx.toFixed(3)}px; top: ${geometry.topPx.toFixed(3)}px; width: ${geometry.widthPx.toFixed(3)}px; height: ${geometry.heightPx}px; z-index: ${zIndex}; opacity: ${opacity.toFixed(3)}; transform: rotate(${geometry.angleDeg}deg); transform-origin: 0 50%; background: ${color};`;
-      return `<div class="layer layer-line" style="${escapeHtml(style)}"></div>`;
+      return `<div class="layer layer-line" data-editor-layer-id="${escapeAttribute(layer.id)}" style="${escapeHtml(style)}"></div>`;
     }
     case "image": {
       const baseStyle = buildLayerBaseStyle(layer);
       const source = assetCssUrls[layer.backgroundId];
       if (!source) {
-        return `<div class="layer layer-image" style="${baseStyle} background: ${withAlpha(theme.accent, 0.16)};"></div>`;
+        return `<div class="layer layer-image" data-editor-layer-id="${escapeAttribute(layer.id)}" style="${baseStyle} background: ${withAlpha(theme.accent, 0.16)};"></div>`;
       }
-      return `<div class="layer layer-image" style="${baseStyle} background-image: url(&quot;${escapeAttribute(source)}&quot;); background-size: ${layer.objectFit ?? "cover"};"></div>`;
+      return `<div class="layer layer-image" data-editor-layer-id="${escapeAttribute(layer.id)}" style="${baseStyle} background-image: url(&quot;${escapeAttribute(source)}&quot;); background-size: ${layer.objectFit ?? "cover"};"></div>`;
+    }
+    case "video": {
+      const normalized = normalizeVideoLayer(layer, theme.mediaAssets?.find((asset) => asset.id === layer.mediaId)?.durationMs);
+      const baseStyle = buildLayerBaseStyle(normalized);
+      const source = assetCssUrls[normalized.mediaId];
+      if (source && liveVideo) {
+        return `<video class="layer layer-video live-card-video" data-slot="layer-${escapeAttribute(normalized.id)}" data-editor-layer-id="${escapeAttribute(normalized.id)}" data-media-kind="video" data-media-id="${escapeAttribute(normalized.mediaId)}" data-clip-start-ms="${normalized.clipStartMs}" data-clip-end-ms="${normalized.clipEndMs ?? ""}" data-volume="${normalized.volume.toFixed(3)}" src="${escapeAttribute(source)}" autoplay muted playsinline preload="auto" style="${baseStyle} object-fit: ${normalized.objectFit};"></video>`;
+      }
+      const posterStyle = source
+        ? `background: color-mix(in srgb, ${withAlpha(theme.accent, 0.22)} 70%, black);`
+        : `background: ${withAlpha(theme.accent, 0.16)};`;
+      return `<div class="layer layer-video" data-slot="layer-${escapeAttribute(normalized.id)}" data-editor-layer-id="${escapeAttribute(normalized.id)}" data-media-kind="video" data-media-id="${escapeAttribute(normalized.mediaId)}" data-clip-start-ms="${normalized.clipStartMs}" data-clip-end-ms="${normalized.clipEndMs ?? ""}" data-volume="${normalized.volume.toFixed(3)}" style="${baseStyle} ${posterStyle}"></div>`;
     }
   }
+
+  return "";
 }
 
 function buildLayerBaseStyle(layer: Exclude<CardLayer, CardLineLayer>): string {
@@ -561,6 +693,7 @@ function defaultLayerZIndex(layer: CardLayer): number {
   switch (layer.kind) {
     case "shape":
     case "image":
+    case "video":
       return 1;
     case "line":
     case "text":
@@ -571,28 +704,31 @@ function defaultLayerZIndex(layer: CardLayer): number {
 function renderCardBody(
   card: Card,
   theme: ResolvedTheme,
-  bodyNumber: number | undefined,
-  assetCssUrls: Readonly<Record<string, string>>
+  bodyNumber: ResolvedBodyNumber | undefined,
+  assetCssUrls: Readonly<Record<string, string>>,
+  semanticItems: readonly SemanticItemManifestEntry[]
 ): string {
   const backdrop = theme.preset.usesSurface ? theme.preset.textBackdrop : textBackdrop(theme);
   const emphasisBackdrop = theme.accent;
+  const bodyNumberStyle = buildBodyNumberInlineStyle(theme.bodyNumberStyle);
 
   const parts = [
     renderBadge(card, theme, assetCssUrls),
-    card.type === "body" && bodyNumber !== undefined
-      ? `<div class="big-number">${String(bodyNumber).padStart(2, "0")}</div>`
+    bodyNumber?.visible && bodyNumber.text !== undefined
+      ? `<div class="big-number" data-slot="body-number" data-semantic-item-id="${createSemanticItemId(card.index, "body-number")}" data-background-color="${backdrop}"${bodyNumberStyle ? ` style="${escapeHtml(bodyNumberStyle)}"` : ""}>${escapeHtml(bodyNumber.text)}</div>`
       : "",
-    `<h1 data-slot="title" data-background-color="${backdrop}">${renderRichText(card.title)}</h1>`,
+    theme.layout.titlePlacement?.mode === "card-y"
+      ? `<h1 class="title-placeholder" aria-hidden="true">${renderRichText(card.title)}</h1>`
+      : `<h1 data-slot="title" data-semantic-item-id="${createSemanticItemId(card.index, "title")}" data-background-color="${backdrop}">${renderRichText(card.title)}</h1>`,
     card.subtitle
-      ? `<div class="subtitle" data-slot="subtitle" data-background-color="${backdrop}">${renderRichText(card.subtitle)}</div>`
+      ? `<div class="subtitle" data-slot="subtitle" data-semantic-item-id="${createSemanticItemId(card.index, "subtitle")}" data-background-color="${backdrop}">${renderRichText(card.subtitle)}</div>`
       : "",
-    renderParagraphs(card, backdrop),
-    renderBullets(card, backdrop),
+    renderBodyContent(card, backdrop, theme, semanticItems),
     card.emphasis
-      ? `<div class="emphasis" data-slot="emphasis" data-background-color="${emphasisBackdrop}">${renderPlainText(card.emphasis)}</div>`
+      ? `<div class="emphasis" data-slot="emphasis" data-semantic-item-id="${createSemanticItemId(card.index, "emphasis")}" data-background-color="${emphasisBackdrop}">${renderPlainText(card.emphasis)}</div>`
       : "",
     card.source
-      ? `<div class="source" data-slot="source" data-background-color="${backdrop}">출처: ${escapeHtml(card.source)}</div>`
+      ? `<div class="source" data-slot="source" data-semantic-item-id="${createSemanticItemId(card.index, "source")}" data-background-color="${backdrop}">출처: ${escapeHtml(card.source)}</div>`
       : ""
   ].join("");
 
@@ -607,59 +743,75 @@ function renderBadge(
   const imageId = theme.badge.imageId;
   const imageSource = imageId ? assetCssUrls[imageId] : undefined;
   if (imageId && imageSource) {
-    return `<img class="badge-image" data-slot="badge-image" src="${escapeAttribute(imageSource)}" alt="" style="height: ${theme.badge.imageHeight}px;" />`;
+    return `<img class="badge-image" data-slot="badge-image" data-semantic-item-id="${createSemanticItemId(card.index, "badge-image")}" src="${escapeAttribute(imageSource)}" alt="" style="height: ${theme.badge.imageHeight}px;${escapeHtml(buildSemanticSlotStyle(theme.layout.semanticSlots.badge, "badge", theme))}" />`;
   }
 
   if (!card.badge) {
     return "";
   }
 
-  return `<span class="badge" data-slot="badge" data-background-color="${badgeMetricBackdrop(theme)}">${escapeHtml(card.badge)}</span>`;
+  return `<span class="badge" data-slot="badge" data-semantic-item-id="${createSemanticItemId(card.index, "badge-text")}" data-background-color="${badgeMetricBackdrop(theme)}" style="${escapeHtml(buildSemanticSlotStyle(theme.layout.semanticSlots.badge, "badge", theme))}">${escapeHtml(card.badge)}</span>`;
 }
 
-function computeBodyNumber(deck: Deck, card: Card): number | undefined {
-  if (card.type !== "body") {
-    return undefined;
+function renderBodyContent(
+  card: Card,
+  backdrop: string,
+  theme: ResolvedTheme,
+  semanticItems: readonly SemanticItemManifestEntry[]
+): string {
+  const paragraphs = renderParagraphs(card, backdrop, semanticItems);
+  const bullets = renderBullets(card, backdrop, semanticItems);
+  if (!paragraphs && !bullets) {
+    return "";
   }
 
-  let count = 0;
-  for (const candidate of deck.cards) {
-    if (candidate.type === "body") {
-      count += 1;
-    }
-
-    if (candidate.index === card.index) {
-      return count;
-    }
-  }
-
-  return count;
+  return `<div class="body-slot" data-slot="body" data-background-color="${backdrop}" style="${escapeHtml(buildSemanticSlotStyle(theme.layout.semanticSlots.body, "body", theme))}">${paragraphs}${bullets}</div>`;
 }
 
-function renderParagraphs(card: Card, backdrop: string): string {
+function renderParagraphs(
+  card: Card,
+  backdrop: string,
+  semanticItems: readonly SemanticItemManifestEntry[]
+): string {
   if (card.paragraphs.length === 0) {
     return "";
   }
 
   return `<div class="paragraphs">${card.paragraphs
     .map(
-      (paragraph) =>
-        `<p data-slot="paragraph" data-background-color="${backdrop}">${renderRichText(paragraph)}</p>`
+      (paragraph, index) =>
+        `<p data-slot="paragraph" data-semantic-item-id="${semanticItemIdForContent(semanticItems, "paragraph", index, card.index)}" data-background-color="${backdrop}">${renderRichText(paragraph)}</p>`
     )
     .join("")}</div>`;
 }
 
-function renderBullets(card: Card, backdrop: string): string {
+function renderBullets(
+  card: Card,
+  backdrop: string,
+  semanticItems: readonly SemanticItemManifestEntry[]
+): string {
   if (card.bullets.length === 0) {
     return "";
   }
 
   return `<ul class="bullets">${card.bullets
     .map(
-      (bullet) =>
-        `<li data-slot="bullet" data-background-color="${backdrop}">${renderRichText(bullet)}</li>`
+      (bullet, index) =>
+        `<li data-slot="bullet" data-semantic-item-id="${semanticItemIdForContent(semanticItems, "bullet", index, card.index)}" data-background-color="${backdrop}">${renderRichText(bullet)}</li>`
     )
     .join("")}</ul>`;
+}
+
+function semanticItemIdForContent(
+  semanticItems: readonly SemanticItemManifestEntry[],
+  kind: "paragraph" | "bullet",
+  contentIndex: number,
+  cardIndex: number
+): string {
+  return (
+    semanticItems.find((item) => item.kind === kind && item.contentIndex === contentIndex)?.id ??
+    createSemanticItemId(cardIndex, kind, `${kind === "paragraph" ? "p" : "b"}-${contentIndex + 1}`)
+  );
 }
 
 function textBackdrop(theme: ResolvedTheme): string {
@@ -742,7 +894,7 @@ function normalizeBadge(badge: CardBadgeOverride | undefined): ResolvedBadge {
     shape: badge?.shape === "pill" || badge?.shape === "rect" || badge?.shape === "none" ? badge.shape : undefined,
     imageId: imageId && imageId.length > 0 ? imageId : undefined,
     imageHeight: Math.round(clampRange(badge?.imageHeight ?? 96, 40, 200)),
-    textColor: normalizeHexColor(badge?.textColor)
+    textColor: preserveHexColor(badge?.textColor)
   };
 }
 
@@ -753,7 +905,7 @@ function badgeMetricBackdrop(theme: ResolvedTheme): string {
     return textBackdrop(theme);
   }
 
-  return badge.background;
+  return preserveHexColor(badge.background) ?? textBackdrop(theme);
 }
 
 function normalizeNextHint(nextHint: NextHintConfig | undefined): ResolvedNextHint {
@@ -791,6 +943,7 @@ function normalizeTypography(
   hasCustomFont: boolean
 ): ResolvedTypography {
   return {
+    color: normalizeHexColor(typography?.color),
     fontFamily: hasCustomFont
       ? "\"Cardnews User Font\", \"Pretendard\", \"Malgun Gothic\", sans-serif"
       : undefined,
@@ -805,8 +958,52 @@ function normalizeTypography(
     weight:
       typography?.weight === undefined
         ? undefined
-        : Math.round(clampRange(typography.weight, 100, 950))
+        : Math.round(clampRange(typography.weight, 100, 950)),
+    textOpacity: clampRange(typography?.textOpacity ?? 100, 0, 100)
   };
+}
+
+function buildBodyNumberInlineStyle(style: BodyNumberTextStyle | undefined): string {
+  if (!style) return "";
+  const declarations: string[] = [];
+  const color = preserveHexColor(style.color);
+  if (color) declarations.push(`color: ${color}`);
+  const fontFamily = normalizeInlineFontFamily(style.fontFamily);
+  if (fontFamily) declarations.push(`font-family: ${fontFamily}`);
+  if (style.fontSize !== undefined && Number.isFinite(style.fontSize)) {
+    declarations.push(`font-size: ${clampRange(style.fontSize, 8, 400).toFixed(2)}px`);
+  }
+  if (style.fontWeight !== undefined && Number.isFinite(style.fontWeight)) {
+    declarations.push(`font-weight: ${Math.round(clampRange(style.fontWeight, 100, 950))}`);
+  }
+  if (style.italic !== undefined) {
+    declarations.push(`font-style: ${style.italic ? "italic" : "normal"}`);
+  }
+  if (style.lineHeight !== undefined && Number.isFinite(style.lineHeight)) {
+    declarations.push(`line-height: ${clampRange(style.lineHeight, 0.7, 3).toFixed(3)}`);
+  }
+  if (style.letterSpacing !== undefined && Number.isFinite(style.letterSpacing)) {
+    declarations.push(`letter-spacing: ${clampRange(style.letterSpacing, -0.2, 1).toFixed(3)}em`);
+  }
+  const textAlign = style.textAlign ?? style.align;
+  if (textAlign === "left" || textAlign === "center" || textAlign === "right") {
+    declarations.push(`text-align: ${textAlign}`);
+  }
+  if (style.textOpacity !== undefined && Number.isFinite(style.textOpacity)) {
+    declarations.push(`opacity: ${(clampRange(style.textOpacity, 0, 100) / 100).toFixed(3)}`);
+  }
+  if (style.zIndex !== undefined && Number.isFinite(style.zIndex)) {
+    declarations.push(`z-index: ${Math.round(clampRange(style.zIndex, 0, 1000))}`);
+  }
+  return declarations.join("; ");
+}
+
+function normalizeInlineFontFamily(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^[\p{L}\p{N}\s"',._()-]+$/u.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly CardLayer[] {
@@ -836,7 +1033,8 @@ function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly Car
           ...(layer.fontSize !== undefined ? { fontSize: clampRange(layer.fontSize, 10, 144) } : {}),
           ...(layer.fontWeight !== undefined ? { fontWeight: clampRange(layer.fontWeight, 100, 950) } : {}),
           ...(layer.italic !== undefined ? { italic: layer.italic } : {}),
-          ...(layer.align ? { align: layer.align } : {})
+          ...(layer.align ? { align: layer.align } : {}),
+          ...(layer.textOpacity !== undefined ? { textOpacity: clampRange(layer.textOpacity, 0, 100) } : {})
         };
       case "shape":
         return {
@@ -855,17 +1053,113 @@ function normalizeLayers(layers: readonly CardLayer[] | undefined): readonly Car
           backgroundId: layer.backgroundId,
           ...(layer.objectFit ? { objectFit: layer.objectFit } : {})
         };
+      case "video":
+        return normalizeVideoLayer({ ...layer, ...base }, undefined);
     }
   });
 }
 
-function normalizeLayout(layout: CardLayoutOverride | undefined): CardLayoutOverride {
+function normalizeLayout(override: CardOverride | undefined): ResolvedLayout {
+  const layout = override?.layout;
+  const titlePlacement = layout?.titlePlacement;
   return {
     align: layout?.align === "center" ? "center" : "left",
     offsetY: clampRange(layout?.offsetY ?? 0, -20, 20),
     gapBadge: clampRange(layout?.gapBadge ?? 1, 0.5, 2),
-    gapSubtitle: clampRange(layout?.gapSubtitle ?? 1, 0.5, 2)
+    gapSubtitle: clampRange(layout?.gapSubtitle ?? 1, 0.5, 2),
+    ...(titlePlacement?.mode === "card-y"
+      ? { titlePlacement: { mode: "card-y" as const, y: clampRange(titlePlacement.y, 0, 100) } }
+      : titlePlacement?.mode === "flow"
+        ? { titlePlacement: { mode: "flow" as const } }
+        : {}),
+    semanticSlots: {
+      badge: normalizeSemanticSlotPlacement(override?.semanticSlots?.badge),
+      body: normalizeSemanticSlotPlacement(override?.semanticSlots?.body),
+      footer: normalizeSemanticSlotPlacement(override?.semanticSlots?.footer),
+      subtitle: normalizeSemanticSlotPlacement(override?.semanticSlots?.subtitle),
+      title: normalizeSemanticSlotPlacement(override?.semanticSlots?.title)
+    }
   };
+}
+
+function buildSemanticSlotStyle(
+  placement: ReturnType<typeof normalizeSemanticSlotPlacement>,
+  slot: "badge" | "body" | "footer" | "subtitle" | "title",
+  theme: ResolvedTheme
+): string {
+  if (placement.mode !== "card") {
+    return "";
+  }
+
+  const width = placement.width ?? defaultSemanticSlotSize(slot).width;
+  const height = placement.height ?? defaultSemanticSlotSize(slot).height;
+  const left =
+    placement.anchor === "top-right"
+      ? `calc(${placement.x.toFixed(3)}% - ${width.toFixed(3)}%)`
+      : placement.anchor === "top-center"
+        ? `calc(${placement.x.toFixed(3)}% - ${(width / 2).toFixed(3)}%)`
+        : `${placement.x.toFixed(3)}%`;
+  const textAlign = placement.anchor === "top-right" ? "right" : placement.anchor === "top-center" ? "center" : theme.layout.align;
+
+  return ` position: absolute; left: ${left}; top: ${placement.y.toFixed(3)}%; width: ${width.toFixed(3)}%; min-height: ${height.toFixed(3)}%; text-align: ${textAlign};`;
+}
+
+function buildSemanticItemPlacementCss(
+  placements: CardOverride["semanticItemPlacements"] | undefined
+): string {
+  return Object.entries(placements ?? {})
+    .map(([itemId, rawPlacement]) => {
+      if (!rawPlacement) return "";
+      const placement = normalizeSemanticItemPlacement(rawPlacement);
+      if (placement.mode !== "card") return "";
+      const leftPercent =
+        placement.anchor === "top-right"
+          ? placement.x - placement.width
+          : placement.anchor === "top-center"
+            ? placement.x - (placement.width / 2)
+            : placement.x;
+      const textAlign =
+        placement.anchor === "top-right"
+          ? "right"
+          : placement.anchor === "top-center"
+            ? "center"
+            : "left";
+      return `[data-semantic-item-id="${escapeAttribute(itemId)}"] {
+        --editor-card-left: ${leftPercent.toFixed(3)};
+        --editor-card-top: ${placement.y.toFixed(3)};
+        --editor-card-width: ${placement.width.toFixed(3)};
+        --editor-card-height: ${placement.height.toFixed(3)};
+        position: absolute !important;
+        left: 0 !important;
+        top: 0 !important;
+        width: ${placement.width.toFixed(3)}% !important;
+        height: ${placement.height.toFixed(3)}% !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        text-align: ${textAlign} !important;
+        box-sizing: border-box !important;
+        transform: none !important;
+      }`;
+    })
+    .join("\n");
+}
+
+function defaultSemanticSlotSize(slot: "badge" | "body" | "footer" | "subtitle" | "title"): {
+  readonly width: number;
+  readonly height: number;
+} {
+  switch (slot) {
+    case "badge":
+      return { width: 32, height: 7 };
+    case "body":
+      return { width: 80, height: 24 };
+    case "footer":
+      return { width: 18, height: 5 };
+    case "subtitle":
+      return { width: 80, height: 8 };
+    case "title":
+      return { width: 80, height: 14 };
+  }
 }
 
 function resolveBulletShape(shape: StylePreset["bulletShape"]): {
@@ -960,14 +1254,6 @@ function resolveEyebrowStyle(
   };
 }
 
-function normalizeHexColor(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : undefined;
-}
-
 function clamp01(value: number): number {
   if (Number.isNaN(value)) {
     return 0;
@@ -982,6 +1268,10 @@ function clampRange(value: number, minimum: number, maximum: number): number {
   }
 
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function preserveHexColor(value: string | undefined): string | undefined {
+  return value && isHexColor(value) ? value : undefined;
 }
 
 function withAlpha(hexColor: string, alpha: number): string {

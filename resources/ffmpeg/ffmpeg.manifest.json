@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "binaryPresent": true,
+  "trustStatus": "trusted-pinned-lgpl-build",
+  "executableRelativePath": "ffmpeg/ffmpeg.exe",
+  "sha256": "ba0983c7034c56544be56564969dccbed401012bc849f68b4da40dffe34a5560",
+  "probeRelativePath": "ffmpeg/ffprobe.exe",
+  "probeSha256": "08a95b336dd60ac3428a8648dd5ce284607db21b21c1191686cf5965386060e4",
+  "versionPattern": "^ffmpeg version N-125628-ga5e6c0175a-20260715\\b",
+  "requiredEncoders": ["h264_mf", "aac"],
+  "forbiddenBuildConfigurationTokens": ["--enable-gpl", "--enable-nonfree", "--enable-libx264"],
+  "licenseNotice": "BtbN FFmpeg LGPL build; see bundled LICENSE.txt and THIRD_PARTY_NOTICES.md.",
+  "sourceOfferUrl": "https://github.com/BtbN/FFmpeg-Builds/releases",
+  "buildRecipeUrl": "https://github.com/BtbN/FFmpeg-Builds",
+  "provenance": {
+    "reviewedBy": "Codex release gate",
+    "reviewedAt": "2026-07-16",
+    "upstreamVersion": "N-125628-ga5e6c0175a-20260715",
+    "downloadUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
+    "archiveSha256": "5ecae456b0d4ae92b27ea2e7bf3a623fa5fb3a477db850955eb456a0c012a0b3",
+    "notes": "Static LGPL build. Build configuration and required encoders were verified before packaging."
+  }
+}
